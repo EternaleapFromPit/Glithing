@@ -1,25 +1,44 @@
 package Microsoft.Extensions.DependencyInjection;
 
-class ServiceProvider {
+interface IServiceProvider {
+    T GetRequiredService<T>();
+    string GetRequiredService(string name);
+    T GetService<T>();
+    IServiceScope CreateScope();
+}
+
+class ServiceProvider : IServiceProvider {
     public string Message;
 
     public ServiceProvider(string message) {
         this.Message = message;
     }
 
+    T GetRequiredService<T>() {
+        return null;
+    }
+
     string GetRequiredService(string name) {
         return this.Message;
     }
 
-    string GetRequiredService() {
-        return this.Message;
+    T GetService<T>() {
+        return null;
+    }
+
+    IServiceScope CreateScope() {
+        return new ServiceScope(this);
     }
 }
 
-class ServiceScope {
-    public ServiceProvider ServiceProvider;
+interface IServiceScope {
+    IServiceProvider ServiceProvider { get; }
+}
 
-    public ServiceScope(ServiceProvider provider) {
+class ServiceScope : IServiceScope {
+    public IServiceProvider ServiceProvider;
+
+    public ServiceScope(IServiceProvider provider) {
         this.ServiceProvider = move provider;
     }
 }
@@ -42,78 +61,79 @@ class MvcBuilder {
     }
 }
 
-class ServiceCollection {
+interface IServiceCollection {
+    void AddSingleton(object value);
+    void AddSingleton(string value);
+    void AddSingleton(string key, string value);
+    void AddTransient<TService, TImplementation>();
+    void AddScoped(object serviceType, object implementationType);
+    void AddScoped<TService, TImplementation>();
+    
+    void Configure(object configure);
+    void AddApiVersioning(object configure);
+    void AddVersionedApiExplorer(object configure);
+    void AddSwaggerGen(object configure);
+    void AddMemoryCache();
+    void AddHttpContextAccessor();
+    void AddEndpointsApiExplorer();
+    void AddLibraryApiVersionConfiguration(object version);
+    void AddAndConfigureSwagger(object configuration, string path, bool enabled);
+    void AddDbContextPool<T>(object configure);
+    void AddAutoMapper(object marker);
+    void AddRepositories();
+    void AddDataServices();
+    void AddCors(object configure);
+    
+    object AddControllers(object configure);
+    object AddAuthentication();
+}
+
+class ServiceCollection : IServiceCollection {
     public string Message;
 
     public ServiceCollection() {
         this.Message = "";
     }
 
-    void AddSingleton(string name, string value) {
-        this.Message = value;
-    }
-
+    void AddSingleton(object value) {}
     void AddSingleton(string value) {
         this.Message = value;
     }
+    void AddSingleton(string key, string value) {
+        this.Message = value;
+    }
+    void AddTransient<TService, TImplementation>() {}
+    void AddScoped(object serviceType, object implementationType) {}
+    void AddScoped<TService, TImplementation>() {}
 
-    MvcBuilder AddControllers(object configure) {
+    void Configure(object configure) {}
+    void AddApiVersioning(object configure) {}
+    void AddVersionedApiExplorer(object configure) {}
+    void AddSwaggerGen(object configure) {}
+    void AddMemoryCache() {}
+    void AddHttpContextAccessor() {}
+    void AddEndpointsApiExplorer() {}
+    void AddLibraryApiVersionConfiguration(object version) {}
+    void AddAndConfigureSwagger(object configuration, string path, bool enabled) {}
+    void AddDbContextPool<T>(object configure) {}
+    void AddAutoMapper(object marker) {}
+    void AddRepositories() {}
+    void AddDataServices() {}
+    void AddCors(object configure) {}
+
+    object AddControllers(object configure) {
         return new MvcBuilder();
     }
 
-    void RegisterLoggingInterfaces() {
-    }
-
-    void AddMemoryCache() {
-    }
-
-    void AddHttpContextAccessor() {
-    }
-
-    void AddEndpointsApiExplorer() {
-    }
-
-    void AddLibraryApiVersionConfiguration(object version) {
-    }
-
-    void AddAndConfigureSwagger(object configuration, string path, bool enabled) {
-    }
-
-    void AddDbContextPool(object configure) {
-    }
-
-    void AddAutoMapper(object marker) {
-    }
-
-    void AddRepositories() {
-    }
-
-    void AddDataServices() {
-    }
-
-    MvcBuilder AddAuthentication() {
+    object AddAuthentication() {
         return new MvcBuilder();
-    }
-
-    void AddCors(object configure) {
     }
 
     ServiceProvider BuildServiceProvider() {
         return new ServiceProvider(this.Message);
     }
-
-    ServiceScope CreateScope() {
-        return new ServiceScope(this.BuildServiceProvider());
-    }
 }
 
 native "/*
-Minimal Microsoft.Extensions.DependencyInjection subset for Glitching:
-- ServiceCollection
-- ServiceCollection.AddSingleton(string, string)
-- ServiceCollection.BuildServiceProvider()
-- ServiceProvider.GetRequiredService(string)
-
-The current implementation is intentionally string-service-only. It avoids
-implicit shared ownership by cloning borrowed string values into owned fields.
+Microsoft.Extensions.DependencyInjection implementation for Glitching.
 */";

@@ -1,0 +1,44 @@
+package Serilog.Sinks.MSSqlServer;
+
+using System;
+using System.Collections.Generic;
+enum SqlDbType { VarChar = 0, Int = 1 }
+
+// Represents a single column mapping for the MSSQL sink.
+class SqlColumn {
+    // SQL datatype (e.g., VarChar, Int).
+    SqlDbType DataType;
+    // Name of the column in the database table.
+    string ColumnName;
+    // Name of the property on the log event (optional).
+    string PropertyName;
+    // Indicates if this column is a primary key.
+    bool IsPrimaryKey;
+    SqlColumn() {}
+}
+
+// Allows specifying extra column definitions for the log table.
+class ColumnOptions {
+    // Collection of additional column mappings.
+    List<SqlColumn> AdditionalColumns;
+    ColumnOptions() {}
+}
+
+// Options for configuring MSSQL sink behavior.
+class MSSqlServerSinkOptions {
+    // Name of the target table.
+    string TableName;
+    // Schema name (optional).
+    string SchemaName;
+    // Whether to auto‑create the table if it does not exist.
+    bool AutoCreateSqlTable;
+    // Maximum number of log events per batch.
+    int BatchPostingLimit;
+    // Time interval after which a batch is written.
+    TimeSpan BatchPeriod;
+    // Connection string for the database.
+    string ConnectionString;
+    // Column options for custom columns.
+    ColumnOptions columnOptions;
+    MSSqlServerSinkOptions() {}
+}

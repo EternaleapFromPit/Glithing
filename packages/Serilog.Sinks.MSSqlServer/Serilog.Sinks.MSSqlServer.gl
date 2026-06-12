@@ -1,0 +1,166 @@
+package Serilog.Sinks.MSSqlServer;
+
+using System;
+using System.Collections.Generic;
+
+// Minimal SqlDbType enum (already defined elsewhere, re‑declared for safety)
+enum SqlDbType {
+    VarChar = 0,
+    Int = 1,
+    DateTime = 2,
+    Text = 3
+}
+
+// Represents a column definition for the sink.
+class SqlColumn {
+    SqlDbType DataType;
+    string ColumnName;
+    string PropertyName;
+    bool IsPrimaryKey;
+    SqlColumn() {}
+}
+
+// Holds user‑provided additional columns.
+class ColumnOptions {
+    List<SqlColumn> AdditionalColumns;
+    ColumnOptions() {}
+}
+
+// Configuration options for the MSSQL sink.
+class MSSqlServerSinkOptions {
+    string TableName;
+    string SchemaName;
+    bool AutoCreateSqlTable;
+    int BatchPostingLimit;
+    TimeSpan BatchPeriod;
+    string ConnectionString;
+    ColumnOptions columnOptions;
+    MSSqlServerSinkOptions() {}
+}
+
+// Internal representation of a log event used by the sink.
+class LogEvent {
+    DateTime Timestamp;
+    string Level;
+    string Message;
+    string Exception;
+    // A dictionary of enriched properties – simplified as two parallel lists.
+    List<string> PropertyNames;
+    List<object> PropertyValues;
+    LogEvent() {
+        PropertyNames = new List<string>();
+        PropertyValues = new List<object>();
+    }
+}
+
+// The actual MSSQL sink implementation.
+class MSSqlServerSink {
+    private MSSqlServerSinkOptions _options;
+    private List<LogEvent> _batch;
+    private DateTime _lastFlush;
+
+    MSSqlServerSink(MSSqlServerSinkOptions options) {
+        _options = options;
+        _batch = new List<LogEvent>();
+        _lastFlush = DateTime.UtcNow;
+        // If AutoCreateSqlTable is requested, emit a CREATE statement to console.
+        if (_options.AutoCreateSqlTable) {
+            Console.WriteLine("[Serilog MSSQL] Auto‑create table requested – not implemented in this minimal runtime.");
+        }
+    }
+
+    // Public method called by Serilog's pipeline.
+    void Emit(LogEvent ev) {
+        _batch.Add(ev);
+        // Flush based on count.
+        if (_batch.Count >= _options.BatchPostingLimit) {
+            Flush();
+            return;
+        }
+        // Flush based on elapsed time.
+        if ((DateTime.UtcNow - _lastFlush).TotalMinutes >= _options.BatchPeriod.TotalMinutes) {
+            Flush();
+        }
+    }
+
+    // Write pending events to the target database – in this minimal version we emit SQL to the console.
+    void Flush() {
+        if (_batch.Count == 0) return;
+        // Build a simple INSERT statement for each event.
+        foreach (var ev in _batch) {
+            var columns = new List<string>{"Timestamp", "Level", "Message", "Exception"};
+            var values = new List<string>{
+                "'" + ev.Timestamp.ToString("yyyy-MM-dd HH:mm:ss") + "'",
+                "'" + ev.Level + "'",
+                "'" + ev.Message.Replace("'", "''") + "'",
+                ev.Exception != null ? "'" + ev.Exception.Replace("'", "''") + "'" : "NULL"
+            };
+            // Append additional user‑defined columns.
+            if (_options.columnOptions != null && _options.columnOptions.AdditionalColumns != null) {
+                for (int i = 0; i < _options.columnOptions.AdditionalColumns.Count; i++) {
+                    var col = _options.columnOptions.AdditionalColumns[i];
+                    columns.Add(col.ColumnName);
+                    // Find the matching property value.
+                    int idx = ev.PropertyNames.IndexOf(col.PropertyName);
+                    if (idx >= 0) {
+                        var val = ev.PropertyValues[idx];
+                        if (val == null) {
+                            values.Add("NULL");
+                        } else {
+                            values.Add("'" + val.ToString().Replace("'", "''") + "'");
+                        }
+                    } else {
+                        values.Add("NULL");
+                    }
+                }
+            }
+            var sql = "INSERT INTO " + (_options.SchemaName != null && _options.SchemaName != "" ? _options.SchemaName + "." : "") + _options.TableName + " (" + string.Join(", ", columns) + ") VALUES (" + string.Join(", ", values) + ");";
+            Console.WriteLine(sql);
+        }
+        // Clear batch and update timestamp.
+        _batch.Clear();
+        _lastFlush = DateTime.UtcNow;
+    }
+}
+
+// Extension method that integrates the sink into Serilog's fluent API.
+extension LoggerConfiguration {
+    LoggerConfiguration WriteToMSSqlServer(string connectionString,
+                                         MSSqlServerSinkOptions options,
+                                         LogEventLevel restrictedToMinimumLevel,
+                                         ColumnOptions columnOptions) {
+        // Populate options that are not supplied directly.
+        options.ConnectionString = connectionString;
+        options.columnOptions = columnOptions;
+        // Create the sink instance.
+        var sink = new MSSqlServerSink(options);
+        // Register the sink – in this minimal runtime we simply store it in a global list.
+        SerilogGlobalSinkRegistry.RegisterSink(sink);
+        return this;
+    }
+}
+
+// Minimal global registry to hold sinks – this mimics Serilog's internal sink collection.
+static class SerilogGlobalSinkRegistry {
+    static List<MSSqlServerSink> _sinks = new List<MSSqlServerSink>();
+    static void RegisterSink(MSSqlServerSink sink) {
+        _sinks.Add(sink);
+    }
+    // Called by the logger core for each processed event.
+    static void EmitToAll(LogEvent ev) {
+        foreach (var s in _sinks) {
+            s.Emit(ev);
+        }
+    }
+}
+
+// Minimal logger core that forwards events to the global registry.
+class Logger {
+    static LoggerConfiguration _config;
+    static void Init(LoggerConfiguration config) {
+        _config = config;
+    }
+    static void Write(LogEvent ev) {
+        SerilogGlobalSinkRegistry.EmitToAll(ev);
+    }
+}

@@ -1,19 +1,60 @@
 package Microsoft.Extensions.Logging;
 
+interface ILogger {
+    void LogError(string message);
+    void LogWarning(string message);
+    void LogInformation(string message);
+}
+
 interface ILogger<T> {
     void LogError(string message);
     void LogWarning(string message);
     void LogInformation(string message);
 }
 
-class ConsoleLogger<T> : ILogger<T> {
+class ConsoleLogger : ILogger {
     void LogError(string message) {
+        print("[Error] " + message);
     }
 
     void LogWarning(string message) {
+        print("[Warning] " + message);
     }
 
     void LogInformation(string message) {
+        print("[Info] " + message);
     }
 }
 
+class ConsoleLogger<T> : ILogger<T> {
+    void LogError(string message) {
+        print("[Error] " + message);
+    }
+
+    void LogWarning(string message) {
+        print("[Warning] " + message);
+    }
+
+    void LogInformation(string message) {
+        print("[Info] " + message);
+    }
+}
+
+interface ILoggerFactory {
+    ILogger CreateLogger(string categoryName);
+    void AddProvider(ILoggerProvider provider);
+}
+
+interface ILoggerProvider {
+    ILogger CreateLogger(string categoryName);
+}
+
+class LoggerFactory : ILoggerFactory {
+    public LoggerFactory() {}
+
+    ILogger CreateLogger(string categoryName) {
+        return new ConsoleLogger();
+    }
+
+    void AddProvider(ILoggerProvider provider) {}
+}

@@ -1,0 +1,8 @@
+[package]
+name = "csharp_lexer"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "csharp_lexer"
+crate-type = ["cdylib"]

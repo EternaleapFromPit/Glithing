@@ -3,10 +3,20 @@ use std::collections::HashMap;
 use crate::ast::*;
 use crate::lexer::{Token, TokenKind};
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct MacroDef {
+    pub(crate) name: String,
+    pub(crate) params: Vec<String>,
+    pub(crate) body: Vec<Token>,
+}
+
 pub(crate) struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     using_aliases: HashMap<String, Vec<String>>,
+    macros: HashMap<String, MacroDef>,
+    test_registrations: Vec<Stmt>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -20,6 +30,8 @@ impl Parser {
             tokens,
             pos: 0,
             using_aliases: HashMap::new(),
+            macros: HashMap::new(),
+            test_registrations: Vec::new(),
         }
     }
 
@@ -33,19 +45,86 @@ impl Parser {
         };
         self.parse_items(&mut program, Vec::new(), false)?;
         program.types = merge_type_declarations(program.types);
+
+        if !self.test_registrations.is_empty() {
+            let main_fn = program.functions.iter_mut().find(|f| f.name == "main");
+            if let Some(main_fn) = main_fn {
+                let mut new_body = self.test_registrations.clone();
+                new_body.extend(main_fn.body.clone());
+                main_fn.body = new_body;
+            } else {
+                program.functions.push(Function {
+                    namespace: Vec::new(),
+                    attributes: Vec::new(),
+                    is_async: false,
+                    name: "main".to_string(),
+                    generic_params: Vec::new(),
+                    params: vec![Param {
+                        attributes: Vec::new(),
+                        name: "args".to_string(),
+                        ty: TypeSyntax::Array(Box::new(TypeSyntax::String)),
+                        modifier: ParamModifier::None,
+                        is_params: false,
+                        default: None,
+                    }],
+                    return_type: TypeSyntax::Void,
+                    body: self.test_registrations.clone(),
+                });
+            }
+        }
+
         Ok(program)
     }
 
     fn parse_items(
         &mut self,
         program: &mut Program,
-        namespace: Vec<String>,
+        base_namespace: Vec<String>,
         stop_at_rbrace: bool,
     ) -> Result<(), String> {
+        let mut current_namespace = base_namespace.clone();
         let mut top_level_stmts = Vec::new();
         while !self.at(&TokenKind::Eof) && !(stop_at_rbrace && self.at(&TokenKind::RBrace)) {
+            if let TokenKind::Ident(ref name) = self.current().kind {
+                if self.macros.contains_key(name) {
+                    let macro_name = name.clone();
+                    self.advance();
+                    let args = self.parse_macro_args()?;
+                    let macro_def = self.macros.get(&macro_name).unwrap().clone();
+                    if args.len() != macro_def.params.len() {
+                        return Err(format!(
+                            "macro {} expected {} arguments, found {}",
+                            macro_name,
+                            macro_def.params.len(),
+                            args.len()
+                        ));
+                    }
+                    let expanded = self.expand_macro(&macro_def, &args);
+                    self.expect(TokenKind::Semi)?;
+                    if !expanded.is_empty() {
+                        let mut temp_parser = Parser {
+                            tokens: expanded,
+                            pos: 0,
+                            using_aliases: self.using_aliases.clone(),
+                            macros: self.macros.clone(),
+                            test_registrations: Vec::new(),
+                        };
+                        let stmt = temp_parser.parse_stmt()?;
+                        self.test_registrations.push(stmt);
+                        self.test_registrations.extend(temp_parser.test_registrations);
+                    }
+                    continue;
+                }
+            }
             let attributes = self.parse_attributes()?;
             let modifiers = self.parse_modifiers();
+            if self.current_ident_is("__FILE_BOUNDARY__") {
+                self.advance();
+                self.expect(TokenKind::Semi)?;
+                current_namespace = base_namespace.clone();
+                self.using_aliases.clear();
+                continue;
+            }
             if self.match_kind(&TokenKind::Package) {
                 program.package_id = Some(self.parse_qualified_name()?.join("."));
                 self.expect(TokenKind::Semi)?;
@@ -54,8 +133,10 @@ impl Parser {
                     return Err(self.error_here("expected native C string"));
                 };
                 self.advance();
-                self.expect(TokenKind::Semi)?;
+                self.match_kind(&TokenKind::Semi);
                 program.native_c.push(source);
+            } else if self.current_ident_is("macro") {
+                self.parse_macro_def()?;
             } else if self.at(&TokenKind::Using)
                 && !self.peek_is(1, &TokenKind::LParen)
                 && !self.peek_is(1, &TokenKind::Var)
@@ -67,30 +148,40 @@ impl Parser {
                 self.expect(TokenKind::Using)?;
                 self.parse_using_directive()?;
             } else if self.match_kind(&TokenKind::Namespace) {
-                let mut nested = namespace.clone();
-                nested.extend(self.parse_qualified_name()?);
+                let name = self.parse_qualified_name()?;
                 if self.match_kind(&TokenKind::Semi) {
-                    self.parse_items(program, nested, false)?;
-                    break;
+                    current_namespace = base_namespace.clone();
+                    current_namespace.extend(name);
+                } else {
+                    let mut nested = current_namespace.clone();
+                    nested.extend(name);
+                    self.expect(TokenKind::LBrace)?;
+                    self.parse_items(program, nested, true)?;
+                    self.expect(TokenKind::RBrace)?;
                 }
-                self.expect(TokenKind::LBrace)?;
-                self.parse_items(program, nested, true)?;
-                self.expect(TokenKind::RBrace)?;
+            } else if self.current_ident_is("type") {
+                self.parse_type_alias()?;
             } else if self.at(&TokenKind::Ref)
                 || self.at(&TokenKind::Struct)
                 || self.at(&TokenKind::Class)
                 || self.at(&TokenKind::Interface)
             {
-                program
-                    .types
-                    .push(self.parse_type_def(namespace.clone(), attributes)?);
+                let mut nested = Vec::new();
+                let type_def = self.parse_type_def(
+                    current_namespace.clone(),
+                    attributes,
+                    &mut nested,
+                    &mut program.native_c,
+                )?;
+                program.types.push(type_def);
+                program.types.extend(nested);
             } else if self.at(&TokenKind::Enum) {
                 program
                     .enums
-                    .push(self.parse_enum_def(namespace.clone(), attributes)?);
+                    .push(self.parse_enum_def(current_namespace.clone(), attributes)?);
             } else {
                 let checkpoint = self.pos;
-                match self.parse_function(namespace.clone(), attributes.clone(), modifiers.is_async)
+                match self.parse_function(current_namespace.clone(), attributes.clone(), modifiers.is_async)
                 {
                     Ok(function) => program.functions.push(function),
                     Err(_) => {
@@ -102,7 +193,7 @@ impl Parser {
         }
         if !top_level_stmts.is_empty() {
             program.functions.push(Function {
-                namespace,
+                namespace: base_namespace,
                 attributes: Vec::new(),
                 is_async: false,
                 name: "main".to_string(),
@@ -283,6 +374,8 @@ impl Parser {
         &mut self,
         namespace: Vec<String>,
         attributes: Vec<Attribute>,
+        nested_types: &mut Vec<TypeDef>,
+        native_c: &mut Vec<String>,
     ) -> Result<TypeDef, String> {
         let kind = if self.match_kind(&TokenKind::Ref) {
             self.expect(TokenKind::Struct)?;
@@ -318,14 +411,56 @@ impl Parser {
         let mut constructors = Vec::new();
         let mut methods = Vec::new();
         while !self.at(&TokenKind::RBrace) {
+            if let TokenKind::Ident(ref name) = self.current().kind {
+                println!("CHECK MEMBER: {}", name);
+                if self.macros.contains_key(name) {
+                    let macro_name = name.clone();
+                    self.advance();
+                    let args = self.parse_macro_args()?;
+                    let macro_def = self.macros.get(&macro_name).unwrap().clone();
+                    if args.len() != macro_def.params.len() {
+                        return Err(format!(
+                            "macro {} expected {} arguments, found {}",
+                            macro_name,
+                            macro_def.params.len(),
+                            args.len()
+                        ));
+                    }
+                    let expanded = self.expand_macro(&macro_def, &args);
+                    self.expect(TokenKind::Semi)?;
+                    if !expanded.is_empty() {
+                        let mut temp_parser = Parser {
+                            tokens: expanded,
+                            pos: 0,
+                            using_aliases: self.using_aliases.clone(),
+                            macros: self.macros.clone(),
+                            test_registrations: Vec::new(),
+                        };
+                        let stmt = temp_parser.parse_stmt()?;
+                        self.test_registrations.push(stmt);
+                        self.test_registrations.extend(temp_parser.test_registrations);
+                    }
+                    continue;
+                }
+            }
             let member_attributes = self.parse_attributes()?;
             let member_modifiers = self.parse_modifiers();
+            if self.match_kind(&TokenKind::Native) {
+                let TokenKind::String(source) = self.current().kind.clone() else {
+                    return Err(self.error_here("expected native C string"));
+                };
+                self.advance();
+                self.match_kind(&TokenKind::Semi);
+                native_c.push(source);
+                continue;
+            }
             if self.at(&TokenKind::Ref)
                 || self.at(&TokenKind::Struct)
                 || self.at(&TokenKind::Class)
                 || self.at(&TokenKind::Interface)
             {
-                let _nested = self.parse_type_def(namespace.clone(), member_attributes)?;
+                let nested = self.parse_type_def(namespace.clone(), member_attributes, nested_types, native_c)?;
+                nested_types.push(nested);
                 continue;
             }
             if self.at(&TokenKind::Enum) {
@@ -439,7 +574,18 @@ impl Parser {
         while !self.at(&TokenKind::RBrace) {
             self.parse_modifiers();
             self.expect_ident()?;
-            self.expect(TokenKind::Semi)?;
+            if self.match_kind(&TokenKind::Semi) {
+                // simple get; or set;
+            } else if self.match_kind(&TokenKind::LBrace) {
+                // getter/setter body: get { ... }
+                self.parse_block_after_lbrace()?;
+            } else if self.match_kind(&TokenKind::Arrow) {
+                // arrow body: get => expr;
+                self.parse_expr()?;
+                self.expect(TokenKind::Semi)?;
+            } else {
+                return Err(self.error_here("expected semicolon, arrow, or body for property accessor"));
+            }
         }
         self.expect(TokenKind::RBrace)?;
         Ok(())
@@ -481,7 +627,13 @@ impl Parser {
         let params = self.parse_params()?;
         self.expect(TokenKind::RParen)?;
         let generic_params = self.parse_generic_constraints(generic_params)?;
-        let body = self.parse_stmt_body()?;
+        let body = if self.match_kind(&TokenKind::Arrow) {
+            let expr = self.parse_expr()?;
+            self.expect(TokenKind::Semi)?;
+            vec![Stmt::Return(Some(expr))]
+        } else {
+            self.parse_stmt_body()?
+        };
         Ok(Function {
             namespace,
             attributes,
@@ -855,6 +1007,7 @@ impl Parser {
         }
         if matches!(self.current().kind, TokenKind::Ident(_)) {
             if let TokenKind::Ident(name) = self.current().kind.clone() {
+                println!("STMT IDENT: {}, peek1: {:?}, peek2: {:?}", name, self.tokens.get(self.pos + 1).map(|t| &t.kind), self.tokens.get(self.pos + 2).map(|t| &t.kind));
                 if self.peek_is(1, &TokenKind::Plus) && self.peek_is(2, &TokenKind::Plus) {
                     self.advance();
                     self.advance();
@@ -1542,7 +1695,35 @@ impl Parser {
                             fields,
                         })
                     }
-                    _ => Err(self.error_here("unsupported new expression")),
+                    other_ty => {
+                        let type_name = type_syntax_name(&other_ty);
+                        let args = if self.at(&TokenKind::LParen) {
+                            self.expect(TokenKind::LParen)?;
+                            self.parse_call_args_after_lparen()?
+                        } else {
+                            Vec::new()
+                        };
+                        let fields = if self.at(&TokenKind::LBrace) {
+                            if self.peek_is(1, &TokenKind::LBrace)
+                                || !matches!(
+                                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                                    Some(TokenKind::Ident(_))
+                                )
+                            {
+                                let _ = self.parse_opaque_brace_initializer()?;
+                                Vec::new()
+                            } else {
+                                self.parse_object_initializer()?
+                            }
+                        } else {
+                            Vec::new()
+                        };
+                        Ok(Expr::NewObject {
+                            type_name,
+                            args,
+                            fields,
+                        })
+                    }
                 }
             }
             TokenKind::LParen => {
@@ -2063,9 +2244,275 @@ impl Parser {
         }
     }
 
+    fn parse_macro_def(&mut self) -> Result<(), String> {
+        self.expect_ident()?; // consume "macro"
+        let name = self.expect_ident()?;
+        println!("PARSED MACRO: {}", name);
+        self.expect(TokenKind::LParen)?;
+        let mut params = Vec::new();
+        if !self.at(&TokenKind::RParen) {
+            loop {
+                params.push(self.expect_ident()?);
+                if !self.match_kind(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        self.expect(TokenKind::Arrow)?;
+
+        let mut body = Vec::new();
+        let mut paren_level = 0;
+        let mut brace_level = 0;
+        let mut bracket_level = 0;
+        loop {
+            let tok = self.current().clone();
+            match tok.kind {
+                TokenKind::LParen => paren_level += 1,
+                TokenKind::RParen => {
+                    if paren_level > 0 { paren_level -= 1; }
+                }
+                TokenKind::LBrace => brace_level += 1,
+                TokenKind::RBrace => {
+                    if brace_level > 0 { brace_level -= 1; }
+                }
+                TokenKind::LBracket => bracket_level += 1,
+                TokenKind::RBracket => {
+                    if bracket_level > 0 { bracket_level -= 1; }
+                }
+                TokenKind::Semi => {
+                    if paren_level == 0 && brace_level == 0 && bracket_level == 0 {
+                        self.advance(); // consume the Semi
+                        break;
+                    }
+                }
+                TokenKind::Eof => {
+                    return Err(self.error_here("unexpected EOF in macro body"));
+                }
+                _ => {}
+            }
+            body.push(tok);
+            self.advance();
+        }
+
+        self.macros.insert(name.clone(), MacroDef {
+            name,
+            params,
+            body,
+        });
+        Ok(())
+    }
+
+    fn parse_macro_args(&mut self) -> Result<Vec<Vec<Token>>, String> {
+        self.expect(TokenKind::LParen)?;
+        let mut args = Vec::new();
+        if self.match_kind(&TokenKind::RParen) {
+            return Ok(args);
+        }
+        loop {
+            let mut arg_tokens = Vec::new();
+            let mut paren_level = 0;
+            let mut brace_level = 0;
+            let mut bracket_level = 0;
+            loop {
+                let tok = self.current().clone();
+                match tok.kind {
+                    TokenKind::LParen => paren_level += 1,
+                    TokenKind::RParen => {
+                        if paren_level == 0 && brace_level == 0 && bracket_level == 0 {
+                            break;
+                        }
+                        paren_level -= 1;
+                    }
+                    TokenKind::LBrace => brace_level += 1,
+                    TokenKind::RBrace => {
+                        if brace_level == 0 && paren_level == 0 && bracket_level == 0 {
+                            break;
+                        }
+                        brace_level -= 1;
+                    }
+                    TokenKind::LBracket => bracket_level += 1,
+                    TokenKind::RBracket => {
+                        if bracket_level == 0 && paren_level == 0 && brace_level == 0 {
+                            break;
+                        }
+                        bracket_level -= 1;
+                    }
+                    TokenKind::Comma => {
+                        if paren_level == 0 && brace_level == 0 && bracket_level == 0 {
+                            break;
+                        }
+                    }
+                    TokenKind::Eof => {
+                        return Err(self.error_here("unexpected EOF in macro arguments"));
+                    }
+                    _ => {}
+                }
+                arg_tokens.push(tok);
+                self.advance();
+            }
+            args.push(arg_tokens);
+            if self.match_kind(&TokenKind::RParen) {
+                break;
+            }
+            self.expect(TokenKind::Comma)?;
+        }
+        Ok(args)
+    }
+
+    fn expand_macro(&self, def: &MacroDef, args: &[Vec<Token>]) -> Vec<Token> {
+        let mut expanded = Vec::new();
+        let mut i = 0;
+        while i < def.body.len() {
+            if def.body[i].kind == TokenKind::Hash {
+                if i + 1 < def.body.len() {
+                    if let TokenKind::Ident(param_name) = &def.body[i + 1].kind {
+                        if let Some(param_idx) = def.params.iter().position(|p| p == param_name) {
+                            let arg_tokens = &args[param_idx];
+                            let mut arg_str = String::new();
+                            for (t_idx, tok) in arg_tokens.iter().enumerate() {
+                                if t_idx > 0 {
+                                    arg_str.push(' ');
+                                }
+                                arg_str.push_str(&token_to_string(tok));
+                            }
+                            expanded.push(Token {
+                                kind: TokenKind::String(arg_str),
+                                line: def.body[i].line,
+                                col: def.body[i].col,
+                            });
+                            i += 2;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            if let TokenKind::Ident(ref name) = def.body[i].kind {
+                if let Some(param_idx) = def.params.iter().position(|p| p == name) {
+                    let arg_tokens = &args[param_idx];
+                    for tok in arg_tokens {
+                        let mut replaced_tok = tok.clone();
+                        replaced_tok.line = def.body[i].line;
+                        replaced_tok.col = def.body[i].col;
+                        expanded.push(replaced_tok);
+                    }
+                    i += 1;
+                    continue;
+                }
+            }
+
+            expanded.push(def.body[i].clone());
+            i += 1;
+        }
+
+        if !expanded.is_empty() && expanded.last().unwrap().kind != TokenKind::Semi {
+            let last = expanded.last().unwrap();
+            expanded.push(Token {
+                kind: TokenKind::Semi,
+                line: last.line,
+                col: last.col + 1,
+            });
+        }
+
+        expanded
+    }
+
+    fn parse_type_alias(&mut self) -> Result<(), String> {
+        self.expect_ident()?; // consume "type"
+        let _name = if self.match_kind(&TokenKind::Borrow) {
+            "borrow".to_string()
+        } else {
+            self.expect_ident()?
+        };
+        let _generic_params = self.parse_generic_params()?;
+        self.expect(TokenKind::Eq)?;
+        let _target_ty = self.parse_type_syntax()?;
+        self.expect(TokenKind::Semi)?;
+        Ok(())
+    }
+
     fn error_here(&self, message: &str) -> String {
         let token = self.current();
         format!("{}:{}: {message}", token.line, token.col)
+    }
+}
+
+fn token_to_string(tok: &Token) -> String {
+    match &tok.kind {
+        TokenKind::Fn => "fn".to_string(),
+        TokenKind::Let => "let".to_string(),
+        TokenKind::Var => "var".to_string(),
+        TokenKind::Package => "package".to_string(),
+        TokenKind::Native => "native".to_string(),
+        TokenKind::Namespace => "namespace".to_string(),
+        TokenKind::Using => "using".to_string(),
+        TokenKind::Async => "async".to_string(),
+        TokenKind::Static => "static".to_string(),
+        TokenKind::Const => "const".to_string(),
+        TokenKind::Readonly => "readonly".to_string(),
+        TokenKind::Mut => "mut".to_string(),
+        TokenKind::New => "new".to_string(),
+        TokenKind::Ref => "ref".to_string(),
+        TokenKind::Struct => "struct".to_string(),
+        TokenKind::Class => "class".to_string(),
+        TokenKind::Interface => "interface".to_string(),
+        TokenKind::Enum => "enum".to_string(),
+        TokenKind::Public => "public".to_string(),
+        TokenKind::Borrow => "borrow".to_string(),
+        TokenKind::Move => "move".to_string(),
+        TokenKind::Print => "print".to_string(),
+        TokenKind::Return => "return".to_string(),
+        TokenKind::Throw => "throw".to_string(),
+        TokenKind::If => "if".to_string(),
+        TokenKind::Else => "else".to_string(),
+        TokenKind::Try => "try".to_string(),
+        TokenKind::Catch => "catch".to_string(),
+        TokenKind::Finally => "finally".to_string(),
+        TokenKind::Switch => "switch".to_string(),
+        TokenKind::Case => "case".to_string(),
+        TokenKind::Default => "default".to_string(),
+        TokenKind::Break => "break".to_string(),
+        TokenKind::Continue => "continue".to_string(),
+        TokenKind::While => "while".to_string(),
+        TokenKind::For => "for".to_string(),
+        TokenKind::Foreach => "foreach".to_string(),
+        TokenKind::In => "in".to_string(),
+        TokenKind::Await => "await".to_string(),
+        TokenKind::Bool(b) => b.to_string(),
+        TokenKind::Null => "null".to_string(),
+        TokenKind::Ident(s) => s.clone(),
+        TokenKind::Int(i) => i.to_string(),
+        TokenKind::Float(f) => f.to_string(),
+        TokenKind::String(s) => format!("\"{}\"", s),
+        TokenKind::LParen => "(".to_string(),
+        TokenKind::RParen => ")".to_string(),
+        TokenKind::LBrace => "{".to_string(),
+        TokenKind::RBrace => "}".to_string(),
+        TokenKind::LBracket => "[".to_string(),
+        TokenKind::RBracket => "]".to_string(),
+        TokenKind::Question => "?".to_string(),
+        TokenKind::Eq => "=".to_string(),
+        TokenKind::EqEq => "==".to_string(),
+        TokenKind::Bang => "!".to_string(),
+        TokenKind::BangEq => "!=".to_string(),
+        TokenKind::Arrow => "=>".to_string(),
+        TokenKind::Semi => ";".to_string(),
+        TokenKind::Colon => ":".to_string(),
+        TokenKind::Plus => "+".to_string(),
+        TokenKind::Minus => "-".to_string(),
+        TokenKind::Star => "*".to_string(),
+        TokenKind::AmpAmp => "&&".to_string(),
+        TokenKind::Pipe => "|".to_string(),
+        TokenKind::PipePipe => "||".to_string(),
+        TokenKind::Comma => ",".to_string(),
+        TokenKind::Dot => ".".to_string(),
+        TokenKind::Less => "<".to_string(),
+        TokenKind::LessEq => "<=".to_string(),
+        TokenKind::Greater => ">".to_string(),
+        TokenKind::GreaterEq => ">=".to_string(),
+        TokenKind::Eof => "".to_string(),
+        TokenKind::Hash => "#".to_string(),
     }
 }
 

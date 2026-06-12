@@ -1,0 +1,11 @@
+// tests/xunit_memory/ownership_leak.gl
+import System.XUnit;
+import System.Ownership;
+
+public class OwnershipLeakTests {
+    // This test intentionally leaks an Rc by never freeing it
+    XUNIT_FACT(OwnershipLeakTests, IntentionalLeak);
+    public void IntentionalLeak() {
+        var leaked = new Rc<int>(999); // no make_owned, never freed
+    }
+}

@@ -1,0 +1,25 @@
+// System.LeakDetector.gl – Simple leak‑detector interop for Glang tests
+
+package System.LeakDetector;
+
+// Native functions implemented in C (see leak_detector.c)
+extern void LeakDetector_Reset();
+extern uint LeakDetector_GetMallocCount();
+extern uint LeakDetector_GetFreeCount();
+extern bool LeakDetector_HasLeaks();
+
+public static class LeakDetector {
+    // Reset allocation counters before a test
+    public static void Reset() {
+        LeakDetector_Reset();
+    }
+
+    // Total number of allocations performed since last reset
+    public static uint AllocationCount => LeakDetector_GetMallocCount();
+
+    // Total number of frees performed since last reset
+    public static uint FreeCount => LeakDetector_GetFreeCount();
+
+    // True if any allocation was not freed
+    public static bool HasLeaks => LeakDetector_HasLeaks();
+}

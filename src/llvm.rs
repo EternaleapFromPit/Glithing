@@ -192,6 +192,9 @@ impl LlvmEmitter {
         }
         emitter.emit_drop_glue();
         for ty in &program.types {
+            if ty.kind == TypeKind::Interface {
+                continue;
+            }
             for constructor in &ty.constructors {
                 emitter.emit_typed_function(constructor)?;
             }

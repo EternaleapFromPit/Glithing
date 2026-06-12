@@ -1,5 +1,7 @@
 package AutoMapper;
 
+using System.Collections.Generic;
+
 interface IMapper {
     T Map<T>(object source);
 }
@@ -10,8 +12,64 @@ class Mapper : IMapper {
     }
 }
 
-class Profile {
-    void CreateMap<TSource, TDestination>() {
+interface IMemberConfigurationExpression {
+    void MapFrom(object source);
+    void Ignore();
+}
+
+class MemberConfigurationExpression : IMemberConfigurationExpression {
+    void MapFrom(object source) {}
+    void Ignore() {}
+}
+
+interface IMappingExpression<TSource, TDestination> {
+    IMappingExpression<TSource, TDestination> ReverseMap();
+    IMappingExpression<TSource, TDestination> ForMember(object dest, object opt);
+    IMappingExpression<TSource, TDestination> IgnoreAllMembers();
+}
+
+class MappingExpression<TSource, TDestination> : IMappingExpression<TSource, TDestination> {
+    IMappingExpression<TSource, TDestination> ReverseMap() {
+        return new MappingExpression<TSource, TDestination>();
+    }
+    IMappingExpression<TSource, TDestination> ForMember(object dest, object opt) {
+        return new MappingExpression<TSource, TDestination>();
+    }
+    IMappingExpression<TSource, TDestination> IgnoreAllMembers() {
+        return new MappingExpression<TSource, TDestination>();
     }
 }
 
+class Profile {
+    IMappingExpression<TSource, TDestination> CreateMap<TSource, TDestination>() {
+        return new MappingExpression<TSource, TDestination>();
+    }
+}
+
+class MapperConfigurationExpression {
+    public List<Profile> Profiles;
+
+    public MapperConfigurationExpression() {
+        this.Profiles = new List<Profile>();
+    }
+
+    void AddProfile(Profile profile) {
+        this.Profiles.Add(profile);
+    }
+}
+
+class MapperConfiguration {
+    public Mapper Mapper;
+
+    public MapperConfiguration(object configure) {
+        this.Mapper = new Mapper();
+    }
+
+    IMapper CreateMapper() {
+        return this.Mapper;
+    }
+}
+
+native "/*
+AutoMapper package stubs.
+*/";

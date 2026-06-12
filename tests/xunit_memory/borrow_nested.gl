@@ -1,0 +1,14 @@
+// tests/xunit_memory/borrow_nested.gl
+import System.XUnit;
+import System.Ownership;
+
+public class BorrowNestedTests {
+    XUNIT_FACT(BorrowNestedTests, NestedBorrow);
+    public void NestedBorrow() {
+        var owned = make_owned(new Rc<int>(42));
+        var b1 = make_borrow(owned);
+        var b2 = make_borrow(b1);
+        var b3 = make_borrow(b2);
+        Assert.Equal(42, b3.Get().Get());
+    }
+}

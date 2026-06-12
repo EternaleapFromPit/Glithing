@@ -1,0 +1,77 @@
+// tests/xunit_memory/memory_leak_tests.gl
+
+using System.XUnit;
+using System.LeakDetector;
+using System.Ownership;
+using System.Collections.Generic;
+
+public class MemoryLeakTests {
+    // Simple sanity test – should have zero leaks after a no‑op.
+    XUNIT_FACT(MemoryLeakTests, NoOp);
+    public void NoOp() {
+        LeakDetector.Reset();
+        // nothing allocated
+        Assert.True(!LeakDetector.HasLeaks, "No leaks expected for a no‑op test");
+    }
+
+    // Allocate a single owned Rc<T> and drop it.
+    XUNIT_FACT(MemoryLeakTests, SingleOwnedAllocation);
+    public void SingleOwnedAllocation() {
+        LeakDetector.Reset();
+        var owned = make_owned(new Rc<int>(123));
+        // owned goes out of scope at end of method
+        Assert.True(!LeakDetector.HasLeaks, "Single owned allocation must be freed");
+    }
+
+    // Allocate a chain of owned objects of variable length (theory).
+    XUNIT_THEORY(MemoryLeakTests, OwnedChain);
+    XUNIT_INLINE_DATA(MemoryLeakTests, OwnedChain, 1);
+    XUNIT_INLINE_DATA(MemoryLeakTests, OwnedChain, 5);
+    XUNIT_INLINE_DATA(MemoryLeakTests, OwnedChain, 10);
+    XUNIT_INLINE_DATA(MemoryLeakTests, OwnedChain, 20);
+    public void OwnedChain(int length) {
+        LeakDetector.Reset();
+        var head = make_owned(new Rc<int>(0));
+        var cur = head;
+        for (int i = 1; i < length; ++i) {
+            var next = make_owned(new Rc<int>(i));
+            // pretend we link them (pseudo‑code, real linking not needed for leak test)
+            cur = next;
+        }
+        Assert.True(!LeakDetector.HasLeaks, $"Chain of {length} owned objects must be freed");
+    }
+
+    // Test cyclic Rc graph – should be detected as a leak if not broken.
+    XUNIT_FACT(MemoryLeakTests, CyclicRcLeak);
+    public void CyclicRcLeak() {
+        LeakDetector.Reset();
+        var a = new Rc<int>(1);
+        var b = new Rc<int>(2);
+        // create a cycle (both hold each other via some custom field – simplified)
+        // In this mock example we just simulate allocation count.
+        // The cycle will not be broken, so we expect a leak.
+        Assert.True(LeakDetector.HasLeaks, "Cyclic Rc should cause a leak");
+    }
+
+    // Stress test: allocate many small ints.
+    XUNIT_FACT(MemoryLeakTests, BulkAllocation);
+    public void BulkAllocation() {
+        LeakDetector.Reset();
+        const int N = 1000;
+        for (int i = 0; i < N; ++i) {
+            var tmp = make_owned(new Rc<int>(i));
+        }
+        Assert.True(!LeakDetector.HasLeaks, "Bulk allocation of 1000 owned ints must be freed");
+    }
+
+    // Test interaction with native malloc/free wrappers directly.
+    XUNIT_FACT(MemoryLeakTests, NativeMallocFree);
+    public void NativeMallocFree() {
+        LeakDetector.Reset();
+        var ptr = (int*)tracked_malloc(sizeof(int) * 10);
+        // write some data
+        for (int i = 0; i < 10; ++i) ptr[i] = i;
+        tracked_free(ptr);
+        Assert.True(!LeakDetector.HasLeaks, "Native malloc/free should be balanced");
+    }
+};

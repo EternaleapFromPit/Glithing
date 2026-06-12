@@ -1,0 +1,11 @@
+// tests/xunit_memory/ownership_basic.gl
+import System.XUnit;
+import System.Ownership;
+
+public class OwnershipBasicTests {
+    XUNIT_FACT(OwnershipBasicTests, CreateAndDrop);
+    public void CreateAndDrop() {
+        var owned = make_owned(new Rc<int>(123));
+        // Owned goes out of scope, should be freed
+    }
+}

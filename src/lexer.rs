@@ -72,6 +72,7 @@ pub(crate) enum TokenKind {
     Greater,
     GreaterEq,
     Eof,
+    Hash,
 }
 
 #[derive(Debug, Clone)]
@@ -112,9 +113,33 @@ impl<'a> Lexer<'a> {
                         self.advance();
                     }
                 }
-                '#' => {
-                    while self.peek().is_some() && self.peek() != Some('\n') {
+                '/' if self.peek_next() == Some('*') => {
+                    let start_line = self.line;
+                    let start_col = self.col;
+                    self.advance(); // consume '/'
+                    self.advance(); // consume '*'
+                    let mut terminated = false;
+                    while let Some(c) = self.peek() {
+                        if c == '*' && self.peek_next() == Some('/') {
+                            self.advance(); // consume '*'
+                            self.advance(); // consume '/'
+                            terminated = true;
+                            break;
+                        }
                         self.advance();
+                    }
+                    if !terminated {
+                        return Err(format!("{start_line}:{start_col}: unterminated block comment"));
+                    }
+                }
+                '#' => {
+                    let next = self.peek_next();
+                    if next.is_none() || next.is_some_and(|c| c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                        while self.peek().is_some() && self.peek() != Some('\n') {
+                            self.advance();
+                        }
+                    } else {
+                        tokens.push(self.single(TokenKind::Hash));
                     }
                 }
                 '0'..='9' => tokens.push(self.lex_number()?),
@@ -312,6 +337,7 @@ impl<'a> Lexer<'a> {
             "native" => TokenKind::Native,
             "namespace" => TokenKind::Namespace,
             "using" => TokenKind::Using,
+            "import" => TokenKind::Using,
             "async" => TokenKind::Async,
             "static" => TokenKind::Static,
             "const" => TokenKind::Const,

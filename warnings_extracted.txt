@@ -1,0 +1,464 @@
+﻿
+Line                                                                                                                   
+----                                                                                                                   
+warning GL3002 at 1:1: function 'SystemTextJson_SerializeString' has no linked GL or LLVM implementation               
+warning GL3002 at 1:1: function 'SystemTextJson_DeserializeString' has no linked GL or LLVM implementation             
+warning GL3001 at 1720:8: member 'ConfigureSerilog' on Class("WebApplicationBuilder") has no linked implementation;    
+warning GL3005 at 13:21: lambda has no executable LLVM closure or expression-tree lowering; compatibility mode emits   
+warning GL3004 at 1763:52: type 'ApiVersion' has no linked LLVM layout                                                 
+warning GL3001 at 25:60: member 'Combine' on Unknown("Path") has no linked implementation; LLVM emits a typed default  
+warning GL3003 at 1767:28: static or opaque member 'BaseDirectory' on Unknown("AppContext") has no linked              
+warning GL3001 at 1775:23: member 'UseSqlServer' on Unknown("lambda_param") has no linked implementation; LLVM emits a 
+warning GL3001 at 1776:52: member 'CommandTimeout' on Unknown("EnableRetryOnFailure") has no linked implementation;    
+warning GL3001 at 1776:29: member 'EnableRetryOnFailure' on Unknown("lambda_param") has no linked implementation; LLVM 
+warning GL3002 at 1730:28: function 'typeof' has no linked GL or LLVM implementation                                   
+warning GL3003 at 1794:36: static or opaque member 'AuthenticationScheme' on Unknown("JwtBearerDefaults") has no       
+warning GL3001 at 1838:20: member 'IsDevelopment' on Unknown("Environment") has no linked implementation; LLVM emits a 
+warning GL3001 at 1841:26: member 'GetValue' on Unknown("Configuration") has no linked implementation; LLVM emits a    
+warning GL3001 at 1843:39: member 'CreateScope' on Unknown("Services") has no linked implementation; LLVM emits a      
+warning GL3001 at 1844:46: member 'GetRequiredService' on Unknown("ServiceProvider") has no linked implementation;     
+warning GL3003 at 1844:30: static or opaque member 'ServiceProvider' on Unknown("CreateScope") has no linked           
+warning GL3001 at 1845:30: member 'InitializeData' on Unknown("SampleDataInitializer") has no linked implementation;   
+warning GL3001 at 1853:8: member 'UseMiddleware' on Class("WebApplication") has no linked implementation; LLVM emits a 
+warning GL3001 at 1857:4: member 'UseSwagger' on Class("WebApplication") has no linked implementation; LLVM emits a    
+warning GL3001 at 1858:4: member 'UseSwaggerUI' on Class("WebApplication") has no linked implementation; LLVM emits a  
+warning GL3001 at 1877:4: member 'UseCors' on Class("WebApplication") has no linked implementation; LLVM emits a typed 
+warning GL3001 at 1880:4: member 'UseStaticFiles' on Class("WebApplication") has no linked implementation; LLVM emits  
+warning GL3004 at 1880:20: type 'StaticFileOptions' has no linked LLVM layout                                          
+warning GL3004 at 1882:20: type 'PhysicalFileProvider' has no linked LLVM layout                                       
+warning GL3001 at 1882:67: member 'GetCurrentDirectory' on Unknown("Directory") has no linked implementation; LLVM     
+warning GL3003 at 9:38: static or opaque member 'Default' on Unknown("ApiVersion") has no linked implementation        
+warning GL3001 at 11:19: member 'AddApiVersioning' on Unknown("IServiceCollection") has no linked implementation; LLVM 
+warning GL3001 at 36:17: member 'AddVersionedApiExplorer' on Unknown("IServiceCollection") has no linked               
+warning GL3003 at 94:28: static or opaque member 'IsValid' on Unknown("ModelState") has no linked implementation       
+warning GL3001 at 97:65: member 'ToDictionary' on Unknown("ModelState") has no linked implementation; LLVM emits a     
+warning GL3003 at 98:27: static or opaque member 'Key' on Unknown("lambda_param") has no linked implementation         
+warning GL3001 at 99:68: member 'ToArray' on Unknown("Select") has no linked implementation; LLVM emits a typed default
+warning GL3001 at 99:40: member 'Select' on Unknown("Errors") has no linked implementation; LLVM emits a typed default 
+warning GL3003 at 99:33: static or opaque member 'Errors' on Unknown("Value") has no linked implementation             
+warning GL3003 at 99:27: static or opaque member 'Value' on Unknown("lambda_param") has no linked implementation       
+warning GL3003 at 99:54: static or opaque member 'ErrorMessage' on Unknown("lambda_param") has no linked implementation
+warning GL3004 at 101:23: type 'customWebExceptions.ValidationException' has no linked LLVM layout                     
+warning GL3004 at 114:23: type 'customWebExceptions.ConflictException' has no linked LLVM layout                       
+warning GL3004 at 121:23: type 'customWebExceptions.WebException' has no linked LLVM layout                            
+warning GL3004 at 173:23: type 'customWebExceptions.UnauthorizedException' has no linked LLVM layout                   
+warning GL3004 at 216:23: type 'customWebExceptions.ForbiddenException' has no linked LLVM layout                      
+warning GL3001 at 327:37: member 'GetAllIgnoreQueryFilters' on Interface("IBaseRepo") has no linked implementation;    
+warning GL3004 at 351:23: type 'customWebExceptions.NotFoundException' has no linked LLVM layout                       
+warning GL3003 at 425:29: static or opaque member 'Id' on Unknown("TUpdateRequestDto") has no linked implementation    
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("UpdateAsync"); compatibility mode       
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("AddAsync"); compatibility mode          
+warning GL3004 at 1:1: type '__anonymous' has no linked LLVM layout                                                    
+warning GL3003 at 425:29: static or opaque member 'Id' on Unknown("T") has no linked implementation                    
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("DeleteAsync"); compatibility mode       
+warning GL3001 at 355:44: member 'Map' on Unknown("_mapper") has no linked implementation; LLVM emits a typed default  
+warning GL3003 at 425:29: static or opaque member 'Id' on Unknown("Map") has no linked implementation                  
+warning GL3001 at 427:24: member 'LogAppWarning' on Unknown("_logger") has no linked implementation; LLVM emits a      
+warning GL3006 at 110:32: awaited expression has unresolved task type                                                  
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("GetAllAsync"); compatibility mode       
+warning GL3001 at 945:47: member 'Any' on List(Class("BorrowBooksErrors")) has no linked implementation; LLVM emits a  
+warning GL3001 at 945:47: member 'Any' on List(Class("BorrowingResponseDTO")) has no linked implementation; LLVM emits 
+warning GL3001 at 11:19: member 'Add' on Unknown("Headers") has no linked implementation; LLVM emits a typed default   
+warning GL3003 at 959:33: static or opaque member 'Headers' on Unknown("Response") has no linked implementation        
+warning GL3003 at 959:24: static or opaque member 'Response' on Unknown("HttpContext") has no linked implementation    
+warning GL3004 at 960:28: type 'ObjectResult' has no linked LLVM layout                                                
+warning GL3001 at 945:47: member 'Any' on List(Class("BorrowingRequestsErrors")) has no linked implementation; LLVM    
+warning GL3001 at 1450:40: member 'TryGetValue' on Unknown("ActionArguments") has no linked implementation; LLVM emits 
+warning GL3003 at 1450:24: static or opaque member 'ActionArguments' on Unknown("ActionExecutingContext") has no       
+warning GL3001 at 1462:43: member 'AddModelError' on Unknown("ModelState") has no linked implementation; LLVM emits a  
+warning GL3003 at 1462:32: static or opaque member 'ModelState' on Unknown("ActionExecutingContext") has no linked     
+warning GL3001 at 1466:47: member 'Contains' on Array(String) has no linked implementation; LLVM emits a typed default 
+warning GL3001 at 1466:61: member 'GetExtension' on Unknown("Path") has no linked implementation; LLVM emits a typed   
+warning GL3003 at 1466:87: static or opaque member 'FileName' on Unknown("Image") has no linked implementation         
+warning GL3003 at 1471:41: static or opaque member 'Length' on Unknown("Image") has no linked implementation           
+warning GL3004 at 1504:30: type 'ProblemDetails' has no linked LLVM layout                                             
+warning GL3003 at 53:18: static or opaque member 'Exception' on Unknown("ExceptionContext") has no linked              
+warning GL3003 at 1528:27: static or opaque member 'Type' on Unknown("customWebExceptions.WebException") has no linked 
+warning GL3003 at 1529:27: static or opaque member 'Title' on Unknown("customWebExceptions.WebException") has no       
+warning GL3003 at 307:42: static or opaque member 'Status' on Unknown("customWebExceptions.WebException") has no       
+warning GL3003 at 99:33: static or opaque member 'Errors' on Unknown("customWebExceptions.ValidationException") has no 
+warning GL3003 at 1553:42: static or opaque member 'TraceIdentifier' on Unknown("HttpContext") has no linked           
+warning GL3003 at 1553:30: static or opaque member 'HttpContext' on Unknown("ExceptionContext") has no linked          
+warning GL3001 at 1554:20: member 'IsNullOrEmpty' on Unknown("string") has no linked implementation; LLVM emits a      
+warning GL3003 at 1561:16: static or opaque member 'Result' on Unknown("ExceptionContext") has no linked implementation
+warning GL3003 at 1564:16: static or opaque member 'ExceptionHandled' on Unknown("ExceptionContext") has no linked     
+warning GL3001 at 1450:40: member 'TryGetValue' on Unknown("IMemoryCache") has no linked implementation; LLVM emits a  
+warning GL3003 at 1664:43: static or opaque member 'UtcNow' on Unknown("DateTime") has no linked implementation        
+warning GL3001 at 1668:23: member 'Set' on Unknown("IMemoryCache") has no linked implementation; LLVM emits a typed    
+warning GL3001 at 1668:57: member 'FromMinutes' on Unknown("TimeSpan") has no linked implementation; LLVM emits a      
+warning GL3003 at 1671:67: static or opaque member 'LastRequest' on Unknown("rateLimit") has no linked implementation  
+warning GL3003 at 1673:37: static or opaque member 'TotalMinutes' on Unknown("UtcNow") has no linked implementation    
+warning GL3003 at 1675:26: static or opaque member 'Requests' on Unknown("rateLimit") has no linked implementation     
+warning GL3004 at 1682:23: type 'customWebExceptions.RateLimitExceededException' has no linked LLVM layout             
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("_next"); compatibility mode evaluates   
+warning GL3002 at 1689:19: function '_next' has no linked GL or LLVM implementation                                    
+warning GL3003 at 1949:36: static or opaque member 'CurrentValue' on                                                   
+warning GL3003 at 1864:52: static or opaque member 'ApiVersionDescriptions' on                                         
+warning GL3001 at 1956:20: member 'SwaggerDoc' on Unknown("SwaggerGenOptions") has no linked implementation; LLVM      
+warning GL3003 at 42:24: static or opaque member 'GroupName' on Unknown("var") has no linked implementation            
+warning GL3002 at 1956:55: function 'CreateInfoForApiVersion' has no linked GL or LLVM implementation                  
+warning GL3001 at 1965:34: member 'FirstOrDefault' on List(Class("SwaggerVersionDescription")) has no linked           
+warning GL3003 at 1966:18: static or opaque member 'MajorVersion' on Unknown("lambda_param") has no linked             
+warning GL3003 at 1966:18: static or opaque member 'MajorVersion' on Unknown("ApiVersion") has no linked implementation
+warning GL3003 at 2:22: static or opaque member 'ApiVersion' on Unknown("ApiVersionDescription") has no linked         
+warning GL3003 at 1967:21: static or opaque member 'MinorVersion' on Unknown("lambda_param") has no linked             
+warning GL3003 at 1967:21: static or opaque member 'MinorVersion' on Unknown("ApiVersion") has no linked implementation
+warning GL3003 at 307:42: static or opaque member 'Status' on Unknown("ApiVersion") has no linked implementation       
+warning GL3003 at 307:42: static or opaque member 'Status' on Unknown("lambda_param") has no linked implementation     
+warning GL3004 at 1969:20: type 'OpenApiInfo' has no linked LLVM layout                                                
+warning GL3001 at 1657:63: member 'ToString' on Unknown("ApiVersion") has no linked implementation; LLVM emits a typed 
+warning GL3004 at 1974:23: type 'OpenApiContact' has no linked LLVM layout                                             
+warning GL3004 at 1974:112: type 'Uri' has no linked LLVM layout                                                       
+warning GL3004 at 1975:30: type 'System.Uri' has no linked LLVM layout                                                 
+warning GL3004 at 1976:23: type 'OpenApiLicense' has no linked LLVM layout                                             
+warning GL3003 at 1978:24: static or opaque member 'IsDeprecated' on Unknown("ApiVersionDescription") has no linked    
+warning GL3001 at 1720:8: member 'Configure' on Unknown("IServiceCollection") has no linked implementation; LLVM emits 
+warning GL3001 at 1791:39: member 'GetSection' on Unknown("IConfiguration") has no linked implementation; LLVM emits a 
+warning GL3001 at 2001:17: member 'AddTransient' on Unknown("IServiceCollection") has no linked implementation; LLVM   
+warning GL3001 at 2002:17: member 'AddSwaggerGen' on Unknown("IServiceCollection") has no linked implementation; LLVM  
+warning GL3003 at 2053:37: static or opaque member 'ApiDescriptions' on Unknown("DocumentFilterContext") has no linked 
+warning GL3001 at 945:47: member 'Any' on Unknown("ParameterDescriptions") has no linked implementation; LLVM emits a  
+warning GL3003 at 2055:21: static or opaque member 'ParameterDescriptions' on Unknown("var") has no linked             
+warning GL3003 at 1767:88: static or opaque member 'Name' on Unknown("lambda_param") has no linked implementation      
+warning GL3003 at 425:29: static or opaque member 'Id' on Unknown("Source") has no linked implementation               
+warning GL3003 at 2055:81: static or opaque member 'Source' on Unknown("lambda_param") has no linked implementation    
+warning GL3001 at 2056:33: member 'Remove' on Unknown("Paths") has no linked implementation; LLVM emits a typed default
+warning GL3003 at 2056:27: static or opaque member 'Paths' on Unknown("OpenApiDocument") has no linked implementation  
+warning GL3001 at 2092:25: member 'HasDefaultSchema' on Unknown("ModelBuilder") has no linked implementation; LLVM     
+warning GL3001 at 1613:23: member 'Entity' on Unknown("ModelBuilder") has no linked implementation; LLVM emits a typed 
+warning GL3004 at 1:1: type 'DbContextOptionsBuilder_ApplicationDbContext' has no linked LLVM layout                   
+warning GL3001 at 1775:23: member 'UseSqlServer' on Struct("DbContextOptionsBuilder_ApplicationDbContext") has no      
+warning GL3001 at 2143:28: member 'SavingChanges' on Unknown("base") has no linked implementation; LLVM emits a typed  
+warning GL3001 at 2156:28: member 'SavingChangesAsync' on Unknown("base") has no linked implementation; LLVM emits a   
+warning GL3001 at 2192:17: member 'HasAnnotation' on Unknown("HasAnnotation") has no linked implementation; LLVM emits 
+warning GL3001 at 2192:17: member 'HasAnnotation' on Unknown("HasDefaultSchema") has no linked implementation; LLVM    
+warning GL3001 at 2195:44: member 'UseIdentityColumns' on Unknown("SqlServerModelBuilderExtensions") has no linked     
+warning GL3001 at 2623:29: member 'EnsureSchema' on Unknown("MigrationBuilder") has no linked implementation; LLVM     
+warning GL3001 at 2629:29: member 'CreateTable' on Unknown("MigrationBuilder") has no linked implementation; LLVM      
+warning GL3001 at 1622:36: member 'Annotation' on Unknown("Column") has no linked implementation; LLVM emits a typed   
+warning GL3001 at 2634:31: member 'Column' on Unknown("lambda_param") has no linked implementation; LLVM emits a typed 
+warning GL3001 at 2344:104: member 'AddTicks' on String has no linked implementation; LLVM emits a typed default       
+warning GL3001 at 2840:29: member 'CreateIndex' on Unknown("MigrationBuilder") has no linked implementation; LLVM      
+warning GL3001 at 2868:29: member 'DropTable' on Unknown("MigrationBuilder") has no linked implementation; LLVM emits  
+warning GL3001 at 3365:29: member 'AlterColumn' on Unknown("MigrationBuilder") has no linked implementation; LLVM      
+warning GL3001 at 3396:29: member 'DropIndex' on Unknown("MigrationBuilder") has no linked implementation; LLVM emits  
+warning GL3001 at 3899:29: member 'AddColumn' on Unknown("MigrationBuilder") has no linked implementation; LLVM emits  
+warning GL3001 at 3917:29: member 'DropColumn' on Unknown("MigrationBuilder") has no linked implementation; LLVM emits 
+warning GL3001 at 7571:29: member 'RenameColumn' on Unknown("MigrationBuilder") has no linked implementation; LLVM     
+warning GL3001 at 7616:29: member 'AddForeignKey' on Unknown("MigrationBuilder") has no linked implementation; LLVM    
+warning GL3003 at 2513:49: static or opaque member 'Cascade' on Unknown("ReferentialAction") has no linked             
+warning GL3001 at 7630:29: member 'DropForeignKey' on Unknown("MigrationBuilder") has no linked implementation; LLVM   
+warning GL3003 at 13409:29: static or opaque member 'PropertyType' on Unknown("PropertyInfo") has no linked            
+warning GL3002 at 1:1: function 'BuildWherePredicateForStringProperty' has no linked GL or LLVM implementation         
+warning GL3002 at 1:1: function 'BuildWherePredicateForDateTimeProperty' has no linked GL or LLVM implementation       
+warning GL3002 at 1:1: function 'BuildWherePredicateForIntProperty' has no linked GL or LLVM implementation            
+warning GL3002 at 1:1: function 'BuildWherePredicateForBoolProperty' has no linked GL or LLVM implementation           
+warning GL3004 at 13430:23: type 'ArgumentException' has no linked LLVM layout                                         
+warning GL3001 at 2055:21: member 'Parameter' on Unknown("Expression") has no linked implementation; LLVM emits a      
+warning GL3001 at 2199:22: member 'Property' on Unknown("Expression") has no linked implementation; LLVM emits a typed 
+warning GL3001 at 13439:42: member 'Constant' on Unknown("Expression") has no linked implementation; LLVM emits a      
+warning GL3001 at 13439:56: member 'Parse' on Unknown("bool") has no linked implementation; LLVM emits a typed default 
+warning GL3001 at 13441:46: member 'Equal' on Unknown("Expression") has no linked implementation; LLVM emits a typed   
+warning GL3001 at 13443:30: member 'Lambda' on Unknown("Expression") has no linked implementation; LLVM emits a typed  
+warning GL3001 at 13459:51: member 'GetMethod' on Unknown("typeof") has no linked implementation; LLVM emits a typed   
+warning GL3001 at 1466:47: member 'Contains' on Unknown("HashSet<string>") has no linked implementation; LLVM emits a  
+warning GL3001 at 1657:63: member 'ToString' on Byte has no linked implementation; LLVM emits a typed default          
+warning GL3001 at 1466:47: member 'Contains' on String has no linked implementation; LLVM emits a typed default        
+warning GL3001 at 13480:49: member 'Substring' on String has no linked implementation; LLVM emits a typed default      
+warning GL3001 at 13439:56: member 'Parse' on Unknown("DateTime") has no linked implementation; LLVM emits a typed     
+warning GL3002 at 13484:30: function 'BuildWherePredicateForSingleDate' has no linked GL or LLVM implementation        
+warning GL3001 at 13490:44: member 'Split' on String has no linked implementation; LLVM emits a typed default          
+warning GL3002 at 13495:30: function 'BuildWherePredicateForRangeOfDates' has no linked GL or LLVM implementation      
+warning GL3004 at 13500:23: type 'FormatException' has no linked LLVM layout                                           
+warning GL3001 at 13515:50: member 'Call' on Unknown("Expression") has no linked implementation; LLVM emits a typed    
+warning GL3001 at 13518:58: member 'GreaterThanOrEqual' on Unknown("Expression") has no linked implementation; LLVM    
+warning GL3001 at 13519:55: member 'LessThanOrEqual' on Unknown("Expression") has no linked implementation; LLVM emits 
+warning GL3001 at 13522:46: member 'AndAlso' on Unknown("Expression") has no linked implementation; LLVM emits a typed 
+warning GL3001 at 13518:58: member 'GreaterThan' on Unknown("Expression") has no linked implementation; LLVM emits a   
+warning GL3001 at 13519:55: member 'LessThan' on Unknown("Expression") has no linked implementation; LLVM emits a      
+warning GL3001 at 13439:56: member 'Parse' on Unknown("int") has no linked implementation; LLVM emits a typed default  
+warning GL3002 at 13608:30: function 'BuildWherePredicateForSingleInt' has no linked GL or LLVM implementation         
+warning GL3002 at 13619:30: function 'BuildWherePredicateForRangeOfInts' has no linked GL or LLVM implementation       
+warning GL3003 at 13693:73: static or opaque member 'EmptyTypes' on Unknown("Type") has no linked implementation       
+warning GL3001 at 13695:59: member 'ToLower' on String has no linked implementation; LLVM emits a typed default        
+warning GL3001 at 13700:86: member 'Compile' on Unknown("Lambda") has no linked implementation; LLVM emits a typed     
+warning GL3003 at 13409:29: static or opaque member 'PropertyType' on Unknown("GetProperty") has no linked             
+warning GL3001 at 13715:48: member 'GetProperty' on Unknown("typeof") has no linked implementation; LLVM emits a typed 
+warning GL3003 at 13715:86: static or opaque member 'IgnoreCase' on Unknown("BindingFlags") has no linked              
+warning GL3003 at 13715:112: static or opaque member 'Public' on Unknown("BindingFlags") has no linked implementation  
+warning GL3003 at 13715:134: static or opaque member 'Instance' on Unknown("BindingFlags") has no linked implementation
+warning GL3003 at 13716:51: static or opaque member 'IsGenericType' on Unknown("Type") has no linked implementation    
+warning GL3001 at 13716:87: member 'GetGenericTypeDefinition' on Unknown("Type") has no linked implementation; LLVM    
+warning GL3001 at 13719:56: member 'GetGenericArguments' on Unknown("Type") has no linked implementation; LLVM emits a 
+warning GL3001 at 13715:48: member 'GetProperty' on Unknown("Type") has no linked implementation; LLVM emits a typed   
+warning GL3001 at 13737:66: member 'Replace' on String has no linked implementation; LLVM emits a typed default        
+warning GL3001 at 13759:57: member 'TryParse' on Unknown("int") has no linked implementation; LLVM emits a typed       
+warning GL3001 at 1736:38: member 'Convert' on Unknown("Expression") has no linked implementation; LLVM emits a typed  
+warning GL3004 at 1:1: type '__target' has no linked LLVM layout                                                       
+warning GL3001 at 13976:29: member 'EnsureDeleted' on Unknown("Database") has no linked implementation; LLVM emits a   
+warning GL3001 at 13977:29: member 'Migrate' on Unknown("Database") has no linked implementation; LLVM emits a typed   
+warning GL3002 at 13985:17: function 'ProcessInsert' has no linked GL or LLVM implementation                           
+warning GL3003 at 13985:47: static or opaque member 'Books' on Unknown("SampleData") has no linked implementation      
+warning GL3003 at 13986:47: static or opaque member 'Authors' on Unknown("SampleData") has no linked implementation    
+warning GL3003 at 13987:47: static or opaque member 'Publishers' on Unknown("SampleData") has no linked implementation 
+warning GL3003 at 13988:47: static or opaque member 'Users' on Unknown("SampleData") has no linked implementation      
+warning GL3003 at 13989:47: static or opaque member 'Borrowings' on Unknown("SampleData") has no linked implementation 
+warning GL3003 at 13990:47: static or opaque member 'BookAuthors' on Unknown("SampleData") has no linked implementation
+warning GL3003 at 13991:47: static or opaque member 'BookPublishers' on Unknown("SampleData") has no linked            
+warning GL3002 at 13973:30: function 'DropAndCreateDatabase' has no linked GL or LLVM implementation                   
+warning GL3002 at 13981:30: function 'SeedData' has no linked GL or LLVM implementation                                
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("FirstOrDefaultAsync"); compatibility    
+warning GL3001 at 14081:27: member 'FirstOrDefaultAsync' on Unknown("Table") has no linked implementation; LLVM emits  
+warning GL3003 at 425:29: static or opaque member 'Id' on Unknown("lambda_param") has no linked implementation         
+warning GL3001 at 14081:27: member 'FirstOrDefaultAsync' on Unknown("AsNoTrackingWithIdentityResolution") has no       
+warning GL3001 at 14084:27: member 'AsNoTrackingWithIdentityResolution' on Unknown("Table") has no linked              
+warning GL3001 at 14081:27: member 'FirstOrDefaultAsync' on Unknown("IgnoreQueryFilters") has no linked                
+warning GL3001 at 14087:27: member 'IgnoreQueryFilters' on Unknown("Table") has no linked implementation; LLVM emits a 
+warning GL3001 at 14022:41: member 'ExecuteSqlRaw' on Unknown("Database") has no linked implementation; LLVM emits a   
+warning GL3003 at 13976:20: static or opaque member 'Database' on Unknown("Context") has no linked implementation      
+warning GL3001 at 500:32: member 'AddAsync' on Unknown("Table") has no linked implementation; LLVM emits a typed       
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("SaveChangesAsync"); compatibility mode  
+warning GL3002 at 14095:36: function 'SaveChangesAsync' has no linked GL or LLVM implementation                        
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("AddRangeAsync"); compatibility mode     
+warning GL3001 at 14100:24: member 'AddRangeAsync' on Unknown("Table") has no linked implementation; LLVM emits a      
+warning GL3001 at 212:54: member 'Update' on Unknown("Table") has no linked implementation; LLVM emits a typed default 
+warning GL3001 at 14107:34: member 'DetectChanges' on Unknown("ChangeTracker") has no linked implementation; LLVM      
+warning GL3003 at 14107:20: static or opaque member 'ChangeTracker' on Unknown("Context") has no linked implementation 
+warning GL3003 at 14108:62: static or opaque member 'LongView' on Unknown("DebugView") has no linked implementation    
+warning GL3003 at 14108:52: static or opaque member 'DebugView' on Unknown("ChangeTracker") has no linked              
+warning GL3001 at 14114:18: member 'UpdateRange' on Unknown("Table") has no linked implementation; LLVM emits a typed  
+warning GL3004 at 1799:45: type 'T' has no linked LLVM layout                                                          
+warning GL3003 at 14121:34: static or opaque member 'State' on Unknown("Entry") has no linked implementation           
+warning GL3001 at 14121:20: member 'Entry' on Unknown("Context") has no linked implementation; LLVM emits a typed      
+warning GL3003 at 14121:54: static or opaque member 'Deleted' on Unknown("EntityState") has no linked implementation   
+warning GL3001 at 2056:33: member 'Remove' on Unknown("Table") has no linked implementation; LLVM emits a typed default
+warning GL3001 at 14133:18: member 'RemoveRange' on Unknown("Table") has no linked implementation; LLVM emits a typed  
+warning GL3001 at 14142:33: member 'SaveChangesAsync' on Unknown("Context") has no linked implementation; LLVM emits a 
+warning GL3004 at 14147:23: type 'DbUpdateConcurrencyException' has no linked LLVM layout                              
+warning GL3001 at 1668:23: member 'Set' on Class("ApplicationDbContext") has no linked implementation; LLVM emits a    
+warning GL3001 at 14183:25: member 'FromSqlRaw' on Unknown("DbSet<T>") has no linked implementation; LLVM emits a      
+warning GL3001 at 14188:25: member 'AsQueryable' on Unknown("DbSet<T>") has no linked implementation; LLVM emits a     
+warning GL3001 at 14188:25: member 'AsQueryable' on Unknown("IgnoreQueryFilters") has no linked implementation; LLVM   
+warning GL3001 at 14087:27: member 'IgnoreQueryFilters' on Unknown("DbSet<T>") has no linked implementation; LLVM      
+warning GL3001 at 1233:86: member 'IsNullOrWhiteSpace' on Unknown("String") has no linked implementation; LLVM emits a 
+warning GL3001 at 14210:48: member 'BuildWherePredicate' on Unknown("LinqHelpers") has no linked implementation; LLVM  
+warning GL3001 at 14213:34: member 'Where' on Unknown("AsQueryable") has no linked implementation; LLVM emits a typed  
+warning GL3001 at 14220:65: member 'BuildWherePredicateForNestedProperty' on Unknown("LinqHelpers") has no linked      
+warning GL3001 at 14242:47: member 'BuildOrderByFunction' on Unknown("LinqHelpers") has no linked implementation; LLVM 
+warning GL3001 at 14244:48: member 'OrderBy' on Unknown("AsQueryable") has no linked implementation; LLVM emits a      
+warning GL3001 at 14244:74: member 'OrderByDescending' on Unknown("AsQueryable") has no linked implementation; LLVM    
+warning GL3001 at 14252:39: member 'Take' on Unknown("Skip") has no linked implementation; LLVM emits a typed default  
+warning GL3001 at 14252:26: member 'Skip' on Unknown("AsQueryable") has no linked implementation; LLVM emits a typed   
+warning GL3001 at 14255:25: member 'ToList' on Unknown("AsQueryable") has no linked implementation; LLVM emits a typed 
+warning GL3002 at 14260:32: function 'Dispose' has no linked GL or LLVM implementation                                 
+warning GL3001 at 14285:15: member 'SuppressFinalize' on Unknown("GC") has no linked implementation; LLVM emits a      
+warning GL3001 at 327:37: member 'GetAllIgnoreQueryFilters' on Unknown("base") has no linked implementation; LLVM      
+warning GL3001 at 14255:25: member 'ToList' on Unknown("Select") has no linked implementation; LLVM emits a typed      
+warning GL3001 at 99:40: member 'Select' on Unknown("GetAllIgnoreQueryFilters") has no linked implementation; LLVM     
+warning GL3001 at 14255:25: member 'ToList' on Unknown("Include") has no linked implementation; LLVM emits a typed     
+warning GL3001 at 2006:14: member 'Include' on Unknown("Include") has no linked implementation; LLVM emits a typed     
+warning GL3001 at 2006:14: member 'Include' on Unknown("Where") has no linked implementation; LLVM emits a typed       
+warning GL3001 at 14213:34: member 'Where' on Unknown("Table") has no linked implementation; LLVM emits a typed default
+warning GL3001 at 1466:47: member 'Contains' on Unknown("ToList") has no linked implementation; LLVM emits a typed     
+warning GL3003 at 13986:47: static or opaque member 'Authors' on Unknown("lambda_param") has no linked implementation  
+warning GL3003 at 13987:47: static or opaque member 'Publishers' on Unknown("lambda_param") has no linked              
+warning GL3001 at 14081:27: member 'FirstOrDefaultAsync' on Unknown("Include") has no linked implementation; LLVM      
+warning GL3001 at 2006:14: member 'Include' on Unknown("Table") has no linked implementation; LLVM emits a typed       
+warning GL3001 at 1466:47: member 'Contains' on Unknown("Select") has no linked implementation; LLVM emits a typed     
+warning GL3003 at 14401:36: static or opaque member 'BookNavigation' on Unknown("lambda_param") has no linked          
+warning GL3003 at 13986:47: static or opaque member 'Authors' on Unknown("BookNavigation") has no linked implementation
+warning GL3003 at 13987:47: static or opaque member 'Publishers' on Unknown("BookNavigation") has no linked            
+warning GL3003 at 14404:36: static or opaque member 'UserNavigation' on Unknown("lambda_param") has no linked          
+warning GL3003 at 14405:36: static or opaque member 'ApprovedByNavigation' on Unknown("lambda_param") has no linked    
+warning GL3003 at 14406:36: static or opaque member 'RejectedByNavigation' on Unknown("lambda_param") has no linked    
+warning GL3003 at 14407:36: static or opaque member 'ReturnedByNavigation' on Unknown("lambda_param") has no linked    
+warning GL3001 at 2006:14: member 'Include' on Unknown("ThenInclude") has no linked implementation; LLVM emits a typed 
+warning GL3001 at 14416:17: member 'ThenInclude' on Unknown("Include") has no linked implementation; LLVM emits a      
+warning GL3001 at 14455:64: member 'Equals' on Unknown("Email") has no linked implementation; LLVM emits a typed       
+warning GL3003 at 14455:58: static or opaque member 'Email' on Unknown("lambda_param") has no linked implementation    
+warning GL3001 at 2459:25: member 'HasDefaultValueSql' on Unknown("Property") has no linked implementation; LLVM emits 
+warning GL3001 at 2199:22: member 'Property' on Unknown("EntityTypeBuilder<Book>") has no linked implementation; LLVM  
+warning GL3003 at 15406:36: static or opaque member 'CreatedAt' on Unknown("lambda_param") has no linked implementation
+warning GL3001 at 15413:13: member 'UsingEntity' on Unknown("WithMany") has no linked implementation; LLVM emits a     
+warning GL3001 at 2511:25: member 'WithMany' on Unknown("HasMany") has no linked implementation; LLVM emits a typed    
+warning GL3001 at 15411:13: member 'HasMany' on Unknown("EntityTypeBuilder<Book>") has no linked implementation; LLVM  
+warning GL3003 at 13985:47: static or opaque member 'Books' on Unknown("lambda_param") has no linked implementation    
+warning GL3001 at 2513:25: member 'OnDelete' on Unknown("HasForeignKey") has no linked implementation; LLVM emits a    
+warning GL3001 at 2512:25: member 'HasForeignKey' on Unknown("WithMany") has no linked implementation; LLVM emits a    
+warning GL3001 at 2511:25: member 'WithMany' on Unknown("HasOne") has no linked implementation; LLVM emits a typed     
+warning GL3001 at 2510:22: member 'HasOne' on Unknown("lambda_param") has no linked implementation; LLVM emits a typed 
+warning GL3003 at 15151:43: static or opaque member 'AuthorNavigation' on Unknown("lambda_param") has no linked        
+warning GL3003 at 13990:47: static or opaque member 'BookAuthors' on Unknown("lambda_param") has no linked             
+warning GL3003 at 2513:49: static or opaque member 'Cascade' on Unknown("DeleteBehavior") has no linked implementation 
+warning GL3003 at 15440:36: static or opaque member 'PublisherNavigation' on Unknown("lambda_param") has no linked     
+warning GL3003 at 13991:47: static or opaque member 'BookPublishers' on Unknown("lambda_param") has no linked          
+warning GL3001 at 2199:22: member 'Property' on Unknown("EntityTypeBuilder<Borrowing>") has no linked implementation;  
+warning GL3003 at 15477:36: static or opaque member 'DateOut' on Unknown("lambda_param") has no linked implementation  
+warning GL3003 at 15480:36: static or opaque member 'DueDate' on Unknown("lambda_param") has no linked implementation  
+warning GL3001 at 2344:25: member 'HasDefaultValue' on Unknown("Property") has no linked implementation; LLVM emits a  
+warning GL3003 at 15483:76: static or opaque member 'Pending' on Unknown("BorrowingStatus") has no linked              
+warning GL3001 at 2201:25: member 'HasColumnType' on Unknown("Property") has no linked implementation; LLVM emits a    
+warning GL3001 at 2199:22: member 'Property' on Unknown("EntityTypeBuilder<SeriLogEntry>") has no linked               
+warning GL3003 at 15527:32: static or opaque member 'Properties' on Unknown("lambda_param") has no linked              
+warning GL3003 at 15528:32: static or opaque member 'TimeStamp' on Unknown("lambda_param") has no linked implementation
+warning GL3001 at 2199:22: member 'Property' on Unknown("EntityTypeBuilder<User>") has no linked implementation; LLVM  
+warning GL3001 at 15548:18: member 'HasConversion' on Unknown("Property") has no linked implementation; LLVM emits a   
+warning GL3003 at 15547:36: static or opaque member 'BirthDate' on Unknown("lambda_param") has no linked implementation
+warning GL3001 at 3245:25: member 'IsUnique' on Unknown("HasIndex") has no linked implementation; LLVM emits a typed   
+warning GL3001 at 2274:22: member 'HasIndex' on Unknown("EntityTypeBuilder<User>") has no linked implementation; LLVM  
+warning GL3001 at 13439:56: member 'Parse' on Unknown("XElement") has no linked implementation; LLVM emits a typed     
+warning GL3001 at 15736:17: member 'ReverseMap' on Unknown("CreateMap") has no linked implementation; LLVM emits a     
+warning GL3002 at 1:1: function 'CreateMap' has no linked GL or LLVM implementation                                    
+warning GL3001 at 15779:17: member 'ForMember' on Unknown("ForMember") has no linked implementation; LLVM emits a      
+warning GL3001 at 15779:17: member 'ForMember' on Unknown("IgnoreAllMembers") has no linked implementation; LLVM emits 
+warning GL3001 at 15778:17: member 'IgnoreAllMembers' on Unknown("CreateMap") has no linked implementation; LLVM emits 
+warning GL3003 at 1529:27: static or opaque member 'Title' on Unknown("lambda_param") has no linked implementation     
+warning GL3001 at 15779:58: member 'MapFrom' on Unknown("lambda_param") has no linked implementation; LLVM emits a     
+warning GL3003 at 1965:21: static or opaque member 'Description' on Unknown("lambda_param") has no linked              
+warning GL3003 at 15781:40: static or opaque member 'NumberOfAvailableCopies' on Unknown("lambda_param") has no linked 
+warning GL3003 at 15782:40: static or opaque member 'NumberOfTotalCopies' on Unknown("lambda_param") has no linked     
+warning GL3001 at 15799:53: member 'GetProperties' on Unknown("typeof") has no linked implementation; LLVM emits a     
+warning GL3001 at 15779:17: member 'ForMember' on Unknown("IMappingExpression<TSource,TDestination>") has no linked    
+warning GL3003 at 1767:88: static or opaque member 'Name' on Unknown("var") has no linked implementation               
+warning GL3001 at 1739:74: member 'Ignore' on Unknown("lambda_param") has no linked implementation; LLVM emits a typed 
+warning GL3001 at 15854:44: member 'Clear' on Unknown("ChangeTracker") has no linked implementation; LLVM emits a      
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("FindAsync"); compatibility mode         
+warning GL3001 at 379:41: member 'FindAsync' on Unknown("_mainRepo") has no linked implementation; LLVM emits a typed  
+warning GL3001 at 15899:59: member 'SequenceEqual' on Array(Byte) has no linked implementation; LLVM emits a typed     
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("AddAuthorToBook"); compatibility mode   
+warning GL3002 at 15917:19: function 'AddAuthorToBook' has no linked GL or LLVM implementation                         
+warning GL3002 at 15919:13: function 'DeleteAuthorFromBook' has no linked GL or LLVM implementation                    
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("AddPublisherToBook"); compatibility     
+warning GL3002 at 15922:19: function 'AddPublisherToBook' has no linked GL or LLVM implementation                      
+warning GL3002 at 15923:13: function 'DeletePublisherFromBook' has no linked GL or LLVM implementation                 
+warning GL3001 at 14142:33: member 'SaveChangesAsync' on Unknown("_mainRepo") has no linked implementation; LLVM emits 
+warning GL3001 at 15942:40: member 'GetFileName' on Unknown("Path") has no linked implementation; LLVM emits a typed   
+warning GL3003 at 1466:87: static or opaque member 'FileName' on Unknown("IFormFile") has no linked implementation     
+warning GL3004 at 15950:36: type 'FileStream' has no linked LLVM layout                                                
+warning GL3003 at 926:68: static or opaque member 'Create' on Unknown("FileMode") has no linked implementation         
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("CopyToAsync"); compatibility mode       
+warning GL3001 at 15951:35: member 'CopyToAsync' on Unknown("IFormFile") has no linked implementation; LLVM emits a    
+warning GL3001 at 500:32: member 'AddAsync' on Unknown("_mainRepo") has no linked implementation; LLVM emits a typed   
+warning GL3001 at 14255:25: member 'ToList' on Enumerable(Class("Publisher")) has no linked implementation; LLVM emits 
+warning GL3003 at 15977:49: static or opaque member 'Count' on Unknown("ToList") has no linked implementation          
+warning GL3001 at 945:47: member 'Any' on List(Int) has no linked implementation; LLVM emits a typed default           
+warning GL3001 at 2056:33: member 'Remove' on Enumerable(Class("Publisher")) has no linked implementation; LLVM emits  
+warning GL3001 at 945:47: member 'Any' on Enumerable(Class("Publisher")) has no linked implementation; LLVM emits a    
+warning GL3001 at 379:41: member 'FindAsync' on Interface("IPublisherRepo") has no linked implementation; LLVM emits a 
+warning GL3001 at 11:19: member 'Add' on Enumerable(Class("Publisher")) has no linked implementation; LLVM emits a     
+warning GL3001 at 14255:25: member 'ToList' on Enumerable(Class("Author")) has no linked implementation; LLVM emits a  
+warning GL3001 at 2056:33: member 'Remove' on Enumerable(Class("Author")) has no linked implementation; LLVM emits a   
+warning GL3001 at 945:47: member 'Any' on Enumerable(Class("Author")) has no linked implementation; LLVM emits a typed 
+warning GL3001 at 379:41: member 'FindAsync' on Interface("IAuthorRepo") has no linked implementation; LLVM emits a    
+warning GL3001 at 11:19: member 'Add' on Enumerable(Class("Author")) has no linked implementation; LLVM emits a typed  
+warning GL3001 at 327:37: member 'GetAllIgnoreQueryFilters' on Unknown("_mainRepo") has no linked implementation; LLVM 
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("GetUserFromTokenAsync"); compatibility  
+warning GL3002 at 16096:31: function 'GetUserFromTokenAsync' has no linked GL or LLVM implementation                   
+warning GL3003 at 13943:419: static or opaque member 'Admin' on Unknown("Role") has no linked implementation           
+warning GL3001 at 14213:34: member 'Where' on Unknown("GetAllIgnoreQueryFilters") has no linked implementation; LLVM   
+warning GL3003 at 2803:39: static or opaque member 'UserId' on Unknown("lambda_param") has no linked implementation    
+warning GL3001 at 14255:25: member 'ToList' on Unknown("GetAllIgnoreQueryFilters") has no linked implementation; LLVM  
+warning GL3001 at 14142:33: member 'SaveChangesAsync' on Interface("IUserRepo") has no linked implementation; LLVM     
+warning GL3001 at 99:40: member 'Select' on List(Class("Borrowing")) has no linked implementation; LLVM emits a typed  
+warning GL3001 at 14213:34: member 'Where' on Unknown("Borrowings") has no linked implementation; LLVM emits a typed   
+warning GL3003 at 13989:47: static or opaque member 'Borrowings' on Unknown("Context") has no linked implementation    
+warning GL3003 at 15854:22: static or opaque member 'Context' on Unknown("_mainRepo") has no linked implementation     
+warning GL3001 at 14025:30: member 'AddRange' on List(Class("BorrowingResponseDTO")) has no linked implementation;     
+warning GL3001 at 1466:47: member 'Contains' on Unknown("HashSet<int>") has no linked implementation; LLVM emits a     
+warning GL3003 at 1675:26: static or opaque member 'Request' on Unknown("BorrowingAction") has no linked implementation
+warning GL3003 at 14405:36: static or opaque member 'Approve' on Unknown("BorrowingAction") has no linked              
+warning GL3002 at 16234:46: function 'HandleApprove' has no linked GL or LLVM implementation                           
+warning GL3003 at 14406:36: static or opaque member 'Reject' on Unknown("BorrowingAction") has no linked implementation
+warning GL3002 at 16237:46: function 'HandleReject' has no linked GL or LLVM implementation                            
+warning GL3003 at 16239:45: static or opaque member 'Confirm' on Unknown("BorrowingAction") has no linked              
+warning GL3002 at 16240:46: function 'HandleConfirm' has no linked GL or LLVM implementation                           
+warning GL3003 at 16242:45: static or opaque member 'Cancel' on Unknown("BorrowingAction") has no linked implementation
+warning GL3002 at 16243:46: function 'HandleCancel' has no linked GL or LLVM implementation                            
+warning GL3003 at 13955:131: static or opaque member 'Return' on Unknown("BorrowingAction") has no linked              
+warning GL3002 at 16246:46: function 'HandleReturn' has no linked GL or LLVM implementation                            
+warning GL3003 at 13951:109: static or opaque member 'Borrowed' on Unknown("BorrowingStatus") has no linked            
+warning GL3002 at 16284:17: function 'ReturnBorrowing' has no linked GL or LLVM implementation                         
+warning GL3002 at 16314:17: function 'CancelBorrowing' has no linked GL or LLVM implementation                         
+warning GL3003 at 14405:36: static or opaque member 'Approved' on Unknown("BorrowingStatus") has no linked             
+warning GL3002 at 16344:17: function 'ConfirmBorrowing' has no linked GL or LLVM implementation                        
+warning GL3002 at 16365:17: function 'RejectBorrowing' has no linked GL or LLVM implementation                         
+warning GL3002 at 16385:17: function 'ApproveBorrowing' has no linked GL or LLVM implementation                        
+warning GL3003 at 13955:131: static or opaque member 'Returned' on Unknown("BorrowingStatus") has no linked            
+warning GL3003 at 16415:47: static or opaque member 'Cancelled' on Unknown("BorrowingStatus") has no linked            
+warning GL3003 at 14406:36: static or opaque member 'Rejected' on Unknown("BorrowingStatus") has no linked             
+warning GL3003 at 1712:16: static or opaque member 'Identity' on Unknown("User") has no linked implementation          
+warning GL3003 at 54:47: static or opaque member 'User' on Unknown("HttpContext") has no linked implementation         
+warning GL3003 at 99:27: static or opaque member 'Value' on Unknown("FindFirst") has no linked implementation          
+warning GL3001 at 16449:44: member 'FindFirst' on Unknown("ClaimsIdentity") has no linked implementation; LLVM emits a 
+warning GL3003 at 16449:65: static or opaque member 'NameIdentifier' on Unknown("ClaimTypes") has no linked            
+warning GL3001 at 379:41: member 'FindAsync' on Interface("IUserRepo") has no linked implementation; LLVM emits a      
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("FindByEmailAsync"); compatibility mode  
+warning GL3001 at 16491:53: member 'FindByEmailAsync' on Unknown("_mainRepo") has no linked implementation; LLVM emits 
+warning GL3001 at 16500:46: member 'VerifyPasswordHash' on Unknown("JwtHelpers") has no linked implementation; LLVM    
+warning GL3001 at 16509:44: member 'GenerateJwtToken' on Unknown("JwtHelpers") has no linked implementation; LLVM      
+warning GL3001 at 16553:42: member 'HashPassword' on Unknown("JwtHelpers") has no linked implementation; LLVM emits a  
+warning GL3003 at 54:47: static or opaque member 'User' on Unknown("Role") has no linked implementation                
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("FindAsNoTrackingAsync"); compatibility  
+warning GL3001 at 16586:44: member 'FindAsNoTrackingAsync' on Unknown("_mainRepo") has no linked implementation; LLVM  
+warning GL3001 at 440:32: member 'UpdateAsync' on Unknown("_mainRepo") has no linked implementation; LLVM emits a      
+warning GL3006 at 110:32: awaited expression has unresolved task type Unknown("LoginUserAsync"); compatibility mode    
+warning GL3002 at 169:55: function 'LoginUserAsync' has no linked GL or LLVM implementation                            
+warning GL3001 at 16678:21: member 'AddScoped' on Unknown("IServiceCollection") has no linked implementation; LLVM     
+warning GL3004 at 16935:32: type 'JwtSecurityTokenHandler' has no linked LLVM layout                                   
+warning GL3004 at 16936:34: type 'SecurityTokenDescriptor' has no linked LLVM layout                                   
+warning GL3004 at 16940:38: type 'SigningCredentials' has no linked LLVM layout                                        
+warning GL3004 at 1810:32: type 'SymmetricSecurityKey' has no linked LLVM layout                                       
+warning GL3001 at 1810:70: member 'GetBytes' on Unknown("UTF8") has no linked implementation; LLVM emits a typed       
+warning GL3003 at 1810:65: static or opaque member 'UTF8' on Unknown("Encoding") has no linked implementation          
+warning GL3003 at 16942:39: static or opaque member 'HmacSha256' on Unknown("SecurityAlgorithms") has no linked        
+warning GL3004 at 16945:27: type 'ClaimsIdentity' has no linked LLVM layout                                            
+warning GL3001 at 1657:63: member 'ToString' on Int has no linked implementation; LLVM emits a typed default           
+warning GL3003 at 1767:88: static or opaque member 'Name' on Unknown("ClaimTypes") has no linked implementation        
+warning GL3003 at 14455:58: static or opaque member 'Email' on Unknown("ClaimTypes") has no linked implementation      
+warning GL3003 at 16950:35: static or opaque member 'Role' on Unknown("ClaimTypes") has no linked implementation       
+warning GL3001 at 16953:39: member 'AddMinutes' on Unknown("Now") has no linked implementation; LLVM emits a typed     
+warning GL3003 at 13951:70: static or opaque member 'Now' on Unknown("DateTime") has no linked implementation          
+warning GL3001 at 16957:45: member 'CreateToken' on Struct("JwtSecurityTokenHandler") has no linked implementation;    
+warning GL3001 at 16960:43: member 'WriteToken' on Struct("JwtSecurityTokenHandler") has no linked implementation;     
+warning GL3004 at 16970:19: type 'NotImplementedException' has no linked LLVM layout                                   
+warning GL3001 at 16978:41: member 'GenerateSalt' on Unknown("BCrypt") has no linked implementation; LLVM emits a      
+warning GL3003 at 16978:34: static or opaque member 'BCrypt' on Unknown("Net") has no linked implementation            
+warning GL3003 at 16978:30: static or opaque member 'Net' on Unknown("BCrypt") has no linked implementation            
+warning GL3001 at 16553:42: member 'HashPassword' on Unknown("BCrypt") has no linked implementation; LLVM emits a      
+warning GL3001 at 16500:46: member 'Verify' on Unknown("BCrypt") has no linked implementation; LLVM emits a typed      
+warning GL3002 at 17137:9: function 'logAction' has no linked GL or LLVM implementation                                
+warning GL3001 at 14266:28: member 'Dispose' on Unknown("var") has no linked implementation; LLVM emits a typed default
+warning GL3002 at 17127:26: function 'LogWithException' has no linked GL or LLVM implementation                        
+warning GL3002 at 17144:26: function 'LogWithoutException' has no linked GL or LLVM implementation                     
+warning GL3003 at 17262:60: static or opaque member 'ConnectionStringName' on Unknown("MSSqlServer") has no linked     
+warning GL3003 at 17089:27: static or opaque member 'MSSqlServer' on Unknown("T") has no linked implementation         
+warning GL3003 at 17264:49: static or opaque member 'TableName' on Unknown("MSSqlServer") has no linked implementation 
+warning GL3003 at 15698:51: static or opaque member 'Schema' on Unknown("MSSqlServer") has no linked implementation    
+warning GL3003 at 17266:63: static or opaque member 'RestrictedToMinimumLevel' on Unknown("General") has no linked     
+warning GL3003 at 17266:55: static or opaque member 'General' on Unknown("T") has no linked implementation             
+warning GL3001 at 13759:57: member 'TryParse' on Unknown("Enum") has no linked implementation; LLVM emits a typed      
+warning GL3003 at 14108:52: static or opaque member 'Debug' on Unknown("LogEventLevel") has no linked implementation   
+warning GL3004 at 17272:30: type 'MSSqlServerSinkOptions' has no linked LLVM layout                                    
+warning GL3004 at 17280:42: type 'TimeSpan' has no linked LLVM layout                                                  
+warning GL3001 at 17089:27: member 'MSSqlServer' on Unknown("WriteTo") has no linked implementation; LLVM emits a      
+warning GL3003 at 16960:43: static or opaque member 'WriteTo' on Unknown("Console") has no linked implementation       
+warning GL3001 at 17296:25: member 'Console' on Unknown("WriteTo") has no linked implementation; LLVM emits a typed    
+warning GL3003 at 16960:43: static or opaque member 'WriteTo' on Unknown("File") has no linked implementation          
+warning GL3001 at 1466:87: member 'File' on Unknown("WriteTo") has no linked implementation; LLVM emits a typed default
+warning GL3003 at 16960:43: static or opaque member 'WriteTo' on Unknown("WithMachineName") has no linked              
+warning GL3001 at 17288:24: member 'WithMachineName' on Unknown("Enrich") has no linked implementation; LLVM emits a   
+warning GL3003 at 17087:26: static or opaque member 'Enrich' on Unknown("With") has no linked implementation           
+warning GL3001 at 2511:25: member 'With' on Unknown("Enrich") has no linked implementation; LLVM emits a typed default 
+warning GL3003 at 17087:26: static or opaque member 'Enrich' on Unknown("FromLogContext") has no linked implementation 
+warning GL3001 at 17286:24: member 'FromLogContext' on Unknown("Enrich") has no linked implementation; LLVM emits a    
+warning GL3003 at 17087:26: static or opaque member 'Enrich' on Unknown("Is") has no linked implementation             
+warning GL3001 at 94:28: member 'Is' on Unknown("MinimumLevel") has no linked implementation; LLVM emits a typed       
+warning GL3004 at 17284:23: type 'LoggerConfiguration' has no linked LLVM layout                                       
+warning GL3004 at 17287:30: type 'PropertyEnricher' has no linked LLVM layout                                          
+warning GL3003 at 1466:87: static or opaque member 'FileName' on Unknown("File") has no linked implementation          
+warning GL3003 at 1466:87: static or opaque member 'File' on Unknown("T") has no linked implementation                 
+warning GL3003 at 17292:40: static or opaque member 'FullLogPathAndFileName' on Unknown("File") has no linked          
+warning GL3003 at 15496:27: static or opaque member 'Day' on Unknown("RollingInterval") has no linked implementation   
+warning GL3001 at 17302:43: member 'CreateLogger' on Unknown("MSSqlServer") has no linked implementation; LLVM emits a 
+
+

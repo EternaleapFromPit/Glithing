@@ -2,7 +2,7 @@
 
 This is a small compiler prototype for a C#-inspired systems language with Rust-like ownership checks.
 
-Accepted source file extensions are `.gl`, `.cs`, and `.pl`. The parser is the same for all three; `.cs` is intended for C#-migration snippets, and `.pl` is an alternate Glitching-lang source extension.
+Accepted source file extensions are `.gl` and `.cs`. The parser is the same for both; `.cs` is intended for C#-migration snippets.
 
 Current MVP:
 
@@ -161,7 +161,6 @@ cargo run -- examples\csharp_data_structures.gl
 cargo run -- examples\ref_struct.gl
 cargo run -- examples\thread.gl
 cargo run -- examples\old_csharp.cs
-cargo run -- examples\program.pl
 cargo run -- examples\system_collections_generic.cs
 cargo run -- examples\system_threading_tasks.cs
 cargo run -- examples\scopes.gl

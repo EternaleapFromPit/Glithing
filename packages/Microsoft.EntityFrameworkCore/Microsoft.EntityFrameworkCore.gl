@@ -1,6 +1,7 @@
 package Microsoft.EntityFrameworkCore;
 
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 class DbContextOptions<TContext> {
     public string ConnectionString;
@@ -25,17 +26,71 @@ class SqlProvider {
     }
 }
 
+class DbSet<T> {
+}
+
+class DbContextOptionsBuilder_ApplicationDbContext {
+    void UseSqlServer(string connectionString, object configure) {}
+}
+
+class ChangeTracker {
+    public DebugView DebugView;
+    public ChangeTracker() {
+        this.DebugView = new DebugView();
+    }
+    void DetectChanges() {}
+    void Clear() {}
+}
+
+class DebugView {
+    public string LongView;
+}
+
+class DatabaseFacade {
+    bool EnsureDeleted() { return false; }
+    void Migrate() {}
+    int ExecuteSqlRaw(string sql, object parameters) { return 0; }
+}
+
+enum EntityState {
+    Detached,
+    Unchanged,
+    Deleted,
+    Modified,
+    Added
+}
+
+class EntityEntry {
+    public EntityState State;
+}
+
+class DbUpdateConcurrencyException : Exception {
+}
+
 class DbContext {
     public string ConnectionString;
     public bool IsDisposed;
     public List<string> TrackedEntities;
     public SqlProvider Provider;
+    public DatabaseFacade Database;
+    public ChangeTracker ChangeTracker;
 
     public DbContext(string connectionString) {
         this.ConnectionString = connectionString;
         this.IsDisposed = false;
         this.TrackedEntities = new List<string>();
         this.Provider = new SqlProvider("sql", connectionString);
+        this.Database = new DatabaseFacade();
+        this.ChangeTracker = new ChangeTracker();
+    }
+
+    public DbContext(object options) {
+        this.ConnectionString = "";
+        this.IsDisposed = false;
+        this.TrackedEntities = new List<string>();
+        this.Provider = new SqlProvider("sql", "");
+        this.Database = new DatabaseFacade();
+        this.ChangeTracker = new ChangeTracker();
     }
 
     void EnsureNotDisposed() {
@@ -51,9 +106,43 @@ class DbContext {
 
     int TrackedCount => this.TrackedEntities.Count;
 
+    int SaveChanges() {
+        this.EnsureNotDisposed();
+        int count = this.TrackedEntities.Count;
+        this.TrackedEntities.Clear();
+        return count;
+    }
+
+    Task<int> SaveChangesAsync() {
+        this.EnsureNotDisposed();
+        int count = this.TrackedEntities.Count;
+        this.TrackedEntities.Clear();
+        return new Task<int>();
+    }
+
+    void Add(string entityKey) {
+        this.Track(entityKey);
+    }
+
+    void Update(string entityKey) {
+        this.Track(entityKey);
+    }
+
+    void Remove(string entityKey) {
+        this.EnsureNotDisposed();
+    }
+
     void Dispose() {
         this.IsDisposed = true;
         this.TrackedEntities.Clear();
+    }
+
+    DbSet<T> Set<T>() {
+        return new DbSet<T>();
+    }
+
+    EntityEntry Entry(object entity) {
+        return new EntityEntry();
     }
 }
 
@@ -117,11 +206,136 @@ DbSetString SetString(DbContext context, string table) {
     return new DbSetString(context.ConnectionString, table);
 }
 
+class ModelBuilder {
+    EntityTypeBuilder<T> Entity<T>() {
+        return new EntityTypeBuilder<T>();
+    }
+    object Entity(string name) {
+        return null;
+    }
+    object Entity(string name, object configure) {
+        return null;
+    }
+}
+class MigrationBuilder {}
+class EntityTypeBuilder<T> {}
+class PropertyBuilder {}
+class IndexBuilder {}
+
+enum DeleteBehavior {
+    Cascade = 0,
+    Restrict = 1,
+    SetNull = 2,
+    NoAction = 3
+}
+
+enum ReferentialAction {
+    NoAction = 0,
+    Cascade = 1,
+    Restrict = 2,
+    SetNull = 3
+}
+
+// Package-level helper functions for method chaining on Unknown types
+object EnableRetryOnFailure(object target) { return target; }
+object CommandTimeout(object target, int timeout) { return target; }
+object HasDefaultSchema(object target, string schema) { return target; }
+object Entity(object target, string name) { return target; }
+object Entity(object target, string name, object configure) { return target; }
+object HasAnnotation(object target, string name, object value) { return target; }
+object UseIdentityColumns(object target) { return target; }
+object EnsureSchema(object target, string schema) { return target; }
+object CreateTable(object target, string name, object columns) { return target; }
+object CreateTable(object target, string name, object columns, object constraints) { return target; }
+object CreateTable(object target, string name, object columns, object constraints, string schema) { return target; }
+object CreateTable(object target, string name, string schema, object columns, object constraints) { return target; }
+object CreateIndex(object target, string name, object columns) { return target; }
+object CreateIndex(object target, string name, string table, object columns) { return target; }
+object CreateIndex(object target, string name, string table, object columns, bool unique) { return target; }
+object CreateIndex(object target, string name, string schema, string table, object columns) { return target; }
+object CreateIndex(object target, string name, string schema, string table, object columns, bool unique) { return target; }
+object CreateIndex(object target, string name, string table, object columns, string schema, bool unique) { return target; }
+
+object DropTable(object target, string name) { return target; }
+object DropTable(object target, string name, string schema) { return target; }
+
+object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5) { return target; }
+object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6) { return target; }
+object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7) { return target; }
+object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8) { return target; }
+object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8, object arg9) { return target; }
+object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8, object arg9, object arg10) { return target; }
+object AlterColumn(object target, string name, object column) { return target; }
+
+object DropIndex(object target, string name) { return target; }
+object DropIndex(object target, string name, string schema) { return target; }
+object DropIndex(object target, string name, string schema, string table) { return target; }
+
+object AddColumn<T>(object target, object arg1, object arg2) { return target; }
+object AddColumn<T>(object target, object arg1, object arg2, object arg3) { return target; }
+object AddColumn<T>(object target, object arg1, object arg2, object arg3, object arg4) { return target; }
+object AddColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5) { return target; }
+object AddColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6) { return target; }
+object AddColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7) { return target; }
+object AddColumn(object target, string name, object column) { return target; }
+
+object DropColumn(object target, string name) { return target; }
+object DropColumn(object target, string name, string schema) { return target; }
+object DropColumn(object target, string name, string schema, string table) { return target; }
+
+object RenameColumn(object target, string name, string newName) { return target; }
+object RenameColumn(object target, string table, string name, string newName, string schema) { return target; }
+object RenameColumn(object target, object arg1, object arg2, object arg3, object arg4) { return target; }
+object RenameColumn(object target, object arg1, object arg2, object arg3, object arg4, object arg5) { return target; }
+
+object AddForeignKey(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8) { return target; }
+object AddForeignKey(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8, object arg9) { return target; }
+object AddForeignKey(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8, object arg9, object arg10) { return target; }
+object AddForeignKey(object target, string name, string table, string column, string principalTable, string principalColumn) { return target; }
+
+object DropForeignKey(object target, string name, string table) { return target; }
+object DropForeignKey(object target, string name, string table, string schema) { return target; }
+object Annotation(object target, string name, object value) { return target; }
+object Column(object target, object name) { return target; }
+object HasDefaultValueSql(object target, string sql) { return target; }
+object Property(object target, object prop) { return target; }
+object HasConversion(object target) { return target; }
+object IsUnique(object target) { return target; }
+object HasIndex(object target, object index) { return target; }
+object UsingEntity(object target, object entity) { return target; }
+object WithMany(object target, string navigation) { return target; }
+object HasMany(object target, string navigation) { return target; }
+object OnDelete(object target, object behavior) { return target; }
+object HasForeignKey(object target, string navigation) { return target; }
+object HasOne(object target, object navigation) { return target; }
+object AsQueryable(object target) { return target; }
+object IgnoreQueryFilters(object target) { return target; }
+object Where(object target, object predicate) { return target; }
+object Take(object target, int count) { return target; }
+object Skip(object target, int count) { return target; }
+object ToList(object target) { return target; }
+object Include(object target, object navigation) { return target; }
+object ThenInclude(object target, object navigation) { return target; }
+object HasDefaultValue(object target, object value) { return target; }
+object HasColumnType(object target, string type) { return target; }
+object Any(object target) { return target; }
+object Any(object target, object predicate) { return target; }
+object ToDictionary(object target, object keySelector) { return target; }
+object ToDictionary(object target, object keySelector, object elementSelector) { return target; }
+object ToArray(object target) { return target; }
+object Select(object target, object selector) { return target; }
+object FirstOrDefault(object target) { return target; }
+object FirstOrDefault(object target, object predicate) { return target; }
+object FirstOrDefaultAsync(object target) { return target; }
+object FirstOrDefaultAsync(object target, object predicate) { return target; }
+object SaveChangesAsync() { return null; }
+object SaveChangesAsync(object target) { return target; }
+object AddRangeAsync(object target, object entities) { return target; }
+object AddAsync(object target, object entity) { return target; }
+object AsNoTrackingWithIdentityResolution(object target) { return target; }
+object FromSqlRaw(object target, string sql, object parameters) { return target; }
+object ExecuteSqlRaw(object target, string sql, object parameters) { return target; }
+
 native "/*
-Minimal Microsoft.EntityFrameworkCore groundwork:
-- DbContext owns connection/provider/tracked entity state and exposes Dispose().
-- DbSetString and IQueryableString model tracked vs no-tracking query ownership.
-- Query materialization returns owned List<string> results.
-- This intentionally avoids shared arbitrary entity references; tracked state is
-  represented by owned string keys until generic entities and lifetimes are richer.
+Microsoft.EntityFrameworkCore package.
 */";

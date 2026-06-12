@@ -25,7 +25,7 @@ use tir::TypedProgram;
 pub fn run_cli() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let input = args.next().ok_or_else(|| {
-        "usage: glitchc <input.{gl,cs,pl}> [--emit-c <output.c>] [--emit-bytecode <output.gbc>] [--emit-llvm-ir <output.ll>] [--emit-llvm-bc <output.bc>] [--emit-exe <output.exe>] [--emit-leak-report <output.txt>] [--emit-nuget <output.nupkg>]"
+        "usage: glitchc <input.{gl,cs}> [--emit-c <output.c>] [--emit-bytecode <output.gbc>] [--emit-llvm-ir <output.ll>] [--emit-llvm-bc <output.bc>] [--emit-exe <output.exe>] [--emit-leak-report <output.txt>] [--emit-nuget <output.nupkg>]"
             .to_string()
     })?;
     let mut c_output = None;
@@ -111,11 +111,12 @@ fn read_input_source(input: &str) -> Result<String, String> {
             let text = fs::read_to_string(&file)
                 .map_err(|e| format!("failed to read {}: {e}", file.display()))?;
             source.push_str(strip_utf8_bom(&text));
-            source.push('\n');
+            source.push_str("\n__FILE_BOUNDARY__;\n");
         }
         return Ok(source);
     }
-    fs::read_to_string(path).map_err(|e| format!("failed to read {input}: {e}"))
+    let text = fs::read_to_string(path).map_err(|e| format!("failed to read {input}: {e}"))?;
+    Ok(format!("{}\n__FILE_BOUNDARY__;\n", strip_utf8_bom(&text)))
 }
 
 fn collect_source_files(path: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -129,7 +130,7 @@ fn collect_source_files(path: &Path, output: &mut Vec<PathBuf>) -> Result<(), St
         } else if path
             .extension()
             .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| matches!(ext, "gl" | "cs" | "pl"))
+            .is_some_and(|ext| matches!(ext, "gl" | "cs"))
         {
             output.push(path);
         }
@@ -203,8 +204,12 @@ fn compile_source_with_options(
     emit_c: bool,
 ) -> Result<CompileOutput, String> {
     let linked_source = link_package_sources(strip_utf8_bom(source))?;
+    let _ = fs::write("target/linked_source.gl", &linked_source);
     let tokens = Lexer::new(&linked_source).tokenize()?;
     let program = Parser::new(tokens).parse_program()?;
+    for ty in &program.types {
+        println!("PARSED TYPE: {} (namespace: {:?})", ty.name, ty.namespace);
+    }
     validate_generic_constraints(&program)?;
     BorrowChecker::check_program(&program)?;
     let cycle_warnings = check_reference_cycles(source, &program);
@@ -283,6 +288,7 @@ fn link_package_sources(source: &str) -> Result<String, String> {
     let mut linked = String::new();
     link_package_sources_inner(source, &mut visited, &mut linked)?;
     linked.push_str(source);
+    linked.push_str("\n__FILE_BOUNDARY__;\n");
     Ok(linked)
 }
 
@@ -312,7 +318,7 @@ fn link_package_sources_inner(
         })?;
         link_package_sources_inner(strip_utf8_bom(&package_source), visited, linked)?;
         linked.push_str(&package_source);
-        linked.push('\n');
+        linked.push_str("\n__FILE_BOUNDARY__;\n");
     }
     Ok(())
 }
@@ -4805,6 +4811,7 @@ impl Codegen {
             (CType::ClassPtr(expected), CType::ClassPtr(actual)) => self
                 .inheritance_distance(actual, expected)
                 .map(|distance| 10 + distance),
+            (CType::GenericPtr(_), _) | (_, CType::GenericPtr(_)) => Some(100),
             _ => self
                 .user_conversion_symbol(expected, &arg.c_type)
                 .map(|_| 20),
@@ -6381,7 +6388,7 @@ mod tests {
         let c = compile_source(source).expect("EF Core groundwork package should compile");
         let report = compile_leak_report(source).expect("EF leak report should compile");
 
-        assert!(c.contains("struct DbContext * db = DbContext_new(\"Server=:memory:\");"));
+        assert!(c.contains("struct DbContext * db = DbContext_new(glitch_strdup(\"Server=:memory:\"));"));
         assert!(c.contains("struct DbSetString * users = SetString(db, \"Users\");"));
         assert!(c.contains("static struct IQueryableString * DbSetString_AsNoTracking"));
         assert!(c.contains("SqlProvider_BuildSelectAll(provider, self->Table)"));
@@ -6870,7 +6877,7 @@ mod tests {
         let c = compile_source(source).expect("System.Text.Json package should compile");
         let report = compile_leak_report(source).expect("JSON leak report should compile");
 
-        assert!(c.contains("static char * SystemTextJson_SerializeString(char *value)"));
+        assert!(c.contains("static char * SystemTextJson_SerializeString(char * value)"));
         assert!(c.contains("char * json = JsonSerializer_SerializeString(value);"));
         assert!(c.contains("char * plain = JsonSerializer_DeserializeString(json);"));
         assert!(report.contains("No obvious owned temporary leaks detected."));
@@ -6890,6 +6897,7 @@ mod tests {
         "#;
 
         let llvm_ir = compile_llvm_ir(source).expect("System.IO.File operations should compile to LLVM IR");
+        println!("ACTUAL LLVM IR:\n{}", llvm_ir);
         assert!(llvm_ir.contains("call void @System_IO_File_WriteAllText"));
         assert!(llvm_ir.contains("call ptr @System_IO_File_ReadAllText"));
 

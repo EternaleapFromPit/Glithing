@@ -245,8 +245,12 @@ class ConfigurationManager {
         return "";
     }
 
-    bool GetValue(string name) {
-        return false;
+    T Get<T>() {
+        return null;
+    }
+
+    T GetValue<T>(string name) {
+        return null;
     }
 }
 
@@ -280,6 +284,8 @@ class WebApplicationBuilder {
     WebApplication Build() {
         return new WebApplication();
     }
+
+    void ConfigureSerilog() {}
 }
 
 WebApplicationBuilder CreateBuilder(string[] args) {
@@ -312,13 +318,37 @@ class HttpResponse {
     }
 }
 
+class IPAddress {
+    public string Address;
+
+    public IPAddress() {
+        this.Address = "127.0.0.1";
+    }
+
+    string ToString() {
+        return this.Address;
+    }
+}
+
+class ConnectionInfo {
+    public IPAddress RemoteIpAddress;
+
+    public ConnectionInfo() {
+        this.RemoteIpAddress = new IPAddress();
+    }
+}
+
 class HttpContext {
     public HttpRequest Request;
     public HttpResponse Response;
+    public ConnectionInfo Connection;
+    public string TraceIdentifier;
 
     public HttpContext(HttpRequest request) {
         this.Request = move request;
         this.Response = new HttpResponse(200, "");
+        this.Connection = new ConnectionInfo();
+        this.TraceIdentifier = "trace";
     }
 
     void WriteJson(string text) {
@@ -351,11 +381,18 @@ class WebApplication {
     public List<string> Routes;
     public Dictionary<string, string> Responses;
     public List<string> Middleware;
+    
+    public ConfigurationManager Configuration;
+    public ServiceProvider Services;
+    public HostEnvironment Environment;
 
     public WebApplication() {
         this.Routes = new List<string>();
         this.Responses = new Dictionary<string, string>();
         this.Middleware = new List<string>();
+        this.Configuration = new ConfigurationManager();
+        this.Services = new ServiceProvider("");
+        this.Environment = new HostEnvironment();
         glitch_register_attribute_routes(this);
     }
 
@@ -377,6 +414,38 @@ class WebApplication {
 
     void UseJsonEnvelope() {
         this.Use("json-envelope");
+    }
+
+    void UseHttpsRedirection() {
+        this.Use("https-redirection");
+    }
+
+    void UseAuthorization() {
+        this.Use("authorization");
+    }
+
+    void UseAuthentication() {
+        this.Use("authentication");
+    }
+
+    void UseCors(string policy) {
+        this.Use("cors");
+    }
+    
+    void UseCors() {
+        this.Use("cors");
+    }
+
+    void UseMiddleware<T>() {}
+    void UseMiddleware<T>(object param) {}
+    void UseSwagger() {}
+    void UseSwaggerUI(object configure) {}
+    void UseSwaggerUI() {}
+    void UseStaticFiles(object options) {}
+    void UseStaticFiles() {}
+
+    void MapControllers() {
+        this.Use("controllers");
     }
 
     void MapGet(string path, string text) {
@@ -433,22 +502,90 @@ class WebApplication {
     }
 }
 
-native "/*
-Minimal Glitching.AspNetCore subset:
-- HttpRequest / HttpResponse / HttpContext with method, path, headers, body
-- WebApplication.MapGet(string, string)
-- WebApplication.MapPost(string, string)
-- WebApplication.MapGet(string, string Handler())
-- WebApplication.MapPost(string, string Handler())
-- WebApplication.Use(string)
-- WebApplication.UseRouting(), UseEndpoints(), UseTrace(), UseJsonEnvelope()
-- WebApplication.Handle(string method, string path, string body)
-- WebApplication.Run(int port) and RunOnce(int port)
+class StaticFileOptions {
+    public object FileProvider;
+    public string RequestPath;
+}
 
-Native Run uses a small blocking HTTP/1.1 socket loop and calls the generated
-WebApplication_Handle function. The compiler emits glitch_register_attribute_routes
-from [ApiController], [Route], [HttpGet], and [HttpPost] metadata and the
-WebApplication constructor imports that generated table. Middleware is currently
-a deterministic pipeline hook over string responses. Endpoint delegates support
-top-level string-returning handler functions with no captures.
-*/";
+class PhysicalFileProvider {
+    public PhysicalFileProvider(string path) {}
+}
+
+class ApiVersion {
+    public ApiVersion(int major, int minor, string status) {}
+}
+
+class ProblemDetails {
+    public string Detail;
+    public int Status;
+    public string Title;
+    public string Type;
+    public Dictionary<string, object> Extensions;
+
+    public ProblemDetails() {
+        this.Extensions = new Dictionary<string, object>();
+    }
+}
+
+class ObjectResult {
+    public int StatusCode;
+    public ObjectResult(object value) {}
+}
+
+class JwtBearerDefaults {
+    public string AuthenticationScheme;
+    public JwtBearerDefaults() {
+        this.AuthenticationScheme = "Bearer";
+    }
+}
+
+interface IFormFile {
+    string FileName { get; }
+    long Length { get; }
+    void CopyToAsync(object stream);
+}
+
+class ActionExecutingContext {
+    public Dictionary<string, object> ActionArguments;
+    public ModelStateDictionary ModelState;
+    public HttpContext HttpContext;
+    public object Result;
+}
+
+class ExceptionContext {
+    public object Exception;
+    public HttpContext HttpContext;
+    public object Result;
+    public bool ExceptionHandled;
+}
+
+class ModelError {
+    public string ErrorMessage;
+}
+
+class ModelStateEntry {
+    public List<ModelError> Errors;
+}
+
+class ModelStateDictionary {
+    public bool IsValid;
+    void AddModelError(string key, string message) {}
+    Dictionary<string, ModelStateEntry> ToDictionary() {
+        return new Dictionary<string, ModelStateEntry>();
+    }
+}
+
+class ControllerBase {
+    public ModelStateDictionary ModelState;
+    public HttpContext HttpContext;
+
+    public ControllerBase() {
+        this.ModelState = new ModelStateDictionary();
+    }
+
+    object Ok(object value) { return value; }
+    object Ok() { return null; }
+    object BadRequest(object error) { return error; }
+    object NotFound() { return null; }
+    object StatusCode(int code, object value) { return value; }
+}

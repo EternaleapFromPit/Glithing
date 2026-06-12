@@ -1,9 +1,64 @@
 package System.IO;
 
-native "/*
-Glitching System.IO package marker.
+enum FileMode {
+    Create = 2
+}
 
-Supported members in this package slice:
-- System.IO.File.ReadAllText(string)
-- System.IO.File.WriteAllText(string, string)
-*/";
+class Path {
+    static string Combine(string path1, string path2) {
+        return path1 + "/" + path2;
+    }
+    static string GetExtension(string path) {
+        return ".jpg";
+    }
+    static string GetFileName(string path) {
+        return path;
+    }
+}
+
+class Directory {
+    static string GetCurrentDirectory() {
+        return System_IO_Directory_GetCurrentDirectory_Native();
+    }
+    static void CreateDirectory(string path) {
+        System_IO_Directory_CreateDirectory_Native(path);
+    }
+    // Returns a newline-separated list of file paths
+    static string GetFiles(string path) {
+        return System_IO_Directory_GetFiles_Native(path);
+    }
+}
+
+class FileStream {
+    public FileStream(string path, FileMode mode) {}
+    void Dispose() {}
+}
+
+class File {
+    static string ReadAllText(string path) {
+        return System_IO_File_ReadAllText_Native(path);
+    }
+    static void WriteAllText(string path, string contents) {
+        System_IO_File_WriteAllText_Native(path, contents);
+    }
+    static bool Exists(string path) {
+        return System_IO_File_Exists_Native(path) != 0;
+    }
+}
+
+native "
+static char * System_IO_File_ReadAllText_Native(const char *path);
+static void System_IO_File_WriteAllText_Native(const char *path, const char *contents);
+static char * System_IO_Directory_GetCurrentDirectory_Native();
+static void System_IO_Directory_CreateDirectory_Native(const char *path);
+static char * System_IO_Directory_GetFiles_Native(const char *path);
+static int System_IO_File_Exists_Native(const char *path);
+";
+
+string ReadAllText(string path) {
+    return System_IO_File_ReadAllText_Native(path);
+}
+
+void WriteAllText(string path, string contents) {
+    System_IO_File_WriteAllText_Native(path, contents);
+}

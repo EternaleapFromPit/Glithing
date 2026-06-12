@@ -1,0 +1,12 @@
+// tests/xunit_memory/borrow_simple.gl
+import System.XUnit;
+import System.Ownership;
+
+public class BorrowSimpleTests {
+    XUNIT_FACT(BorrowSimpleTests, SimpleBorrow);
+    public void SimpleBorrow() {
+        var owned = make_owned(new Rc<int>(7));
+        var borrowed = make_borrow(owned);
+        Assert.Equal(7, borrowed.Get().Get());
+    }
+}

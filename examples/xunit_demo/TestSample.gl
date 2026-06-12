@@ -1,0 +1,52 @@
+# TestSample.gl - Example xUnit tests for Glang
+
+using System.XUnit;
+
+using System.Ownership;
+
+using System.Threading.Tasks;
+
+
+# Simple test class
+public class SampleTests {
+    # Register test using macro
+    XUNIT_FACT(SampleTests, SimplePass);
+    public void SimplePass() {
+        Assert.True(1 + 1 == 2, "Math works");
+    }
+
+    XUNIT_FACT(SampleTests, SimpleFail);
+    public void SimpleFail() {
+        # This should fail
+        Assert.True(false, "Intentional failure");
+    }
+
+    # Test using borrowing/ownership model
+    XUNIT_FACT(SampleTests, OwnershipTest);
+    public void OwnershipTest() {
+        # Create an owned object
+        var owned = make_owned(new Rc<int>(42));
+        # Borrow a reference
+        var borrowed = make_borrow(owned);
+        # Access value via owned wrapper
+        Assert.Equal(42, owned.Get().Get());
+        # Borrowed should see same value
+        Assert.Equal(42, borrowed.Get().Get());
+    }
+};
+
+# Async test
+public class AsyncTests {
+    XUNIT_FACT(AsyncTests, AsyncPass);
+    public async void AsyncPass() {
+        var task = Task.Delay(10);
+        await task;
+        Assert.True(true);
+    }
+};
+
+# Entry point to run tests
+public static void main() {
+    # This will execute all registered tests
+    System.XUnit.RunAllTests();
+}

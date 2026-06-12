@@ -1,0 +1,191 @@
+package System.Data.SqlClient;
+
+// Minimal stub for SqlClient - real implementation will be added later.
+public class SqlConnection {
+    string _connectionString;
+    public SqlConnection(string connectionString) { _connectionString = connectionString; }
+    public void Open() { System_Data_SqlClient_Connect_Native(_connectionString); }
+    public void Close() { System_Data_SqlClient_Disconnect_Native(); }
+    public SqlCommand CreateCommand() { return new SqlCommand(this); }
+}
+
+public class SqlCommand {
+    SqlConnection _connection;
+    string _commandText;
+    public SqlCommand(SqlConnection connection) { _connection = connection; }
+    public string CommandText { get => _commandText; set => _commandText = value; }
+    public SqlDataReader ExecuteReader() { return System_Data_SqlClient_ExecuteReader_Native(_commandText); }
+    public int ExecuteNonQuery() { return System_Data_SqlClient_ExecuteNonQuery_Native(_commandText); }
+    public object ExecuteScalar() { return System_Data_SqlClient_ExecuteScalar_Native(_commandText); }
+}
+
+public class SqlDataReader {
+    // Placeholder for native data reader handle
+    public bool Read() { return System_Data_SqlClient_Read_Native(); }
+    public string GetString(int ordinal) { return System_Data_SqlClient_GetString_Native(ordinal); }
+    public int GetInt32(int ordinal) { return System_Data_SqlClient_GetInt32_Native(ordinal); }
+    public bool IsDBNull(int ordinal) { return System_Data_SqlClient_IsDBNull_Native(ordinal) != 0; }
+    public void Close() { System_Data_SqlClient_ReaderClose_Native(); }
+}
+
+public class SqlException : Exception {
+    public int Number { get; set; }
+    public SqlException(string message, int number) : base(message) { Number = number; }
+}
+
+native "
+#include <sql.h>
+#include <sqlext.h>
+#include <stdlib.h>
+#include <string.h>
+
+static SQLHENV env = SQL_NULL_HENV;
+static SQLHDBC dbc = SQL_NULL_HDBC;
+static SQLHSTMT stmt = SQL_NULL_HSTMT;
+static bool stmt_in_use = false;
+
+static void check_diag_handle(SQLHANDLE handle, SQLSMALLINT type) {
+    SQLSMALLINT i = 0;
+    SQLINTEGER nativeError;
+    SQLCHAR sqlState[6];
+    SQLCHAR message[256];
+    SQLSMALLINT messageLen;
+    while (SQLGetDiagRec(type, handle, ++i, sqlState, &nativeError, message, sizeof(message), &messageLen) == SQL_SUCCESS) {
+        // For simplicity, we just abort on error.
+        abort();
+    }
+}
+
+void System_Data_SqlClient_Connect_Native(const char* connectionString) {
+    if (SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env) != SQL_SUCCESS) abort();
+    if (SQLSetEnvAttr(env, SQL_ATTR_ODBC_VERSION, (void*)SQL_OV_ODBC3, 0) != SQL_SUCCESS) abort();
+    if (SQLAllocHandle(SQL_HANDLE_DBC, env, &dbc) != SQL_SUCCESS) abort();
+    // Connect using connection string; SQLDriverConnect expects a wchar string on Windows, but we keep simple UTF-8.
+    SQLCHAR outConnStr[1024];
+    SQLSMALLINT outConnStrLen;
+    SQLRETURN ret = SQLDriverConnect(dbc, NULL, (SQLCHAR*)connectionString, SQL_NTS,
+                                      outConnStr, sizeof(outConnStr), &outConnStrLen, SQL_DRIVER_NOPROMPT);
+    if (SQL_SUCCEEDED(ret) == 0) {
+        check_diag_handle(dbc, SQL_HANDLE_DBC);
+        abort();
+    }
+}
+
+void System_Data_SqlClient_Disconnect_Native() {
+    if (dbc != SQL_NULL_HDBC) {
+        SQLDisconnect(dbc);
+        SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+        dbc = SQL_NULL_HDBC;
+    }
+    if (env != SQL_NULL_HENV) {
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        env = SQL_NULL_HENV;
+    }
+    stmt_in_use = false;
+    if (stmt != SQL_NULL_HSTMT) {
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        stmt = SQL_NULL_HSTMT;
+    }
+}
+
+int System_Data_SqlClient_ExecuteNonQuery_Native(const char* commandText) {
+    if (dbc == SQL_NULL_HDBC) abort();
+    SQLHSTMT localStmt;
+    if (SQLAllocHandle(SQL_HANDLE_STMT, dbc, &localStmt) != SQL_SUCCESS) abort();
+    SQLRETURN ret = SQLExecDirect(localStmt, (SQLCHAR*)commandText, SQL_NTS);
+    if (!SQL_SUCCEEDED(ret)) {
+        check_diag_handle(localStmt, SQL_HANDLE_STMT);
+        SQLFreeHandle(SQL_HANDLE_STMT, localStmt);
+        abort();
+    }
+    SQLLEN rowsAffected = 0;
+    SQLRowCount(localStmt, &rowsAffected);
+    SQLFreeHandle(SQL_HANDLE_STMT, localStmt);
+    return (int)rowsAffected;
+}
+
+void* System_Data_SqlClient_ExecuteReader_Native(const char* commandText) {
+    if (dbc == SQL_NULL_HDBC) abort();
+    if (stmt_in_use) abort(); // only one reader at a time for simplicity
+    if (SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt) != SQL_SUCCESS) abort();
+    SQLRETURN ret = SQLExecDirect(stmt, (SQLCHAR*)commandText, SQL_NTS);
+    if (!SQL_SUCCEEDED(ret)) {
+        check_diag_handle(stmt, SQL_HANDLE_STMT);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        stmt = SQL_NULL_HSTMT;
+        abort();
+    }
+    stmt_in_use = true;
+    return (void*)stmt;
+}
+
+void* System_Data_SqlClient_ExecuteScalar_Native(const char* commandText) {
+    // Reuse ExecuteReader but fetch first column and return as string pointer (allocated)
+    if (dbc == SQL_NULL_HDBC) abort();
+    SQLHSTMT localStmt;
+    if (SQLAllocHandle(SQL_HANDLE_STMT, dbc, &localStmt) != SQL_SUCCESS) abort();
+    SQLRETURN ret = SQLExecDirect(localStmt, (SQLCHAR*)commandText, SQL_NTS);
+    if (!SQL_SUCCEEDED(ret)) {
+        check_diag_handle(localStmt, SQL_HANDLE_STMT);
+        SQLFreeHandle(SQL_HANDLE_STMT, localStmt);
+        abort();
+    }
+    ret = SQLFetch(localStmt);
+    if (ret == SQL_NO_DATA) {
+        SQLFreeHandle(SQL_HANDLE_STMT, localStmt);
+        return NULL;
+    }
+    // Get first column as string (assume char data)
+    SQLCHAR buffer[256];
+    SQLLEN indicator;
+    SQLGetData(localStmt, 1, SQL_C_CHAR, buffer, sizeof(buffer), &indicator);
+    char* result = NULL;
+    if (indicator != SQL_NULL_DATA) {
+        size_t len = strlen((char*)buffer);
+        result = (char*)malloc(len + 1);
+        strcpy(result, (char*)buffer);
+    }
+    SQLFreeHandle(SQL_HANDLE_STMT, localStmt);
+    return result;
+}
+
+bool System_Data_SqlClient_Read_Native() {
+    if (!stmt_in_use || stmt == SQL_NULL_HSTMT) return false;
+    SQLRETURN ret = SQLFetch(stmt);
+    return (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO);
+}
+
+const char* System_Data_SqlClient_GetString_Native(int ordinal) {
+    static char buffer[256];
+    if (!stmt_in_use) return NULL;
+    SQLLEN indicator;
+    SQLGetData(stmt, ordinal + 1, SQL_C_CHAR, buffer, sizeof(buffer), &indicator);
+    if (indicator == SQL_NULL_DATA) return NULL;
+    // Caller must copy if needed; we return pointer to static buffer.
+    return buffer;
+}
+
+int System_Data_SqlClient_GetInt32_Native(int ordinal) {
+    SQLINTEGER val = 0;
+    SQLLEN indicator;
+    if (!stmt_in_use) return 0;
+    SQLGetData(stmt, ordinal + 1, SQL_C_SLONG, &val, sizeof(val), &indicator);
+    return (int)val;
+}
+
+int System_Data_SqlClient_IsDBNull_Native(int ordinal) {
+    if (!stmt_in_use) return 1;
+    SQLLEN indicator;
+    // Peek data without copying
+    SQLGetData(stmt, ordinal + 1, SQL_C_DEFAULT, NULL, 0, &indicator);
+    return (indicator == SQL_NULL_DATA) ? 1 : 0;
+}
+
+void System_Data_SqlClient_ReaderClose_Native() {
+    if (stmt != SQL_NULL_HSTMT) {
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        stmt = SQL_NULL_HSTMT;
+    }
+    stmt_in_use = false;
+}
+";

@@ -676,10 +676,18 @@ impl TypeEnv {
         method_name: &str,
         arg_types: &[IrType],
     ) -> Option<&FunctionSignature> {
-        let signatures = self
+        if let Some(signatures) = self
             .methods
-            .get(&(type_name.to_string(), method_name.to_string()))?;
-        resolve_signature(signatures, arg_types)
+            .get(&(type_name.to_string(), method_name.to_string()))
+        {
+            if let Some(sig) = resolve_signature(signatures, arg_types) {
+                return Some(sig);
+            }
+        }
+        self.bases.get(type_name)?.iter().find_map(|base| {
+            let simple = base.rsplit('.').next().unwrap_or(base);
+            self.resolve_method(simple, method_name, arg_types)
+        })
     }
 
     fn resolve_method_call(
@@ -688,18 +696,28 @@ impl TypeEnv {
         method_name: &str,
         args: &[TypedExpr],
     ) -> Result<Option<&FunctionSignature>, String> {
-        let Some(signatures) = self
+        if let Some(signatures) = self
             .methods
             .get(&(type_name.to_string(), method_name.to_string()))
-        else {
-            return Ok(None);
-        };
-        resolve_call_signature(
-            signatures,
-            args,
-            |expected, arg| ir_conversion_rank(expected, arg, self),
-            || format!("call to '{}.{}'", type_name, method_name),
-        )
+        {
+            if let Some(sig) = resolve_call_signature(
+                signatures,
+                args,
+                |expected, arg| ir_conversion_rank(expected, arg, self),
+                || format!("call to '{}.{}'", type_name, method_name),
+            )? {
+                return Ok(Some(sig));
+            }
+        }
+        if let Some(bases) = self.bases.get(type_name) {
+            for base in bases {
+                let simple = base.rsplit('.').next().unwrap_or(base);
+                if let Some(sig) = self.resolve_method_call(simple, method_name, args)? {
+                    return Ok(Some(sig));
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn resolve_constructor(
@@ -1572,7 +1590,7 @@ impl OwnershipChecker {
                     (IrType::Task(inner), "GetAwaiter") => IrType::Task(inner.clone()),
                     (_, "Contains") | (_, "ContainsKey") | (_, "Remove") => IrType::Bool,
                     (_, "Add") | (_, "Clear") | (_, "Wait") => IrType::Void,
-                    (IrType::Unknown(target), "Run") if target == "Task" => args
+                    (IrType::Unknown(target) | IrType::Class(target), "Run") if target == "Task" => args
                         .first()
                         .map(|arg| IrType::Task(Box::new(arg.ty.clone())))
                         .unwrap_or_else(|| IrType::Task(Box::new(IrType::Void))),
@@ -3234,6 +3252,24 @@ fn lower_typed_expr_with_expected(
                     field_type.clone(),
                     ownership_for_type(&field_type),
                 )
+            } else if let Some(kind) = env.kinds.get(name) {
+                let ty = match kind {
+                    TypeKind::Class => IrType::Class(name.clone()),
+                    TypeKind::Interface => IrType::Interface(name.clone()),
+                    TypeKind::Enum => IrType::Int,
+                    _ => IrType::Struct(name.clone()),
+                };
+                typed_expr_with_ownership(
+                    TypedExprKind::Var(name.clone()),
+                    ty,
+                    Ownership::Shared,
+                )
+            } else if name == "Exception" || name == "System.Exception" {
+                typed_expr_with_ownership(
+                    TypedExprKind::Var(name.clone()),
+                    IrType::Exception,
+                    Ownership::Shared,
+                )
             } else if let Some(signature) = env.single_function(name) {
                 typed_expr_with_ownership(
                     TypedExprKind::FunctionSymbol(name.clone()),
@@ -3313,6 +3349,23 @@ fn lower_typed_expr_with_expected(
         }
         Expr::Field { target, name } => {
             let target = lower_typed_expr(target, env, scopes)?;
+            if let IrType::Class(type_name) | IrType::Struct(type_name) | IrType::Interface(type_name) = &target.ty {
+                let getter_name = format!("get_{name}");
+                if let Some(signature) = env.resolve_method(type_name, &getter_name, &[]) {
+                    return Ok(typed_expr(
+                        TypedExprKind::Call(TypedCall {
+                            kind: TypedCallKind::Method {
+                                target: Box::new(target),
+                                name: getter_name,
+                                symbol: signature.symbol.clone(),
+                                resolution: CallResolution::InstanceMethod,
+                            },
+                            args: Vec::new(),
+                        }),
+                        signature.return_type.clone(),
+                    ));
+                }
+            }
             let ty = match (&target.ty, name.as_str()) {
                 (IrType::Class(type_name), field) | (IrType::Struct(type_name), field) => env
                     .resolve_field(type_name, field)
@@ -3361,7 +3414,7 @@ fn lower_typed_expr_with_expected(
         Expr::MethodCall { target, name, args } => {
             let target = lower_typed_expr(target, env, scopes)?;
             let mut candidates = Vec::new();
-            if let IrType::Class(type_name) | IrType::Struct(type_name) = &target.ty {
+            if let IrType::Class(type_name) | IrType::Struct(type_name) | IrType::Interface(type_name) = &target.ty {
                 if let Some(sigs) = env.methods.get(&(type_name.clone(), name.clone())) {
                     candidates = sigs.clone();
                 }
@@ -3616,14 +3669,34 @@ fn lower_expr(
         },
         Expr::Var(name) => lookup(scopes, name)
             .or_else(|| {
-                env.single_function(name).map(|signature| TypedBinding {
-                    name: name.clone(),
-                    ty: IrType::Function {
-                        params: signature.params.clone(),
-                        return_type: Box::new(signature.return_type.clone()),
-                    },
-                    ownership: Ownership::Copy,
-                })
+                if let Some(kind) = env.kinds.get(name) {
+                    let ty = match kind {
+                        TypeKind::Class => IrType::Class(name.clone()),
+                        TypeKind::Interface => IrType::Interface(name.clone()),
+                        TypeKind::Enum => IrType::Int,
+                        _ => IrType::Struct(name.clone()),
+                    };
+                    Some(TypedBinding {
+                        name: name.clone(),
+                        ty,
+                        ownership: Ownership::Shared,
+                    })
+                } else if name == "Exception" || name == "System.Exception" {
+                    Some(TypedBinding {
+                        name: name.clone(),
+                        ty: IrType::Exception,
+                        ownership: Ownership::Shared,
+                    })
+                } else {
+                    env.single_function(name).map(|signature| TypedBinding {
+                        name: name.clone(),
+                        ty: IrType::Function {
+                            params: signature.params.clone(),
+                            return_type: Box::new(signature.return_type.clone()),
+                        },
+                        ownership: Ownership::Copy,
+                    })
+                }
             })
             .unwrap_or(TypedBinding {
                 name: name.clone(),
@@ -3729,14 +3802,14 @@ fn lower_expr(
                 (IrType::Task(inner), "GetAwaiter") => IrType::Task(inner.clone()),
                 (_, "Contains") | (_, "ContainsKey") | (_, "Remove") => IrType::Bool,
                 (_, "Add") | (_, "Clear") | (_, "Wait") => IrType::Void,
-                (IrType::Unknown(target), "Run") if target == "Task" => args
+                (IrType::Unknown(target) | IrType::Class(target), "Run") if target == "Task" => args
                     .first()
                     .map(|arg| IrType::Task(Box::new(arg.ty.clone())))
                     .unwrap_or_else(|| IrType::Task(Box::new(IrType::Void))),
-                (IrType::Unknown(target), "ReadAllText") if target == "File" || target == "System.IO.File" => {
+                (IrType::Unknown(target) | IrType::Class(target), "ReadAllText") if target == "File" || target == "System.IO.File" => {
                     IrType::String
                 }
-                (IrType::Unknown(target), "WriteAllText") if target == "File" || target == "System.IO.File" => {
+                (IrType::Unknown(target) | IrType::Class(target), "WriteAllText") if target == "File" || target == "System.IO.File" => {
                     IrType::Void
                 }
                 _ => IrType::Unknown(name.clone()),
@@ -4062,7 +4135,47 @@ fn resolve_method_call(
                 ))
             }
         }
-        (IrType::Class(type_name) | IrType::Struct(type_name), method_name) => {
+        (IrType::Unknown(target) | IrType::Class(target), "Run") if target == "Task" => {
+            let result = args
+                .first()
+                .map(|arg| arg.ty.clone())
+                .unwrap_or(IrType::Void);
+            Ok((
+                IrType::Task(Box::new(result)),
+                name.to_string(),
+                CallResolution::StaticFunction,
+            ))
+        }
+        (IrType::Unknown(target) | IrType::Class(target), "ReadAllText") if target == "File" || target == "System.IO.File" => {
+            Ok((
+                IrType::String,
+                "System_IO_File_ReadAllText".to_string(),
+                CallResolution::StaticFunction,
+            ))
+        }
+        (IrType::Unknown(target) | IrType::Class(target), "WriteAllText") if target == "File" || target == "System.IO.File" => {
+            Ok((
+                IrType::Void,
+                "System_IO_File_WriteAllText".to_string(),
+                CallResolution::StaticFunction,
+            ))
+        }
+        (IrType::Unknown(target) | IrType::Class(target), "WriteLine") if target == "Console" || target == "System.Console" => {
+            let arg_ty = args.first().map(|arg| &arg.ty).unwrap_or(&IrType::Void);
+            let symbol = match arg_ty {
+                IrType::String => "System_Console_WriteLine_String",
+                IrType::Byte | IrType::Short | IrType::Int | IrType::Long | IrType::UInt => "System_Console_WriteLine_I64",
+                IrType::Double => "System_Console_WriteLine_Double",
+                IrType::Bool => "System_Console_WriteLine_Bool",
+                _ => "System_Console_WriteLine_String",
+            };
+            Ok((
+                IrType::Void,
+                symbol.to_string(),
+                CallResolution::StaticFunction,
+            ))
+        }
+        (IrType::Class(type_name) | IrType::Struct(type_name) | IrType::Interface(type_name), method_name) => {
             if let Some(signature) = env.resolve_method_call(type_name, method_name, args)? {
                 Ok((
                     signature.return_type.clone(),
@@ -4105,46 +4218,6 @@ fn resolve_method_call(
             CallResolution::CollectionMethod,
         )),
         (_, "Wait") => Ok((IrType::Void, name.to_string(), CallResolution::TaskMethod)),
-        (IrType::Unknown(target), "Run") if target == "Task" => {
-            let result = args
-                .first()
-                .map(|arg| arg.ty.clone())
-                .unwrap_or(IrType::Void);
-            Ok((
-                IrType::Task(Box::new(result)),
-                name.to_string(),
-                CallResolution::StaticFunction,
-            ))
-        }
-        (IrType::Unknown(target), "ReadAllText") if target == "File" || target == "System.IO.File" => {
-            Ok((
-                IrType::String,
-                "System_IO_File_ReadAllText".to_string(),
-                CallResolution::StaticFunction,
-            ))
-        }
-        (IrType::Unknown(target), "WriteAllText") if target == "File" || target == "System.IO.File" => {
-            Ok((
-                IrType::Void,
-                "System_IO_File_WriteAllText".to_string(),
-                CallResolution::StaticFunction,
-            ))
-        }
-        (IrType::Unknown(target), "WriteLine") if target == "Console" || target == "System.Console" => {
-            let arg_ty = args.first().map(|arg| &arg.ty).unwrap_or(&IrType::Void);
-            let symbol = match arg_ty {
-                IrType::String => "System_Console_WriteLine_String",
-                IrType::Byte | IrType::Short | IrType::Int | IrType::Long | IrType::UInt => "System_Console_WriteLine_I64",
-                IrType::Double => "System_Console_WriteLine_Double",
-                IrType::Bool => "System_Console_WriteLine_Bool",
-                _ => "System_Console_WriteLine_String",
-            };
-            Ok((
-                IrType::Void,
-                symbol.to_string(),
-                CallResolution::StaticFunction,
-            ))
-        }
         _ => Ok((
             IrType::Unknown(name.to_string()),
             name.to_string(),
@@ -4155,6 +4228,15 @@ fn resolve_method_call(
 
 fn type_syntax_to_ir(ty: &TypeSyntax, env: &TypeEnv) -> IrType {
     match ty {
+        TypeSyntax::GenericNamed { name, args }
+            if name == "own" || name == "borrow" || name == "System.Ownership.own" || name == "System.Ownership.borrow" =>
+        {
+            if let Some(first_arg) = args.first() {
+                type_syntax_to_ir(first_arg, env)
+            } else {
+                IrType::Unknown("T".to_string())
+            }
+        }
         TypeSyntax::Scalar(scalar) => scalar_to_ir(*scalar),
         TypeSyntax::String => IrType::String,
         TypeSyntax::Array(inner) => IrType::Array(Box::new(type_syntax_to_ir(inner, env))),

@@ -1,0 +1,24 @@
+// System.Ownership.gl - Borrowing / Ownership model stub
+
+package System.Ownership;
+
+// Ownership qualifier (own) indicates the caller takes full ownership of the value.
+// Borrow qualifier (borrow) indicates a temporary reference that must not outlive the owner.
+// In this stub we only provide type aliases; real compiler support is pending.
+
+public type own<T> = T; // placeholder for owned values
+public type borrow<T> = T; // placeholder for borrowed references
+
+// Runtime support: simple reference counting wrapper for owned objects.
+public class Rc<T> {
+    private T value;
+    private int refCount = 1;
+    public Rc(T v) { value = v; }
+    public void AddRef() { refCount++; }
+    public void Release() { if (--refCount == 0) { /* drop value */ } }
+    public T Get() => value;
+}
+
+// Helper functions to create owned and borrowed instances
+public static own<T> make_owned<T>(T v) => v;
+public static borrow<T> make_borrow<T>(T v) => v;

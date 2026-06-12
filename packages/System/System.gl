@@ -1,0 +1,104 @@
+package System;
+
+using System.Collections.Generic;
+
+class AppContext {
+    public static string BaseDirectory = ".";
+}
+
+class Uri {
+    public Uri(string uri) {}
+}
+
+class GC {
+    static void SuppressFinalize(object obj) {}
+}
+
+class Exception {
+    public string Message;
+    public Exception(string message) {
+        this.Message = message;
+    }
+}
+
+class ArgumentException : Exception {
+    public ArgumentException(string message) {
+        this.Message = message;
+    }
+}
+
+class FormatException : Exception {
+    public FormatException(string message) {
+        this.Message = message;
+    }
+}
+
+class DateTime {
+    public double TotalMinutes;
+    public DateTime UtcNow;
+    
+    static DateTime Parse(string s) { return null; }
+}
+
+class TimeSpan {
+    public double TotalMinutes;
+    static TimeSpan FromMinutes(double minutes) { return null; }
+    public TimeSpan(int h, int m, int s, int ms) {}
+}
+
+class Enum {
+    static bool TryParse<T>(string value, out T result) {
+        return false;
+    }
+}
+
+class Type {
+    public static List<Type> EmptyTypes;
+    public bool IsGenericType;
+    
+    Type GetGenericTypeDefinition() { return null; }
+    Type[] GetGenericArguments() { return null; }
+    object GetProperty(string name, object flags) { return null; }
+    object[] GetProperties() { return null; }
+}
+
+class PropertyInfo {
+    public string Name;
+    public Type PropertyType;
+}
+
+class string {
+    static bool IsNullOrEmpty(string value) { return false; }
+    static bool IsNullOrWhiteSpace(string value) { return false; }
+    string ToLower() { return this; }
+    string Substring(int start) { return this; }
+    string[] Split(string separator) { return null; }
+    string Replace(string old, string newStr) { return this; }
+}
+
+class String {
+    static bool IsNullOrEmpty(string value) { return false; }
+    static bool IsNullOrWhiteSpace(string value) { return false; }
+    string ToLower() { return this; }
+    string Substring(int start) { return this; }
+    string[] Split(string separator) { return null; }
+    string Replace(string old, string newStr) { return this; }
+}
+
+class bool {
+    static bool Parse(string value) { return false; }
+}
+
+class int {
+    static int Parse(string value) { return 0; }
+    static bool TryParse(string s, out int result) {
+        result = 0;
+        return false;
+    }
+}
+
+enum BindingFlags {
+    IgnoreCase = 1,
+    Public = 2,
+    Instance = 4
+}

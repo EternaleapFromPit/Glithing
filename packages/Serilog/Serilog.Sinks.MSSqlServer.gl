@@ -1,0 +1,36 @@
+package Serilog.Sinks.MSSqlServer;
+
+using System;
+using System.Collections.Generic;
+
+// Simplified stub of the MSSqlServerSinkOptions class used by the Library Management System.
+class MSSqlServerSinkOptions {
+    // The name of the table where logs are written.
+    string TableName;
+    // Whether the table should be created automatically if it does not exist.
+    bool AutoCreateSqlTable;
+    // Maximum number of log events to batch before writing to the database.
+    int BatchPostingLimit;
+    // Time interval after which a batch is written regardless of size.
+    TimeSpan BatchPeriod;
+    // Connection string for the SQL Server database.
+    string ConnectionString;
+    // Collection of column mappings.
+    List<SqlColumn> ColumnOptions;
+    // Parameterless constructor required by the Serilog configuration DSL.
+    MSSqlServerSinkOptions() {}
+}
+
+// Simplified stub representing a column mapping for the MSSQL sink.
+class SqlColumn {
+    // Name of the column in the database table.
+    string ColumnName;
+    // Name of the property on the log event object.
+    string PropertyName;
+    // Optional custom SQL type (e.g., "nvarchar(max)").
+    string DataType;
+    // Indicates whether the column is a primary key.
+    bool IsPrimaryKey;
+
+    SqlColumn() {}
+}
