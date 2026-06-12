@@ -1,0 +1,29 @@
+struct Point {
+    int X;
+    int Y;
+}
+
+class Player {
+    public string Name;
+    public int Hp;
+}
+
+fn main() {
+    string name = "Ada";
+    print(name);
+
+    Point p = new Point { X = 2, Y = 3 };
+    print(p.X);
+
+    Player player = new Player { Name = "Ada", Hp = 100 };
+    print(player.Hp);
+
+    List<int> xs = new List<int>();
+    xs.Add(10);
+    xs.Add(20);
+    print(xs[1]);
+
+    Dictionary<string, int> scores = new Dictionary<string, int>();
+    scores.Add("hp", 100);
+    print(scores["hp"]);
+}

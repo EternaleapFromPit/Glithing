@@ -1,0 +1,9 @@
+package System.IO;
+
+native "/*
+Glitching System.IO package marker.
+
+Supported members in this package slice:
+- System.IO.File.ReadAllText(string)
+- System.IO.File.WriteAllText(string, string)
+*/";

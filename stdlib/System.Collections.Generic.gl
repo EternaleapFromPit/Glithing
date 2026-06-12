@@ -1,0 +1,103 @@
+package System.Collections.Generic;
+
+native "
+struct List_int {
+    int *data;
+    int len;
+    int cap;
+};
+
+static struct List_int List_int_new(void) {
+    struct List_int list;
+    list.len = 0;
+    list.cap = 4;
+    list.data = malloc(sizeof(int) * (size_t)list.cap);
+    if (!list.data) { abort(); }
+    return list;
+}
+
+static void List_int_add(struct List_int *list, int value) {
+    if (list->len >= list->cap) {
+        list->cap *= 2;
+        list->data = realloc(list->data, sizeof(int) * (size_t)list->cap);
+        if (!list->data) { abort(); }
+    }
+    list->data[list->len++] = value;
+}
+
+static int List_int_get(struct List_int *list, int index) {
+    if (index < 0 || index >= list->len) { abort(); }
+    return list->data[index];
+}
+
+static void List_int_free(struct List_int *list) {
+    free(list->data);
+    list->data = NULL;
+    list->len = 0;
+    list->cap = 0;
+}
+
+struct Dict_string_int_entry {
+    char *key;
+    int value;
+};
+
+struct Dict_string_int {
+    struct Dict_string_int_entry *entries;
+    int len;
+    int cap;
+};
+
+static char * glitch_strdup(const char *source) {
+    size_t len = strlen(source) + 1;
+    char *copy = malloc(len);
+    if (!copy) { abort(); }
+    memcpy(copy, source, len);
+    return copy;
+}
+
+static struct Dict_string_int Dict_string_int_new(void) {
+    struct Dict_string_int dict;
+    dict.len = 0;
+    dict.cap = 4;
+    dict.entries = malloc(sizeof(struct Dict_string_int_entry) * (size_t)dict.cap);
+    if (!dict.entries) { abort(); }
+    return dict;
+}
+
+static void Dict_string_int_add(struct Dict_string_int *dict, const char *key, int value) {
+    for (int i = 0; i < dict->len; i++) {
+        if (strcmp(dict->entries[i].key, key) == 0) {
+            dict->entries[i].value = value;
+            return;
+        }
+    }
+    if (dict->len >= dict->cap) {
+        dict->cap *= 2;
+        dict->entries = realloc(dict->entries, sizeof(struct Dict_string_int_entry) * (size_t)dict->cap);
+        if (!dict->entries) { abort(); }
+    }
+    dict->entries[dict->len].key = glitch_strdup(key);
+    dict->entries[dict->len].value = value;
+    dict->len++;
+}
+
+static int Dict_string_int_get(struct Dict_string_int *dict, const char *key) {
+    for (int i = 0; i < dict->len; i++) {
+        if (strcmp(dict->entries[i].key, key) == 0) {
+            return dict->entries[i].value;
+        }
+    }
+    abort();
+}
+
+static void Dict_string_int_free(struct Dict_string_int *dict) {
+    for (int i = 0; i < dict->len; i++) {
+        free(dict->entries[i].key);
+    }
+    free(dict->entries);
+    dict->entries = NULL;
+    dict->len = 0;
+    dict->cap = 0;
+}
+";

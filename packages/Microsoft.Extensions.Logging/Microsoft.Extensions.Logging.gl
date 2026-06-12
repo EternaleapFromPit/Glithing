@@ -1,0 +1,19 @@
+package Microsoft.Extensions.Logging;
+
+interface ILogger<T> {
+    void LogError(string message);
+    void LogWarning(string message);
+    void LogInformation(string message);
+}
+
+class ConsoleLogger<T> : ILogger<T> {
+    void LogError(string message) {
+    }
+
+    void LogWarning(string message) {
+    }
+
+    void LogInformation(string message) {
+    }
+}
+

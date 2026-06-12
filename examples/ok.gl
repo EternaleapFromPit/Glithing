@@ -1,0 +1,7 @@
+fn main() {
+    var x = 10;
+    let r = borrow x;
+    print(r);
+    let y = x + 32;
+    print(y);
+}

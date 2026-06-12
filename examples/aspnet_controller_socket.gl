@@ -1,0 +1,73 @@
+using Glitching.AspNetCore;
+
+interface IStatusProvider {
+    string Ready();
+}
+
+class StatusProvider : IStatusProvider {
+    string Ready() {
+        return "{\"status\":\"ready\"}";
+    }
+}
+
+class EchoRequest {
+    public string Message;
+    public int Code;
+}
+
+[ApiController]
+[Route("/api/status")]
+class StatusController {
+    public IStatusProvider Provider;
+
+    public StatusController(IStatusProvider provider) {
+        this.Provider = provider;
+    }
+
+    [HttpGet("/ready")]
+    string Ready() {
+        return this.Provider.Ready();
+    }
+
+    [HttpGet("/item/{id}")]
+    string Item([FromRoute] int id) {
+        if (id == 42) {
+            return "{\"item\":\"matched\"}";
+        }
+        return "{\"item\":\"other\"}";
+    }
+
+    [HttpPost("/echo")]
+    string Echo([FromBody] string body) {
+        return body;
+    }
+
+    [HttpGet("/query")]
+    string Query([FromQuery] string name) {
+        return name;
+    }
+
+    [HttpPost("/dto")]
+    string Dto([FromBody] EchoRequest request) {
+        if (request.Code == 7) {
+            return request.Message;
+        }
+        return "invalid";
+    }
+
+    [HttpGet("/object")]
+    EchoRequest Object() {
+        return new EchoRequest { Message = "serialized", Code = 9 };
+    }
+
+    [HttpGet("/async-object")]
+    async Task<ActionResult<EchoRequest>> AsyncObject() {
+        EchoRequest response = new EchoRequest { Message = "async", Code = 11 };
+        return Ok(response);
+    }
+}
+
+fn main() {
+    WebApplication app = new WebApplication();
+    app.RunOnce(5101);
+}

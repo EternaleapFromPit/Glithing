@@ -1,0 +1,17 @@
+fn main() {
+    List<int> values = new List<int>();
+    values.Add(10);
+    values.Add(20);
+    print(values.Count);
+    print(values[1]);
+    print(values.Contains(10));
+
+    Dictionary<string, int> scores = new Dictionary<string, int>();
+    scores.Add("hp", 100);
+    scores.Add("mp", 50);
+    print(scores.Count);
+    print(scores["hp"]);
+    print(scores.ContainsKey("mp"));
+    print(scores.Remove("hp"));
+    print(scores["mp"]);
+}

@@ -1,0 +1,13 @@
+struct Bag {
+    public List<int> Items;
+}
+
+class Holder {
+    public Bag Bag;
+}
+
+fn main() {
+    Holder holder = new Holder { Bag = new Bag { Items = new List<int>() } };
+    holder.Bag.Items.Add(10);
+    return;
+}

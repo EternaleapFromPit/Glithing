@@ -1,0 +1,12 @@
+ref struct IntView {
+    public ref int Data;
+    public int Length;
+}
+
+fn main() {
+    int x = 42;
+    IntView view = new IntView { Data = borrow mut x, Length = 1 };
+
+    print(view.Data);
+    print(view.Length);
+}

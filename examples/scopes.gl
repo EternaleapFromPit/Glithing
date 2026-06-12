@@ -1,0 +1,19 @@
+fn main() {
+    int x = 10;
+
+    {
+        let r = borrow x;
+        print(r);
+    }
+
+    let moved = move x;
+    print(moved);
+
+    {
+        List<int> xs = new List<int>();
+        xs.Add(99);
+        print(xs[0]);
+    }
+
+    print(1);
+}

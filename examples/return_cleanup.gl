@@ -1,0 +1,10 @@
+fn main() {
+    List<int> outer = new List<int>();
+    outer.Add(1);
+
+    {
+        List<int> inner = new List<int>();
+        inner.Add(2);
+        return;
+    }
+}

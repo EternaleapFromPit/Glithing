@@ -1,0 +1,8 @@
+long Add(long left, long right) {
+    return left + right;
+}
+
+fn main() {
+    long value = Add(40, 2);
+    print(value);
+}

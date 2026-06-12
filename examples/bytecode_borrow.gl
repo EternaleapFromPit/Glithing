@@ -1,0 +1,5 @@
+fn main() {
+    string name = "Ada";
+    string moved = move name;
+    print(moved);
+}

@@ -1,0 +1,40 @@
+package System.Collections.Generic;
+
+native "/*
+Glitching System.Collections.Generic package marker.
+
+Current monomorphized runtime instantiations:
+- List<int>
+- List<long>
+- List<bool>
+- List<double>
+- List<string>
+- IEnumerable<int>
+- IEnumerable<long>
+- IEnumerable<bool>
+- IEnumerable<double>
+- IEnumerable<string>
+- Dictionary<string,int>
+- Dictionary<string,long>
+- Dictionary<string,bool>
+- Dictionary<string,double>
+- Dictionary<string,string>
+
+The compiler maps C# using System.Collections.Generic; to these owned,
+drop-checked runtime structures. String collections own stored strings.
+
+Supported members in this package slice:
+- List<T>.Add(T)
+- List<T>.Clear()
+- List<T>.Contains(T)
+- List<T>.Count
+- List<T>[int]
+- foreach over List<T>
+- foreach over IEnumerable<T>
+- Dictionary<string,T>.Add(string, T)
+- Dictionary<string,T>.Clear()
+- Dictionary<string,T>.ContainsKey(string)
+- Dictionary<string,T>.Remove(string)
+- Dictionary<string,T>.Count
+- Dictionary<string,T>[string]
+*/";

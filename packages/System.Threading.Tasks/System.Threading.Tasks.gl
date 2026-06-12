@@ -1,0 +1,28 @@
+package System.Threading.Tasks;
+
+native "/*
+Glitching System.Threading.Tasks package marker.
+
+Current owned task runtime instantiations:
+- Task
+- Task<bool>
+- Task<int>
+- Task<long>
+- Task<double>
+- Task<string>
+
+Supported members in this package slice:
+- Task.Run(functionName)
+- Task.FromResult(T)
+- Task.Wait()
+- Task<T>.Wait()
+- Task<T>.Result
+- Task<T>.GetResult()
+- Task<T>.GetAwaiter()
+- Task<T>.IsCompleted
+- async Task<T> functions
+- await Task<T>
+
+The current runtime is allocation-free for scalar task results. Task<string>
+owns its stored string result and transfers it out through Result/GetResult.
+*/";

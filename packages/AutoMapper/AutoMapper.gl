@@ -1,0 +1,17 @@
+package AutoMapper;
+
+interface IMapper {
+    T Map<T>(object source);
+}
+
+class Mapper : IMapper {
+    T Map<T>(object source) {
+        return null;
+    }
+}
+
+class Profile {
+    void CreateMap<TSource, TDestination>() {
+    }
+}
+

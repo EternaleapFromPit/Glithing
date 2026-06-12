@@ -1,0 +1,36 @@
+package System.IO;
+
+native "
+#include <stdio.h>
+#include <stdlib.h>
+
+static char * System_IO_File_ReadAllText(const char *path) {
+    FILE *f = fopen(path, \"rb\");
+    if (!f) {
+        char *empty = (char *)malloc(1);
+        if (empty) empty[0] = '\0';
+        return empty;
+    }
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *data = (char *)malloc(len + 1);
+    if (!data) {
+        fclose(f);
+        abort();
+    }
+    size_t read_bytes = fread(data, 1, len, f);
+    data[read_bytes] = '\0';
+    fclose(f);
+    return data;
+}
+
+static void System_IO_File_WriteAllText(const char *path, const char *contents) {
+    FILE *f = fopen(path, \"wb\");
+    if (!f) { return; }
+    if (contents) {
+        fputs(contents, f);
+    }
+    fclose(f);
+}
+";

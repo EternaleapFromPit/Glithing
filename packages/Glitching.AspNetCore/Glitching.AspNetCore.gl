@@ -1,0 +1,454 @@
+package Glitching.AspNetCore;
+
+using System.Collections.Generic;
+using Microsoft.Extensions.DependencyInjection;
+
+native "
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#endif
+
+struct WebApplication;
+static char * WebApplication_Handle(struct WebApplication * self, char * method, char * path, char * body);
+typedef char *(*GlitchEndpointHandler)(void);
+typedef char *(*GlitchMiddlewareHandler)(char *);
+
+struct GlitchEndpointHandlerEntry {
+    struct WebApplication *app;
+    char *method;
+    char *path;
+    GlitchEndpointHandler handler;
+};
+
+static struct GlitchEndpointHandlerEntry *GlitchEndpointHandlers = NULL;
+static int GlitchEndpointHandlers_len = 0;
+static int GlitchEndpointHandlers_cap = 0;
+
+struct GlitchMiddlewareHandlerEntry {
+    struct WebApplication *app;
+    char *name;
+    GlitchMiddlewareHandler handler;
+};
+
+static struct GlitchMiddlewareHandlerEntry *GlitchMiddlewareHandlers = NULL;
+static int GlitchMiddlewareHandlers_len = 0;
+static int GlitchMiddlewareHandlers_cap = 0;
+
+static void GlitchEndpointHandlers_reserve_one(void) {
+    if (GlitchEndpointHandlers_len < GlitchEndpointHandlers_cap) { return; }
+    GlitchEndpointHandlers_cap = GlitchEndpointHandlers_cap ? GlitchEndpointHandlers_cap * 2 : 8;
+    GlitchEndpointHandlers = realloc(GlitchEndpointHandlers, sizeof(struct GlitchEndpointHandlerEntry) * (size_t)GlitchEndpointHandlers_cap);
+    if (!GlitchEndpointHandlers) { abort(); }
+}
+
+static int GlitchEndpointHandlers_find(struct WebApplication *app, const char *method, const char *path) {
+    for (int i = 0; i < GlitchEndpointHandlers_len; i++) {
+        struct GlitchEndpointHandlerEntry *entry = &GlitchEndpointHandlers[i];
+        if (entry->app == app && strcmp(entry->method, method) == 0 && strcmp(entry->path, path) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void GlitchEndpointHandlers_Add(struct WebApplication *app, const char *method, const char *path, GlitchEndpointHandler handler) {
+    int existing = GlitchEndpointHandlers_find(app, method, path);
+    if (existing >= 0) {
+        GlitchEndpointHandlers[existing].handler = handler;
+        return;
+    }
+    GlitchEndpointHandlers_reserve_one();
+    GlitchEndpointHandlers[GlitchEndpointHandlers_len].app = app;
+    GlitchEndpointHandlers[GlitchEndpointHandlers_len].method = glitch_strdup(method);
+    GlitchEndpointHandlers[GlitchEndpointHandlers_len].path = glitch_strdup(path);
+    GlitchEndpointHandlers[GlitchEndpointHandlers_len].handler = handler;
+    GlitchEndpointHandlers_len++;
+}
+
+static int GlitchEndpointHandlers_Contains(struct WebApplication *app, const char *method, const char *path) {
+    return GlitchEndpointHandlers_find(app, method, path) >= 0;
+}
+
+static char * GlitchEndpointHandlers_Invoke(struct WebApplication *app, const char *method, const char *path, const char *body) {
+    (void)body;
+    int index = GlitchEndpointHandlers_find(app, method, path);
+    if (index < 0 || !GlitchEndpointHandlers[index].handler) {
+        return glitch_strdup(\"404\");
+    }
+    return GlitchEndpointHandlers[index].handler();
+}
+
+static void GlitchEndpointHandlers_RemoveApp(struct WebApplication *app) {
+    int write = 0;
+    for (int read = 0; read < GlitchEndpointHandlers_len; read++) {
+        struct GlitchEndpointHandlerEntry entry = GlitchEndpointHandlers[read];
+        if (entry.app == app) {
+            free(entry.method);
+            free(entry.path);
+            continue;
+        }
+        if (write != read) {
+            GlitchEndpointHandlers[write] = entry;
+        }
+        write++;
+    }
+    GlitchEndpointHandlers_len = write;
+}
+
+static void GlitchMiddlewareHandlers_reserve_one(void) {
+    if (GlitchMiddlewareHandlers_len < GlitchMiddlewareHandlers_cap) { return; }
+    GlitchMiddlewareHandlers_cap = GlitchMiddlewareHandlers_cap ? GlitchMiddlewareHandlers_cap * 2 : 8;
+    GlitchMiddlewareHandlers = realloc(GlitchMiddlewareHandlers, sizeof(struct GlitchMiddlewareHandlerEntry) * (size_t)GlitchMiddlewareHandlers_cap);
+    if (!GlitchMiddlewareHandlers) { abort(); }
+}
+
+static void GlitchMiddlewareHandlers_Add(struct WebApplication *app, const char *name, GlitchMiddlewareHandler handler) {
+    GlitchMiddlewareHandlers_reserve_one();
+    GlitchMiddlewareHandlers[GlitchMiddlewareHandlers_len].app = app;
+    GlitchMiddlewareHandlers[GlitchMiddlewareHandlers_len].name = glitch_strdup(name);
+    GlitchMiddlewareHandlers[GlitchMiddlewareHandlers_len].handler = handler;
+    GlitchMiddlewareHandlers_len++;
+}
+
+static char * GlitchMiddlewareHandlers_Apply(struct WebApplication *app, const char *input) {
+    char *current = glitch_strdup(input ? input : \"\");
+    for (int i = 0; i < GlitchMiddlewareHandlers_len; i++) {
+        struct GlitchMiddlewareHandlerEntry *entry = &GlitchMiddlewareHandlers[i];
+        if (entry->app != app || !entry->handler) { continue; }
+        char *next = entry->handler(current);
+        free(current);
+        current = next ? next : glitch_strdup(\"\");
+    }
+    return current;
+}
+
+static void GlitchMiddlewareHandlers_RemoveApp(struct WebApplication *app) {
+    int write = 0;
+    for (int read = 0; read < GlitchMiddlewareHandlers_len; read++) {
+        struct GlitchMiddlewareHandlerEntry entry = GlitchMiddlewareHandlers[read];
+        if (entry.app == app) {
+            free(entry.name);
+            continue;
+        }
+        if (write != read) {
+            GlitchMiddlewareHandlers[write] = entry;
+        }
+        write++;
+    }
+    GlitchMiddlewareHandlers_len = write;
+}
+
+static void GlitchRestHost_close_socket(int fd) {
+#ifdef _WIN32
+    closesocket((SOCKET)fd);
+#else
+    close(fd);
+#endif
+}
+
+static int GlitchRestHost_send_all(int fd, const char *data, int len) {
+    int sent = 0;
+    while (sent < len) {
+#ifdef _WIN32
+        int n = send((SOCKET)fd, data + sent, len - sent, 0);
+#else
+        int n = (int)send(fd, data + sent, (size_t)(len - sent), 0);
+#endif
+        if (n <= 0) { return 0; }
+        sent += n;
+    }
+    return 1;
+}
+
+static void GlitchRestHost_Run(struct WebApplication *app, int port, int max_requests) {
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { fprintf(stderr, \"WSAStartup failed\\n\"); return; }
+#endif
+    int server_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) { fprintf(stderr, \"socket failed\\n\"); return; }
+    int opt = 1;
+#ifdef _WIN32
+    setsockopt((SOCKET)server_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
+#else
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#endif
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    address.sin_port = htons((unsigned short)port);
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        fprintf(stderr, \"bind failed\\n\");
+        GlitchRestHost_close_socket(server_fd);
+        return;
+    }
+    if (listen(server_fd, 16) < 0) {
+        fprintf(stderr, \"listen failed\\n\");
+        GlitchRestHost_close_socket(server_fd);
+        return;
+    }
+    int handled = 0;
+    while (max_requests <= 0 || handled < max_requests) {
+        int client_fd = (int)accept(server_fd, NULL, NULL);
+        if (client_fd < 0) { continue; }
+        char buffer[4096];
+#ifdef _WIN32
+        int read_len = recv((SOCKET)client_fd, buffer, sizeof(buffer) - 1, 0);
+#else
+        int read_len = (int)recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+#endif
+        if (read_len <= 0) { GlitchRestHost_close_socket(client_fd); continue; }
+        buffer[read_len] = 0;
+        char method[16] = {0};
+        char path[1024] = {0};
+        sscanf(buffer, \"%15s %1023s\", method, path);
+        char *body = strstr(buffer, \"\\r\\n\\r\\n\");
+        body = body ? body + 4 : \"\";
+        char *response_body = WebApplication_Handle(app, method, path, body);
+        int status = strcmp(response_body, \"404\") == 0 ? 404 : 200;
+        const char *status_text = status == 404 ? \"Not Found\" : \"OK\";
+        char header[512];
+        int body_len = (int)strlen(response_body);
+        int header_len = snprintf(header, sizeof(header),
+            \"HTTP/1.1 %d %s\\r\\nContent-Type: application/json\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n\",
+            status, status_text, body_len);
+        GlitchRestHost_send_all(client_fd, header, header_len);
+        GlitchRestHost_send_all(client_fd, response_body, body_len);
+        free(response_body);
+        GlitchRestHost_close_socket(client_fd);
+        handled++;
+    }
+    GlitchRestHost_close_socket(server_fd);
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+";
+
+class ConfigurationManager {
+    string GetConnectionString(string name) {
+        return "";
+    }
+
+    ConfigurationManager GetSection(string name) {
+        return new ConfigurationManager();
+    }
+
+    string Get(string name) {
+        return "";
+    }
+
+    bool GetValue(string name) {
+        return false;
+    }
+}
+
+class HostEnvironment {
+    bool IsDevelopment() {
+        return false;
+    }
+}
+
+class LoggingBuilder {
+    void ClearProviders() {
+    }
+
+    void AddSerilog(string logger, bool dispose) {
+    }
+}
+
+class WebApplicationBuilder {
+    public ServiceCollection Services;
+    public ConfigurationManager Configuration;
+    public HostEnvironment Environment;
+    public LoggingBuilder Logging;
+
+    public WebApplicationBuilder() {
+        this.Services = new ServiceCollection();
+        this.Configuration = new ConfigurationManager();
+        this.Environment = new HostEnvironment();
+        this.Logging = new LoggingBuilder();
+    }
+
+    WebApplication Build() {
+        return new WebApplication();
+    }
+}
+
+WebApplicationBuilder CreateBuilder(string[] args) {
+    return new WebApplicationBuilder();
+}
+
+class HttpRequest {
+    public string Method;
+    public string Path;
+    public Dictionary<string, string> Headers;
+    public string Body;
+
+    public HttpRequest(string method, string path, string body) {
+        this.Method = method;
+        this.Path = path;
+        this.Headers = new Dictionary<string, string>();
+        this.Body = body;
+    }
+}
+
+class HttpResponse {
+    public int StatusCode;
+    public Dictionary<string, string> Headers;
+    public string Body;
+
+    public HttpResponse(int statusCode, string body) {
+        this.StatusCode = statusCode;
+        this.Headers = new Dictionary<string, string>();
+        this.Body = body;
+    }
+}
+
+class HttpContext {
+    public HttpRequest Request;
+    public HttpResponse Response;
+
+    public HttpContext(HttpRequest request) {
+        this.Request = move request;
+        this.Response = new HttpResponse(200, "");
+    }
+
+    void WriteJson(string text) {
+        this.Response.Body = text;
+        this.Response.Headers.Add("Content-Type", "application/json");
+    }
+}
+
+interface IHttpContextAccessor {
+    public HttpContext HttpContext;
+}
+
+class HttpContextAccessor : IHttpContextAccessor {
+    public HttpContext HttpContext;
+}
+
+class Endpoint {
+    public string Method;
+    public string Path;
+    public string Text;
+
+    public Endpoint(string method, string path, string text) {
+        this.Method = method;
+        this.Path = path;
+        this.Text = text;
+    }
+}
+
+class WebApplication {
+    public List<string> Routes;
+    public Dictionary<string, string> Responses;
+    public List<string> Middleware;
+
+    public WebApplication() {
+        this.Routes = new List<string>();
+        this.Responses = new Dictionary<string, string>();
+        this.Middleware = new List<string>();
+        glitch_register_attribute_routes(this);
+    }
+
+    void Use(string name) {
+        this.Middleware.Add(name);
+    }
+
+    void UseRouting() {
+        this.Use("routing");
+    }
+
+    void UseEndpoints() {
+        this.Use("endpoints");
+    }
+
+    void UseTrace() {
+        this.Use("trace");
+    }
+
+    void UseJsonEnvelope() {
+        this.Use("json-envelope");
+    }
+
+    void MapGet(string path, string text) {
+        string key = "GET " + path;
+        this.Routes.Add(key);
+        this.Responses.Add(key, text);
+    }
+
+    void MapPost(string path, string text) {
+        string key = "POST " + path;
+        this.Routes.Add(key);
+        this.Responses.Add(key, text);
+    }
+
+    string Handle(string method, string path, string body) {
+        string methodPrefix = method + " ";
+        string key = methodPrefix + path;
+        if (GlitchEndpointHandlers_Contains(this, method, path)) {
+            string handlerResponse = GlitchEndpointHandlers_Invoke(this, method, path, body);
+            return this.ApplyMiddleware(handlerResponse);
+        } else {
+            if (this.Responses.ContainsKey(key)) {
+                return this.ApplyMiddleware(this.Responses[key]);
+            } else {
+                return "404";
+            }
+        }
+    }
+
+    string ApplyMiddleware(string text) {
+        string current = GlitchMiddlewareHandlers_Apply(this, text);
+        if (this.Middleware.Contains("json-envelope")) {
+            string prefix = "{\"result\":";
+            string withPrefix = prefix + current;
+            return withPrefix + "}";
+        }
+        if (this.Middleware.Contains("trace")) {
+            string prefix = "trace:";
+            return prefix + current;
+        }
+        return current;
+    }
+
+    void Run(int port) {
+        GlitchRestHost_Run(this, port, 0);
+    }
+
+    void Run() {
+        GlitchRestHost_Run(this, 5000, 0);
+    }
+
+    void RunOnce(int port) {
+        GlitchRestHost_Run(this, port, 1);
+    }
+}
+
+native "/*
+Minimal Glitching.AspNetCore subset:
+- HttpRequest / HttpResponse / HttpContext with method, path, headers, body
+- WebApplication.MapGet(string, string)
+- WebApplication.MapPost(string, string)
+- WebApplication.MapGet(string, string Handler())
+- WebApplication.MapPost(string, string Handler())
+- WebApplication.Use(string)
+- WebApplication.UseRouting(), UseEndpoints(), UseTrace(), UseJsonEnvelope()
+- WebApplication.Handle(string method, string path, string body)
+- WebApplication.Run(int port) and RunOnce(int port)
+
+Native Run uses a small blocking HTTP/1.1 socket loop and calls the generated
+WebApplication_Handle function. The compiler emits glitch_register_attribute_routes
+from [ApiController], [Route], [HttpGet], and [HttpPost] metadata and the
+WebApplication constructor imports that generated table. Middleware is currently
+a deterministic pipeline hook over string responses. Endpoint delegates support
+top-level string-returning handler functions with no captures.
+*/";

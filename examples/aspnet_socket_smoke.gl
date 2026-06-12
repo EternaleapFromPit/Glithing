@@ -1,0 +1,7 @@
+using Glitching.AspNetCore;
+
+fn main() {
+    WebApplication app = new WebApplication();
+    app.MapGet("/health", "{\"status\":\"ok\"}");
+    app.RunOnce(5099);
+}

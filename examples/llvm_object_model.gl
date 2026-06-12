@@ -1,0 +1,18 @@
+class Counter {
+    public int Value;
+
+    public Counter(int value) {
+        this.Value = value;
+    }
+
+    int Increment() {
+        this.Value = this.Value + 1;
+        return this.Value;
+    }
+}
+
+fn main() {
+    Counter counter = new Counter(41);
+    int value = counter.Increment();
+    print(value);
+}

@@ -1,0 +1,7 @@
+fn main() {
+    let mut x = 10;
+    let r = borrow x;
+    let m = borrow mut x;
+    print(r);
+    print(m);
+}

@@ -1,0 +1,127 @@
+package Microsoft.EntityFrameworkCore;
+
+using System.Collections.Generic;
+
+class DbContextOptions<TContext> {
+    public string ConnectionString;
+
+    public DbContextOptions() {
+        this.ConnectionString = "";
+    }
+}
+
+class SqlProvider {
+    public string Name;
+    public string ConnectionString;
+
+    public SqlProvider(string name, string connectionString) {
+        this.Name = name;
+        this.ConnectionString = connectionString;
+    }
+
+    string BuildSelectAll(string table) {
+        string prefix = "select * from ";
+        return prefix + table;
+    }
+}
+
+class DbContext {
+    public string ConnectionString;
+    public bool IsDisposed;
+    public List<string> TrackedEntities;
+    public SqlProvider Provider;
+
+    public DbContext(string connectionString) {
+        this.ConnectionString = connectionString;
+        this.IsDisposed = false;
+        this.TrackedEntities = new List<string>();
+        this.Provider = new SqlProvider("sql", connectionString);
+    }
+
+    void EnsureNotDisposed() {
+        if (this.IsDisposed) {
+            throw new Exception("DbContext is disposed");
+        }
+    }
+
+    void Track(string entityKey) {
+        this.EnsureNotDisposed();
+        this.TrackedEntities.Add(entityKey);
+    }
+
+    int TrackedCount => this.TrackedEntities.Count;
+
+    void Dispose() {
+        this.IsDisposed = true;
+        this.TrackedEntities.Clear();
+    }
+}
+
+class IQueryableString {
+    public string ConnectionString;
+    public string Table;
+    public bool Tracking;
+
+    public IQueryableString(string connectionString, string table, bool tracking) {
+        this.ConnectionString = connectionString;
+        this.Table = table;
+        this.Tracking = tracking;
+    }
+
+    IQueryableString AsNoTracking() {
+        return new IQueryableString(this.ConnectionString, this.Table, false);
+    }
+
+    string ToQueryString() {
+        SqlProvider provider = new SqlProvider("sql", this.ConnectionString);
+        return provider.BuildSelectAll(this.Table);
+    }
+
+    List<string> ToList() {
+        List<string> values = new List<string>();
+        string query = this.ToQueryString();
+        if (this.Tracking) {
+            string prefix = "tracked:";
+            values.Add(prefix + query);
+        } else {
+            values.Add(query);
+        }
+        return values;
+    }
+}
+
+class DbSetString {
+    public string ConnectionString;
+    public string Table;
+
+    public DbSetString(string connectionString, string table) {
+        this.ConnectionString = connectionString;
+        this.Table = table;
+    }
+
+    IQueryableString AsQueryable() {
+        return new IQueryableString(this.ConnectionString, this.Table, true);
+    }
+
+    IQueryableString AsNoTracking() {
+        return new IQueryableString(this.ConnectionString, this.Table, false);
+    }
+
+    List<string> ToList() {
+        return this.AsQueryable().ToList();
+    }
+}
+
+DbSetString SetString(DbContext context, string table) {
+    context.EnsureNotDisposed();
+    return new DbSetString(context.ConnectionString, table);
+}
+
+native "/*
+Minimal Microsoft.EntityFrameworkCore groundwork:
+- DbContext owns connection/provider/tracked entity state and exposes Dispose().
+- DbSetString and IQueryableString model tracked vs no-tracking query ownership.
+- Query materialization returns owned List<string> results.
+- This intentionally avoids shared arbitrary entity references; tracked state is
+  represented by owned string keys until generic entities and lifetimes are richer.
+*/";

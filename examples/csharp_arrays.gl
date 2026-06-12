@@ -1,0 +1,11 @@
+fn main() {
+    int x = 10;
+    long y = x + 20;
+    print(y);
+
+    int[] scores = { 7, 8, 9 };
+    print(scores[0]);
+
+    var moreScores = new int[] { 10, 11, 12 };
+    print(moreScores[2]);
+}

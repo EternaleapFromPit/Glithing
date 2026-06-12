@@ -1,0 +1,119 @@
+package Microsoft.Extensions.DependencyInjection;
+
+class ServiceProvider {
+    public string Message;
+
+    public ServiceProvider(string message) {
+        this.Message = message;
+    }
+
+    string GetRequiredService(string name) {
+        return this.Message;
+    }
+
+    string GetRequiredService() {
+        return this.Message;
+    }
+}
+
+class ServiceScope {
+    public ServiceProvider ServiceProvider;
+
+    public ServiceScope(ServiceProvider provider) {
+        this.ServiceProvider = move provider;
+    }
+}
+
+class MvcBuilder {
+    MvcBuilder AddJsonOptions(object configure) {
+        return new MvcBuilder();
+    }
+
+    MvcBuilder ConfigureApiBehaviorOptions(object configure) {
+        return new MvcBuilder();
+    }
+
+    MvcBuilder AddJwtBearer(string scheme, object configure) {
+        return new MvcBuilder();
+    }
+
+    MvcBuilder AddAuthentication() {
+        return new MvcBuilder();
+    }
+}
+
+class ServiceCollection {
+    public string Message;
+
+    public ServiceCollection() {
+        this.Message = "";
+    }
+
+    void AddSingleton(string name, string value) {
+        this.Message = value;
+    }
+
+    void AddSingleton(string value) {
+        this.Message = value;
+    }
+
+    MvcBuilder AddControllers(object configure) {
+        return new MvcBuilder();
+    }
+
+    void RegisterLoggingInterfaces() {
+    }
+
+    void AddMemoryCache() {
+    }
+
+    void AddHttpContextAccessor() {
+    }
+
+    void AddEndpointsApiExplorer() {
+    }
+
+    void AddLibraryApiVersionConfiguration(object version) {
+    }
+
+    void AddAndConfigureSwagger(object configuration, string path, bool enabled) {
+    }
+
+    void AddDbContextPool(object configure) {
+    }
+
+    void AddAutoMapper(object marker) {
+    }
+
+    void AddRepositories() {
+    }
+
+    void AddDataServices() {
+    }
+
+    MvcBuilder AddAuthentication() {
+        return new MvcBuilder();
+    }
+
+    void AddCors(object configure) {
+    }
+
+    ServiceProvider BuildServiceProvider() {
+        return new ServiceProvider(this.Message);
+    }
+
+    ServiceScope CreateScope() {
+        return new ServiceScope(this.BuildServiceProvider());
+    }
+}
+
+native "/*
+Minimal Microsoft.Extensions.DependencyInjection subset for Glitching:
+- ServiceCollection
+- ServiceCollection.AddSingleton(string, string)
+- ServiceCollection.BuildServiceProvider()
+- ServiceProvider.GetRequiredService(string)
+
+The current implementation is intentionally string-service-only. It avoids
+implicit shared ownership by cloning borrowed string values into owned fields.
+*/";

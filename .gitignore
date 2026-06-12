@@ -1,0 +1,11 @@
+/target/
+/target-codex/
+/.agents/
+/out.c
+/*.nupkg
+/*.c
+[Bb]in/
+[Oo]bj/
+.vs/
+.idea/
+*.user

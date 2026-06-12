@@ -1,0 +1,67 @@
+package System.Text.Json;
+
+native "
+static char * SystemTextJson_SerializeString(char *value) {
+    if (!value) {
+        return glitch_strdup(\"null\");
+    }
+    size_t extra = 2;
+    for (const char *cursor = value; *cursor; cursor++) {
+        if (*cursor == '\\\\' || *cursor == '\"') {
+            extra++;
+        }
+    }
+    size_t len = strlen(value);
+    char *result = malloc(len + extra + 1);
+    if (!result) { abort(); }
+    char *out = result;
+    *out++ = '\"';
+    for (const char *cursor = value; *cursor; cursor++) {
+        if (*cursor == '\\\\' || *cursor == '\"') {
+            *out++ = '\\\\';
+        }
+        *out++ = *cursor;
+    }
+    *out++ = '\"';
+    *out = 0;
+    return result;
+}
+
+static char * SystemTextJson_DeserializeString(char *json) {
+    if (!json) {
+        return glitch_strdup(\"\");
+    }
+    size_t len = strlen(json);
+    if (len >= 2 && json[0] == '\"' && json[len - 1] == '\"') {
+        char *result = malloc(len - 1);
+        if (!result) { abort(); }
+        size_t out = 0;
+        for (size_t i = 1; i + 1 < len; i++) {
+            if (json[i] == '\\\\' && i + 2 < len) {
+                i++;
+            }
+            result[out++] = json[i];
+        }
+        result[out] = 0;
+        return result;
+    }
+    return glitch_strdup(json);
+}
+";
+
+string JsonSerializer_SerializeString(string value) {
+    return SystemTextJson_SerializeString(value);
+}
+
+string JsonSerializer_DeserializeString(string json) {
+    return SystemTextJson_DeserializeString(json);
+}
+
+native "/*
+Minimal System.Text.Json package slice:
+- JsonSerializer_SerializeString(string) returns an owned JSON string literal.
+- JsonSerializer_DeserializeString(string) returns an owned unquoted string.
+
+This is intentionally string-only while the compiler grows typed object
+reflection/source-generation support.
+*/";

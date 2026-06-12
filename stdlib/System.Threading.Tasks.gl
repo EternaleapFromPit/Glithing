@@ -1,0 +1,88 @@
+package System.Threading.Tasks;
+
+native "
+typedef void (*glitch_thread_entry)(void);
+
+#ifdef _WIN32
+#include <windows.h>
+
+struct GlitchThread {
+    HANDLE handle;
+    glitch_thread_entry entry;
+};
+
+static DWORD WINAPI GlitchThread_trampoline(LPVOID arg) {
+    struct GlitchThread *thread = (struct GlitchThread *)arg;
+    thread->entry();
+    return 0;
+}
+
+static struct GlitchThread GlitchThread_new(glitch_thread_entry entry) {
+    struct GlitchThread thread;
+    thread.handle = NULL;
+    thread.entry = entry;
+    return thread;
+}
+
+static void GlitchThread_start(struct GlitchThread *thread) {
+    thread->handle = CreateThread(NULL, 0, GlitchThread_trampoline, thread, 0, NULL);
+    if (!thread->handle) { abort(); }
+}
+
+static void GlitchThread_join(struct GlitchThread *thread) {
+    if (!thread->handle) { return; }
+    WaitForSingleObject(thread->handle, INFINITE);
+    CloseHandle(thread->handle);
+    thread->handle = NULL;
+}
+#else
+#include <pthread.h>
+
+struct GlitchThread {
+    pthread_t handle;
+    int started;
+    glitch_thread_entry entry;
+};
+
+static void * GlitchThread_trampoline(void *arg) {
+    struct GlitchThread *thread = (struct GlitchThread *)arg;
+    thread->entry();
+    return NULL;
+}
+
+static struct GlitchThread GlitchThread_new(glitch_thread_entry entry) {
+    struct GlitchThread thread;
+    thread.started = 0;
+    thread.entry = entry;
+    return thread;
+}
+
+static void GlitchThread_start(struct GlitchThread *thread) {
+    if (pthread_create(&thread->handle, NULL, GlitchThread_trampoline, thread) != 0) {
+        abort();
+    }
+    thread->started = 1;
+}
+
+static void GlitchThread_join(struct GlitchThread *thread) {
+    if (!thread->started) { return; }
+    if (pthread_join(thread->handle, NULL) != 0) { abort(); }
+    thread->started = 0;
+}
+#endif
+
+struct GlitchTask {
+    struct GlitchThread thread;
+};
+
+static struct GlitchTask GlitchTask_run(glitch_thread_entry entry) {
+    struct GlitchTask task;
+    task.thread = GlitchThread_new(entry);
+    GlitchThread_start(&task.thread);
+    return task;
+}
+
+static void GlitchTask_wait(struct GlitchTask *task) {
+    GlitchThread_join(&task->thread);
+}
+";
