@@ -1,0 +1,4589 @@
+use std::collections::HashMap;
+use std::fmt;
+
+use crate::ast::*;
+use crate::tir::TypedProgram;
+
+fn foreach_item_type_matches(expected: &CType, actual: &CType) -> bool {
+    matches!(expected, CType::GenericPtr(name) if name == "var")
+        || expected == actual
+        || matches!((expected, actual), (CType::String, CType::BorrowedString))
+}
+
+fn parameter_binding_type(c_type: &CType) -> CType {
+    match c_type {
+        CType::String => CType::BorrowedString,
+        other => other.clone(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CType {
+    Scalar(ScalarType),
+    Ptr(ScalarType),
+    Array(ScalarType, usize),
+    Null,
+    String,
+    BorrowedString,
+    Exception,
+    ExceptionPtr,
+    Struct(String),
+    ClassPtr(String),
+    GenericPtr(String),
+    ListInt,
+    ListI64,
+    ListBool,
+    ListF64,
+    ListString,
+    DictStringInt,
+    DictStringI64,
+    DictStringBool,
+    DictStringF64,
+    DictStringString,
+    EnumerableInt,
+    EnumerableI64,
+    EnumerableBool,
+    EnumerableF64,
+    EnumerableString,
+    Thread,
+    Task(Box<CType>),
+    Void,
+}
+
+impl fmt::Display for CType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CType::Scalar(scalar) => write!(f, "{}", scalar.c_name()),
+            CType::Ptr(scalar) => write!(f, "{} *", scalar.c_name()),
+            CType::Array(scalar, _) => write!(f, "struct {}", array_runtime_name(*scalar)),
+            CType::Null => write!(f, "void *"),
+            CType::String => write!(f, "char *"),
+            CType::BorrowedString => write!(f, "char *"),
+            CType::Exception => write!(f, "struct GlitchException"),
+            CType::ExceptionPtr => write!(f, "struct GlitchException *"),
+            CType::Struct(name) => write!(f, "struct {}", sanitize_ident(name)),
+            CType::ClassPtr(name) => write!(f, "struct {} *", sanitize_ident(name)),
+            CType::GenericPtr(name) => write!(f, "struct {} *", sanitize_ident(name)),
+            CType::ListInt => write!(f, "struct List_int"),
+            CType::ListI64 => write!(f, "struct List_i64"),
+            CType::ListBool => write!(f, "struct List_bool"),
+            CType::ListF64 => write!(f, "struct List_f64"),
+            CType::ListString => write!(f, "struct List_string"),
+            CType::DictStringInt => write!(f, "struct Dict_string_int"),
+            CType::DictStringI64 => write!(f, "struct Dict_string_i64"),
+            CType::DictStringBool => write!(f, "struct Dict_string_bool"),
+            CType::DictStringF64 => write!(f, "struct Dict_string_f64"),
+            CType::DictStringString => write!(f, "struct Dict_string_string"),
+            CType::EnumerableInt => write!(f, "struct IEnumerable_int"),
+            CType::EnumerableI64 => write!(f, "struct IEnumerable_i64"),
+            CType::EnumerableBool => write!(f, "struct IEnumerable_bool"),
+            CType::EnumerableF64 => write!(f, "struct IEnumerable_f64"),
+            CType::EnumerableString => write!(f, "struct IEnumerable_string"),
+            CType::Thread => write!(f, "struct GlitchThread"),
+            CType::Task(result) => write!(f, "struct {}", task_runtime_name(result)),
+            CType::Void => write!(f, "void"),
+        }
+    }
+}
+
+impl ScalarType {
+    fn c_name(self) -> &'static str {
+        match self {
+            ScalarType::Bool => "int",
+            ScalarType::Byte => "unsigned char",
+            ScalarType::Short => "short",
+            ScalarType::I32 => "int",
+            ScalarType::I64 => "long long",
+            ScalarType::U32 => "unsigned int",
+            ScalarType::F64 => "double",
+            ScalarType::Decimal => "long double",
+        }
+    }
+
+    fn printf_format(self) -> &'static str {
+        match self {
+            ScalarType::Bool => "%d",
+            ScalarType::Byte => "%hhu",
+            ScalarType::Short => "%hd",
+            ScalarType::I32 => "%d",
+            ScalarType::I64 => "%lld",
+            ScalarType::U32 => "%u",
+            ScalarType::F64 => "%f",
+            ScalarType::Decimal => "%Lf",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct FunctionInfo {
+    params: Vec<CType>,
+    param_names: Vec<String>,
+    param_modifiers: Vec<ParamModifier>,
+    param_is_params: Vec<bool>,
+    param_defaults: Vec<Option<Expr>>,
+    return_type: CType,
+    symbol: String,
+}
+
+struct ResolvedCall {
+    info: FunctionInfo,
+    args: Vec<Expr>,
+}
+
+struct CCallArg {
+    c_type: CType,
+    is_int_literal: bool,
+    int_value: Option<i64>,
+}
+
+pub(crate) struct Codegen {
+    types: HashMap<String, TypeKind>,
+    bases: HashMap<String, Vec<String>>,
+    fields: HashMap<String, Vec<(String, CType)>>,
+    constructors: HashMap<String, FunctionInfo>,
+    functions: HashMap<String, Vec<FunctionInfo>>,
+    methods: HashMap<String, Vec<FunctionInfo>>,
+    has_endpoint_handlers: bool,
+    has_middleware_handlers: bool,
+    endpoint_handler_symbols: Vec<String>,
+    temp_counter: usize,
+}
+
+#[derive(Clone)]
+struct CodegenState {
+    vars: HashMap<String, CType>,
+    scopes: Vec<Vec<String>>,
+    moved: Vec<String>,
+    return_type: CType,
+    is_main: bool,
+    is_async: bool,
+    terminated: bool,
+}
+
+impl CodegenState {
+    fn new(return_type: CType, is_main: bool, is_async: bool) -> Self {
+        Self {
+            vars: HashMap::new(),
+            scopes: vec![Vec::new()],
+            moved: Vec::new(),
+            return_type,
+            is_main,
+            is_async,
+            terminated: false,
+        }
+    }
+}
+
+struct EmittedExpr {
+    code: String,
+    c_type: CType,
+}
+
+struct ForeachInfo {
+    declared_element_type: CType,
+    variable_type: CType,
+    length_expr: String,
+    item_expr: String,
+}
+
+impl Codegen {
+    pub(crate) fn new(program: &Program, typed: &TypedProgram) -> Self {
+        let mut types = HashMap::new();
+        for enum_def in &program.enums {
+            types.insert(enum_def.name.clone(), TypeKind::Enum);
+        }
+        for ty in &program.types {
+            types.insert(ty.name.clone(), ty.kind);
+        }
+        let mut codegen = Self {
+            types,
+            bases: HashMap::new(),
+            fields: HashMap::new(),
+            constructors: HashMap::new(),
+            functions: HashMap::new(),
+            methods: HashMap::new(),
+            has_endpoint_handlers: program
+                .native_c
+                .iter()
+                .any(|native| native.contains("GlitchEndpointHandlers_RemoveApp")),
+            has_middleware_handlers: program
+                .native_c
+                .iter()
+                .any(|native| native.contains("GlitchMiddlewareHandlers_RemoveApp")),
+            endpoint_handler_symbols: typed
+                .endpoint_handlers
+                .iter()
+                .map(|handler| handler.function.clone())
+                .collect(),
+            temp_counter: 0,
+        };
+        for ty in &program.types {
+            codegen.bases.insert(ty.name.clone(), ty.bases.clone());
+            let fields = ty
+                .fields
+                .iter()
+                .filter_map(|field| {
+                    codegen
+                        .type_syntax_to_ctype(&field.ty)
+                        .ok()
+                        .map(|c| (field.name.clone(), c))
+                })
+                .collect();
+            codegen.fields.insert(ty.name.clone(), fields);
+            for constructor in &ty.constructors {
+                let params = constructor
+                    .params
+                    .iter()
+                    .filter_map(|param| codegen.param_to_ctype(param).ok())
+                    .collect();
+                let return_type = match ty.kind {
+                    TypeKind::Class => CType::ClassPtr(ty.name.clone()),
+                    TypeKind::Struct | TypeKind::RefStruct => CType::Struct(ty.name.clone()),
+                    TypeKind::Interface => CType::ClassPtr(ty.name.clone()),
+                    TypeKind::Enum => CType::Scalar(ScalarType::I32),
+                };
+                codegen.constructors.insert(
+                    ty.name.clone(),
+                    FunctionInfo {
+                        params,
+                        param_names: constructor
+                            .params
+                            .iter()
+                            .map(|param| param.name.clone())
+                            .collect(),
+                        param_modifiers: constructor
+                            .params
+                            .iter()
+                            .map(|param| param.modifier)
+                            .collect(),
+                        param_is_params: constructor
+                            .params
+                            .iter()
+                            .map(|param| param.is_params)
+                            .collect(),
+                        param_defaults: constructor
+                            .params
+                            .iter()
+                            .map(|param| param.default.clone())
+                            .collect(),
+                        return_type,
+                        symbol: constructor_symbol(&ty.name),
+                    },
+                );
+            }
+            for method in &ty.methods {
+                let overloaded = ty
+                    .methods
+                    .iter()
+                    .filter(|candidate| candidate.name == method.name)
+                    .count()
+                    > 1;
+                let params = method
+                    .params
+                    .iter()
+                    .filter_map(|param| codegen.param_to_ctype(param).ok())
+                    .collect::<Vec<_>>();
+                let return_type = codegen
+                    .type_syntax_to_ctype(&method.return_type)
+                    .unwrap_or(CType::Void);
+                codegen
+                    .methods
+                    .entry(method_key(&ty.name, &method.name))
+                    .or_default()
+                    .push(FunctionInfo {
+                        symbol: method_symbol(&ty.name, &method.name, &params, overloaded),
+                        params,
+                        param_names: method
+                            .params
+                            .iter()
+                            .map(|param| param.name.clone())
+                            .collect(),
+                        param_modifiers: method.params.iter().map(|param| param.modifier).collect(),
+                        param_is_params: method
+                            .params
+                            .iter()
+                            .map(|param| param.is_params)
+                            .collect(),
+                        param_defaults: method
+                            .params
+                            .iter()
+                            .map(|param| param.default.clone())
+                            .collect(),
+                        return_type,
+                    });
+            }
+        }
+        let mut function_counts = HashMap::<String, usize>::new();
+        for function in &program.functions {
+            *function_counts.entry(function.name.clone()).or_default() += 1;
+        }
+        for function in &program.functions {
+            let params = function
+                .params
+                .iter()
+                .filter_map(|param| codegen.param_to_ctype(param).ok())
+                .collect::<Vec<_>>();
+            let return_type = codegen
+                .type_syntax_to_ctype(&function.return_type)
+                .unwrap_or(CType::Void);
+            let overloaded = function_counts
+                .get(&function.name)
+                .copied()
+                .unwrap_or_default()
+                > 1;
+            codegen
+                .functions
+                .entry(function.name.clone())
+                .or_default()
+                .push(FunctionInfo {
+                    symbol: function_symbol(&function.name, &params, overloaded),
+                    params,
+                    param_names: function
+                        .params
+                        .iter()
+                        .map(|param| param.name.clone())
+                        .collect(),
+                    param_modifiers: function.params.iter().map(|param| param.modifier).collect(),
+                    param_is_params: function
+                        .params
+                        .iter()
+                        .map(|param| param.is_params)
+                        .collect(),
+                    param_defaults: function
+                        .params
+                        .iter()
+                        .map(|param| param.default.clone())
+                        .collect(),
+                    return_type,
+                });
+        }
+        codegen
+    }
+
+    fn next_temp(&mut self, prefix: &str) -> String {
+        let name = format!("__glitch_{}_{}", prefix, self.temp_counter);
+        self.temp_counter += 1;
+        name
+    }
+
+    fn coerce_initializer(
+        &self,
+        emitted: &EmittedExpr,
+        target_type: &CType,
+    ) -> Result<String, String> {
+        match (target_type, &emitted.c_type) {
+            (
+                CType::String | CType::BorrowedString | CType::ClassPtr(_) | CType::GenericPtr(_),
+                CType::Null,
+            ) => Ok("NULL".to_string()),
+            (CType::Task(result), CType::Null) => Ok(match result.as_ref() {
+                CType::Void => format!("(struct {}){{0}}", task_runtime_name(result)),
+                CType::Scalar(ScalarType::Bool)
+                | CType::Scalar(ScalarType::Byte)
+                | CType::Scalar(ScalarType::Short)
+                | CType::Scalar(ScalarType::I32)
+                | CType::Scalar(ScalarType::I64)
+                | CType::Scalar(ScalarType::U32)
+                | CType::Scalar(ScalarType::F64)
+                | CType::Scalar(ScalarType::Decimal) => {
+                    format!(
+                        "{}({})",
+                        task_from_result_function(result),
+                        default_c_value(result)
+                    )
+                }
+                CType::String
+                | CType::BorrowedString
+                | CType::ClassPtr(_)
+                | CType::GenericPtr(_)
+                | CType::Null => format!("{}(NULL)", task_from_result_function(result)),
+                _ => format!("(struct {}){{0}}", task_runtime_name(result)),
+            }),
+            (CType::String, CType::BorrowedString) => {
+                Ok(format!("glitch_strdup({})", emitted.code))
+            }
+            (CType::EnumerableInt, CType::ListInt) => {
+                Ok(format!("IEnumerable_int_from_List_int(&{})", emitted.code))
+            }
+            (CType::EnumerableI64, CType::ListI64) => {
+                Ok(format!("IEnumerable_i64_from_List_i64(&{})", emitted.code))
+            }
+            (CType::EnumerableBool, CType::ListBool) => Ok(format!(
+                "IEnumerable_bool_from_List_bool(&{})",
+                emitted.code
+            )),
+            (CType::EnumerableF64, CType::ListF64) => {
+                Ok(format!("IEnumerable_f64_from_List_f64(&{})", emitted.code))
+            }
+            (CType::EnumerableString, CType::ListString) => Ok(format!(
+                "IEnumerable_string_from_List_string(&{})",
+                emitted.code
+            )),
+            (CType::GenericPtr(_), CType::GenericPtr(_)) => Ok(emitted.code.clone()),
+            _ if target_type == &emitted.c_type => Ok(emitted.code.clone()),
+            _ => Ok(emitted.code.clone()),
+        }
+    }
+
+    pub(crate) fn emit_program(mut self, program: &Program) -> Result<String, String> {
+        if !program.native_c.is_empty()
+            && program.functions.is_empty()
+            && program.types.is_empty()
+            && program.enums.is_empty()
+        {
+            return Ok(program.native_c.join("\n"));
+        }
+        let mut out = String::new();
+        out.push_str(
+            "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <setjmp.h>\n\n",
+        );
+        out.push_str(RUNTIME_C);
+        out.push('\n');
+        for native in &program.native_c {
+            out.push_str(native);
+            out.push('\n');
+        }
+        for enum_def in &program.enums {
+            self.emit_enum(enum_def, &mut out);
+        }
+        for ty in &program.types {
+            self.emit_type(ty, &mut out)?;
+        }
+        for ty in &program.types {
+            if ty.kind == TypeKind::Interface {
+                continue;
+            }
+            for constructor in &ty.constructors {
+                out.push_str(&format!(
+                    "static {} {}({});\n",
+                    self.constructor_return_type(&ty.name),
+                    constructor_symbol(&ty.name),
+                    self.constructor_params(&ty.name, constructor)?
+                ));
+            }
+            for method in &ty.methods {
+                out.push_str(&format!(
+                    "static {} {}({});\n",
+                    self.method_return_type(&ty.name, method),
+                    self.method_symbol_for(&ty.name, method),
+                    self.method_params(&ty.name, method)?
+                ));
+            }
+        }
+        for f in &program.functions {
+            if f.name != "main" {
+                out.push_str(&format!(
+                    "static {} {}({});\n",
+                    self.function_return_type(f),
+                    self.function_symbol_for(f),
+                    self.function_params(f)?
+                ));
+            }
+        }
+        if program.functions.iter().any(|f| f.name != "main")
+            || program
+                .types
+                .iter()
+                .any(|ty| !ty.methods.is_empty() || !ty.constructors.is_empty())
+        {
+            out.push('\n');
+        }
+        self.emit_attribute_route_registration(program, &mut out);
+        for ty in &program.types {
+            if ty.kind == TypeKind::Interface {
+                continue;
+            }
+            for constructor in &ty.constructors {
+                self.emit_constructor(ty, constructor, &mut out)?;
+            }
+            for method in &ty.methods {
+                self.emit_method(ty, method, &mut out)?;
+            }
+        }
+        for f in &program.functions {
+            self.emit_function(f, &mut out)?;
+        }
+        Ok(out)
+    }
+
+    fn emit_attribute_route_registration(&self, program: &Program, out: &mut String) {
+        if !program.types.iter().any(|ty| ty.name == "WebApplication") {
+            return;
+        }
+        let routes = controller_routes(program);
+        out.push_str(
+            "static void glitch_register_attribute_routes(struct WebApplication * app) {\n",
+        );
+        for route in routes {
+            match route.method.as_str() {
+                "GET" => out.push_str(&format!(
+                    "    WebApplication_MapGet(app, {}, {});\n",
+                    c_string_literal(&route.path),
+                    c_string_literal(&route.handler)
+                )),
+                "POST" => out.push_str(&format!(
+                    "    WebApplication_MapPost(app, {}, {});\n",
+                    c_string_literal(&route.path),
+                    c_string_literal(&route.handler)
+                )),
+                _ => {}
+            }
+        }
+        out.push_str("}\n\n");
+    }
+
+    fn emit_enum(&self, enum_def: &EnumDef, out: &mut String) {
+        self.emit_metadata_comment(&enum_def.namespace, &enum_def.attributes, out);
+        out.push_str(&format!("enum {} {{\n", sanitize_ident(&enum_def.name)));
+        for variant in &enum_def.variants {
+            out.push_str("    ");
+            out.push_str(&enum_variant_symbol(&enum_def.name, &variant.name));
+            if let Some(value) = variant.value {
+                out.push_str(&format!(" = {value}"));
+            }
+            out.push_str(",\n");
+        }
+        out.push_str("};\n\n");
+    }
+
+    fn emit_type(&self, ty: &TypeDef, out: &mut String) -> Result<(), String> {
+        self.emit_metadata_comment(&ty.namespace, &ty.attributes, out);
+        if ty.kind == TypeKind::Interface {
+            out.push_str(&format!("/* interface {} */\n\n", sanitize_ident(&ty.name)));
+            return Ok(());
+        }
+        out.push_str(&format!("struct {} {{\n", sanitize_ident(&ty.name)));
+        if let Some(base) = self.concrete_base(&ty.name) {
+            out.push_str(&format!("    struct {} __base;\n", sanitize_ident(&base)));
+        }
+        for field in &ty.fields {
+            let c_type = self.type_syntax_to_ctype(&field.ty)?;
+            out.push_str(&emit_c_field_declaration(
+                &sanitize_ident(&field.name),
+                &c_type,
+            ));
+        }
+        out.push_str("};\n\n");
+        if ty.kind == TypeKind::Class {
+            let c = sanitize_ident(&ty.name);
+            out.push_str(&format!(
+                "static struct {0} * glitch_alloc_{0}(struct {0} value) {{ struct {0} *ptr = malloc(sizeof(struct {0})); if (!ptr) {{ abort(); }} *ptr = value; return ptr; }}\n\n",
+                c
+            ));
+        }
+        out.push_str(&format!(
+            "static void glitch_drop_{}(struct {} *value) {{\n    if (!value) {{ return; }}\n",
+            sanitize_ident(&ty.name),
+            sanitize_ident(&ty.name)
+        ));
+        if self.has_endpoint_handlers && ty.name == "WebApplication" {
+            out.push_str("    GlitchEndpointHandlers_RemoveApp(value);\n");
+        }
+        if self.has_middleware_handlers && ty.name == "WebApplication" {
+            out.push_str("    GlitchMiddlewareHandlers_RemoveApp(value);\n");
+        }
+        if let Some(fields) = self.fields.get(&ty.name) {
+            for (name, c_type) in fields {
+                if let Some(drop) =
+                    self.emit_drop_for_expr(&format!("value->{}", sanitize_ident(name)), c_type)
+                {
+                    out.push_str(&drop);
+                }
+            }
+        }
+        if let Some(base) = self.concrete_base(&ty.name) {
+            if let Some(drop) =
+                self.emit_drop_for_expr("value->__base", &CType::Struct(base.clone()))
+            {
+                out.push_str(&drop);
+            }
+        }
+        out.push_str("}\n\n");
+        Ok(())
+    }
+
+    fn emit_constructor(
+        &mut self,
+        owner: &TypeDef,
+        constructor: &Constructor,
+        out: &mut String,
+    ) -> Result<(), String> {
+        self.emit_metadata_comment(&constructor.namespace, &constructor.attributes, out);
+        let ret = self.constructor_return_type(&owner.name);
+        out.push_str(&format!(
+            "static {} {}({}) {{\n",
+            ret,
+            constructor_symbol(&owner.name),
+            self.constructor_params(&owner.name, constructor)?
+        ));
+        let mut state = CodegenState::new(ret.clone(), false, false);
+        match owner.kind {
+            TypeKind::Class => {
+                out.push_str(&format!(
+                    "    struct {} * self = glitch_alloc_{}((struct {}){{0}});\n",
+                    sanitize_ident(&owner.name),
+                    sanitize_ident(&owner.name),
+                    sanitize_ident(&owner.name)
+                ));
+            }
+            TypeKind::Struct | TypeKind::RefStruct => {
+                out.push_str(&format!(
+                    "    struct {} __glitch_value = (struct {}){{0}};\n",
+                    sanitize_ident(&owner.name),
+                    sanitize_ident(&owner.name)
+                ));
+                out.push_str("    struct ");
+                out.push_str(&sanitize_ident(&owner.name));
+                out.push_str(" * self = &__glitch_value;\n");
+            }
+            TypeKind::Interface => {}
+            TypeKind::Enum => {}
+        }
+        state
+            .vars
+            .insert("this".to_string(), CType::ClassPtr(owner.name.clone()));
+        if let Some(info) = self.constructors.get(&owner.name) {
+            for (param, c_type) in constructor.params.iter().zip(info.params.iter()) {
+                state
+                    .vars
+                    .insert(param.name.clone(), parameter_binding_type(c_type));
+            }
+        }
+        for stmt in &constructor.body {
+            self.emit_stmt(stmt, &mut state, out)?;
+            if state.terminated {
+                break;
+            }
+        }
+        if !state.terminated {
+            self.emit_scope_drops(&mut state, out);
+            match owner.kind {
+                TypeKind::Class => out.push_str("    return self;\n"),
+                TypeKind::Struct | TypeKind::RefStruct => {
+                    out.push_str("    return __glitch_value;\n")
+                }
+                TypeKind::Interface => {}
+                TypeKind::Enum => {}
+            }
+        }
+        out.push_str("}\n\n");
+        Ok(())
+    }
+
+    fn emit_method(
+        &mut self,
+        owner: &TypeDef,
+        method: &Function,
+        out: &mut String,
+    ) -> Result<(), String> {
+        self.emit_metadata_comment(&method.namespace, &method.attributes, out);
+        let ret = self.method_return_type(&owner.name, method);
+        out.push_str(&format!(
+            "static {} {}({}) {{\n",
+            ret,
+            self.method_symbol_for(&owner.name, method),
+            self.method_params(&owner.name, method)?
+        ));
+        let mut state = CodegenState::new(ret, false, method.is_async);
+        state
+            .vars
+            .insert("this".to_string(), CType::ClassPtr(owner.name.clone()));
+        if let Some(info) = self.method_info_for(&owner.name, method) {
+            for (param, c_type) in method.params.iter().zip(info.params.iter()) {
+                state
+                    .vars
+                    .insert(param.name.clone(), parameter_binding_type(c_type));
+            }
+        }
+        for stmt in &method.body {
+            self.emit_stmt(stmt, &mut state, out)?;
+            if state.terminated {
+                break;
+            }
+        }
+        if !state.terminated {
+            self.emit_scope_drops(&mut state, out);
+        }
+        out.push_str("}\n\n");
+        Ok(())
+    }
+
+    fn emit_function(&mut self, f: &Function, out: &mut String) -> Result<(), String> {
+        self.emit_metadata_comment(&f.namespace, &f.attributes, out);
+        let ret = self.function_return_type(f);
+        if f.name == "main" {
+            out.push_str("int main(void) {\n");
+        } else {
+            out.push_str(&format!(
+                "static {} {}({}) {{\n",
+                ret,
+                self.function_symbol_for(f),
+                self.function_params(f)?
+            ));
+        }
+        let mut state = CodegenState::new(ret.clone(), f.name == "main", f.is_async);
+        if f.name == "main" {
+            out.push_str("    struct string_array * args = NULL;\n");
+            state.vars.insert(
+                "args".to_string(),
+                CType::GenericPtr("string_array".to_string()),
+            );
+            state.scopes[0].push("args".to_string());
+        }
+        if let Some(info) = self.function_info_for(f) {
+            for (param, c_type) in f.params.iter().zip(info.params.iter()) {
+                state
+                    .vars
+                    .insert(param.name.clone(), parameter_binding_type(c_type));
+            }
+        }
+        for stmt in &f.body {
+            self.emit_stmt(stmt, &mut state, out)?;
+            if state.terminated {
+                break;
+            }
+        }
+        if !state.terminated {
+            self.emit_scope_drops(&mut state, out);
+            if f.name == "main" {
+                out.push_str("    return 0;\n");
+            }
+        }
+        out.push_str("}\n\n");
+        Ok(())
+    }
+
+    fn emit_stmt(
+        &mut self,
+        stmt: &Stmt,
+        state: &mut CodegenState,
+        out: &mut String,
+    ) -> Result<(), String> {
+        match stmt {
+            Stmt::Let {
+                name,
+                declared_type,
+                expr,
+                ..
+            } => {
+                let emitted = self.emit_expr(expr, &state.vars)?;
+                let c_type = if let Some(ty) = declared_type {
+                    self.type_syntax_to_ctype(ty)?
+                } else {
+                    emitted.c_type.clone()
+                };
+                let initializer = self.coerce_initializer(&emitted, &c_type)?;
+                out.push_str(&emit_c_declaration(
+                    &sanitize_ident(name),
+                    c_type.clone(),
+                    &initializer,
+                ));
+                state.vars.insert(name.clone(), c_type);
+                state.scopes.last_mut().unwrap().push(name.clone());
+                self.remember_moves(expr, state);
+            }
+            Stmt::Assign { name, expr } => {
+                let (c_type, target, is_local) = if let Some(c_type) = state.vars.get(name).cloned()
+                {
+                    let target = if matches!(c_type, CType::Ptr(_)) {
+                        format!("*{}", sanitize_ident(name))
+                    } else {
+                        sanitize_ident(name)
+                    };
+                    (c_type, target, true)
+                } else if let Some(field) = self.implicit_this_field_access(state, name) {
+                    (field.c_type, field.code, false)
+                } else {
+                    let emitted = self.emit_expr(expr, &state.vars)?;
+                    let c_type = emitted.c_type.clone();
+                    let initializer = self.coerce_initializer(&emitted, &c_type)?;
+                    out.push_str(&emit_c_declaration(
+                        &sanitize_ident(name),
+                        c_type.clone(),
+                        &initializer,
+                    ));
+                    state.vars.insert(name.clone(), c_type);
+                    state.scopes.last_mut().unwrap().push(name.clone());
+                    self.remember_moves(expr, state);
+                    return Ok(());
+                };
+                if is_local && !state.moved.contains(name) && !matches!(c_type, CType::Ptr(_)) {
+                    if let Some(drop) = self.emit_drop(name, &c_type) {
+                        out.push_str(&drop);
+                    }
+                } else if !is_local {
+                    if let Some(drop) = self.emit_drop_for_expr(&target, &c_type) {
+                        out.push_str(&drop);
+                    }
+                }
+                let emitted = self.emit_expr(expr, &state.vars)?;
+                let target_type = match c_type {
+                    CType::Ptr(scalar) => CType::Scalar(scalar),
+                    ref other => other.clone(),
+                };
+                let assign_code = self.coerce_initializer(&emitted, &target_type)?;
+                out.push_str(&format!("    {} = {};\n", target, assign_code));
+                if is_local {
+                    state.moved.retain(|m| m != name);
+                }
+                self.remember_moves(expr, state);
+            }
+            Stmt::AssignTarget { target, expr } => {
+                let emitted_target = self.emit_expr(target, &state.vars)?;
+                if let Some(drop) =
+                    self.emit_drop_for_expr(&emitted_target.code, &emitted_target.c_type)
+                {
+                    out.push_str(&drop);
+                }
+                let emitted = self.emit_expr(expr, &state.vars)?;
+                let assign_code = self.coerce_initializer(&emitted, &emitted_target.c_type)?;
+                out.push_str(&format!("    {} = {};\n", emitted_target.code, assign_code));
+                self.remember_moves(expr, state);
+            }
+            Stmt::Block(body) => self.emit_block(body, state, out)?,
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                self.declare_out_vars(condition, state, out);
+                let emitted_condition = self.emit_expr(condition, &state.vars)?;
+                out.push_str(&format!("    if ({}) {{\n", emitted_condition.code));
+                let mut then_state = state.clone();
+                then_state.scopes.push(Vec::new());
+                if let Expr::IsPattern {
+                    ty,
+                    name: Some(name),
+                    ..
+                } = condition
+                {
+                    then_state
+                        .vars
+                        .insert(name.clone(), CType::GenericPtr(type_syntax_symbol(ty)));
+                    then_state.scopes.last_mut().unwrap().push(name.clone());
+                }
+                for s in then_body {
+                    self.emit_stmt(s, &mut then_state, out)?;
+                    if then_state.terminated {
+                        break;
+                    }
+                }
+                if !then_state.terminated {
+                    self.emit_scope_drops(&mut then_state, out);
+                }
+                out.push_str("    }");
+                if !else_body.is_empty() {
+                    out.push_str(" else {\n");
+                    let mut else_state = state.clone();
+                    else_state.scopes.push(Vec::new());
+                    for s in else_body {
+                        self.emit_stmt(s, &mut else_state, out)?;
+                        if else_state.terminated {
+                            break;
+                        }
+                    }
+                    if !else_state.terminated {
+                        self.emit_scope_drops(&mut else_state, out);
+                    }
+                    out.push_str("    }");
+                }
+                out.push('\n');
+            }
+            Stmt::Try {
+                try_body,
+                catch,
+                finally_body,
+            } => {
+                out.push_str("    {\n");
+                out.push_str("    struct GlitchExceptionFrame __glitch_frame;\n");
+                out.push_str("    int __glitch_uncaught = 0;\n");
+                out.push_str("    glitch_exception_push(&__glitch_frame);\n");
+                out.push_str("    if (setjmp(__glitch_frame.env) == 0) {\n");
+                {
+                    let mut try_state = state.clone();
+                    try_state.scopes.push(Vec::new());
+                    for stmt in try_body {
+                        self.emit_stmt(stmt, &mut try_state, out)?;
+                        if try_state.terminated {
+                            break;
+                        }
+                    }
+                    if !try_state.terminated {
+                        self.emit_scope_drops(&mut try_state, out);
+                    }
+                }
+                out.push_str("    } else {\n");
+                if let Some(catch) = catch {
+                    let mut catch_state = state.clone();
+                    catch_state.scopes.push(Vec::new());
+                    if let Some(name) = &catch.name {
+                        out.push_str(&format!(
+                            "    struct GlitchException * {} = &__glitch_frame.exception;\n",
+                            sanitize_ident(name)
+                        ));
+                        catch_state.vars.insert(name.clone(), CType::ExceptionPtr);
+                    }
+                    if let Some(exception_type) = &catch.exception_type {
+                        let _ = self.type_syntax_to_ctype(exception_type)?;
+                    }
+                    for stmt in &catch.body {
+                        self.emit_stmt(stmt, &mut catch_state, out)?;
+                        if catch_state.terminated {
+                            break;
+                        }
+                    }
+                    if !catch_state.terminated {
+                        self.emit_scope_drops(&mut catch_state, out);
+                    }
+                } else {
+                    out.push_str("    __glitch_uncaught = 1;\n");
+                }
+                out.push_str("    }\n");
+                out.push_str("    glitch_exception_pop(&__glitch_frame);\n");
+                let mut finally_state = state.clone();
+                finally_state.scopes.push(Vec::new());
+                for stmt in finally_body {
+                    self.emit_stmt(stmt, &mut finally_state, out)?;
+                    if finally_state.terminated {
+                        break;
+                    }
+                }
+                if !finally_state.terminated {
+                    self.emit_scope_drops(&mut finally_state, out);
+                }
+                out.push_str(
+                    "    if (__glitch_uncaught) { glitch_throw(__glitch_frame.exception); }\n",
+                );
+                out.push_str("    glitch_exception_free(&__glitch_frame.exception);\n");
+                out.push_str("    }\n");
+            }
+            Stmt::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                let expr = self.emit_expr(expr, &state.vars)?;
+                out.push_str(&format!("    switch ({}) {{\n", expr.code));
+                for case in cases {
+                    let value = self.emit_expr(&case.value, &state.vars)?;
+                    out.push_str(&format!("    case {}:\n", value.code));
+                    let mut case_state = state.clone();
+                    case_state.scopes.push(Vec::new());
+                    for stmt in &case.body {
+                        self.emit_stmt(stmt, &mut case_state, out)?;
+                        if case_state.terminated {
+                            break;
+                        }
+                    }
+                    if !case_state.terminated {
+                        self.emit_scope_drops(&mut case_state, out);
+                    }
+                }
+                if !default.is_empty() {
+                    out.push_str("    default:\n");
+                    let mut default_state = state.clone();
+                    default_state.scopes.push(Vec::new());
+                    for stmt in default {
+                        self.emit_stmt(stmt, &mut default_state, out)?;
+                        if default_state.terminated {
+                            break;
+                        }
+                    }
+                    if !default_state.terminated {
+                        self.emit_scope_drops(&mut default_state, out);
+                    }
+                }
+                out.push_str("    }\n");
+            }
+            Stmt::While { condition, body } => {
+                let condition = self.emit_expr(condition, &state.vars)?;
+                out.push_str(&format!("    while ({}) {{\n", condition.code));
+                let mut body_state = state.clone();
+                body_state.scopes.push(Vec::new());
+                for s in body {
+                    self.emit_stmt(s, &mut body_state, out)?;
+                }
+                self.emit_scope_drops(&mut body_state, out);
+                out.push_str("    }\n");
+            }
+            Stmt::For {
+                init,
+                condition,
+                increment,
+                body,
+            } => {
+                out.push_str("    {\n");
+                state.scopes.push(Vec::new());
+                if let Some(init) = init {
+                    self.emit_stmt(init, state, out)?;
+                }
+                let condition = if let Some(condition) = condition {
+                    self.emit_expr(condition, &state.vars)?.code
+                } else {
+                    "1".to_string()
+                };
+                out.push_str(&format!("    while ({}) {{\n", condition));
+                for s in body {
+                    self.emit_stmt(s, state, out)?;
+                }
+                if let Some(inc) = increment {
+                    self.emit_stmt(inc, state, out)?;
+                }
+                out.push_str("    }\n");
+                self.emit_scope_drops(state, out);
+                out.push_str("    }\n");
+            }
+            Stmt::ForEach {
+                item_type,
+                item_name,
+                collection,
+                body,
+            } => {
+                let collection = self.emit_expr(collection, &state.vars)?;
+                let expected = self.type_syntax_to_ctype(item_type)?;
+                let index_name = self.next_temp("foreach_i");
+                let info = self.foreach_info(&collection, &index_name)?;
+                if !foreach_item_type_matches(&expected, &info.declared_element_type) {
+                    return Err(format!(
+                        "foreach item type '{}' does not match collection element type '{}' for collection '{}'",
+                        expected, info.declared_element_type, collection.c_type
+                    ));
+                }
+                out.push_str("    {\n");
+                out.push_str(&format!(
+                    "    for (int {0} = 0; {0} < {1}; {0}++) {{\n",
+                    index_name, info.length_expr
+                ));
+                state.scopes.push(Vec::new());
+                state
+                    .vars
+                    .insert(item_name.clone(), info.variable_type.clone());
+                state.scopes.last_mut().unwrap().push(item_name.clone());
+                out.push_str(&emit_c_declaration(
+                    &sanitize_ident(item_name),
+                    info.variable_type,
+                    &info.item_expr,
+                ));
+                for stmt in body {
+                    self.emit_stmt(stmt, state, out)?;
+                }
+                self.emit_scope_drops(state, out);
+                out.push_str("    }\n");
+                out.push_str("    }\n");
+            }
+            Stmt::Print(expr) => {
+                let e = self.emit_expr(expr, &state.vars)?;
+                match e.c_type {
+                    CType::Scalar(s) => out.push_str(&format!(
+                        "    printf(\"{}\\n\", {});\n",
+                        s.printf_format(),
+                        e.code
+                    )),
+                    CType::Ptr(s) => out.push_str(&format!(
+                        "    printf(\"{}\\n\", *{});\n",
+                        s.printf_format(),
+                        e.code
+                    )),
+                    CType::String => out.push_str(&format!("    printf(\"%s\\n\", {});\n", e.code)),
+                    CType::BorrowedString => {
+                        out.push_str(&format!("    printf(\"%s\\n\", {});\n", e.code))
+                    }
+                    _ => out.push_str(&format!("    (void)({});\n", e.code)),
+                }
+            }
+            Stmt::Expr(expr) => {
+                let e = self.emit_expr(expr, &state.vars)?;
+                out.push_str(&format!("    {};\n", e.code));
+                self.remember_moves(expr, state);
+            }
+            Stmt::Return(expr) => {
+                if let Some(expr) = expr {
+                    let e = self.emit_expr(expr, &state.vars)?;
+                    let ret = if state.is_main {
+                        CType::Scalar(ScalarType::I32)
+                    } else {
+                        state.return_type.clone()
+                    };
+                    let return_code = if state.is_async {
+                        if let CType::Task(result) = &ret {
+                            if result.as_ref() == &CType::String
+                                && e.c_type == CType::BorrowedString
+                            {
+                                format!("GlitchTask_string_from_result({})", e.code)
+                            } else {
+                                format!("{}({})", task_from_result_function(result), e.code)
+                            }
+                        } else {
+                            return Err("async functions must return Task or Task<T>".to_string());
+                        }
+                    } else {
+                        self.coerce_initializer(&e, &ret)?
+                    };
+                    out.push_str(&emit_c_declaration("__glitch_return", ret, &return_code));
+                    self.remember_moves(expr, state);
+                    self.emit_all_scope_drops(state, out);
+                    out.push_str("    return __glitch_return;\n");
+                } else {
+                    self.emit_all_scope_drops(state, out);
+                    if state.is_main {
+                        out.push_str("    return 0;\n");
+                    } else {
+                        out.push_str("    return;\n");
+                    }
+                }
+                state.terminated = true;
+            }
+            Stmt::Throw(expr) => {
+                let e = self.emit_expr(expr, &state.vars)?;
+                match e.c_type {
+                    CType::Exception => out.push_str(&format!("    glitch_throw({});\n", e.code)),
+                    CType::ExceptionPtr => out.push_str(&format!(
+                        "    glitch_throw(glitch_exception_clone({}));\n",
+                        e.code
+                    )),
+                    CType::String => out.push_str(&format!(
+                        "    glitch_throw(glitch_exception_from_owned({}));\n",
+                        e.code
+                    )),
+                    CType::BorrowedString => out.push_str(&format!(
+                        "    glitch_throw(glitch_exception_new({}));\n",
+                        e.code
+                    )),
+                    CType::ClassPtr(_) | CType::GenericPtr(_) => {
+                        out.push_str("    glitch_throw(glitch_exception_new(\"\"));\n")
+                    }
+                    other => return Err(format!("throw expects Exception or string, got {other}")),
+                }
+                state.terminated = true;
+            }
+            Stmt::Break => {
+                out.push_str("    break;\n");
+            }
+            Stmt::Continue => {
+                out.push_str("    continue;\n");
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_block(
+        &mut self,
+        body: &[Stmt],
+        state: &mut CodegenState,
+        out: &mut String,
+    ) -> Result<(), String> {
+        out.push_str("    {\n");
+        state.scopes.push(Vec::new());
+        for stmt in body {
+            self.emit_stmt(stmt, state, out)?;
+        }
+        self.emit_scope_drops(state, out);
+        out.push_str("    }\n");
+        Ok(())
+    }
+
+    fn declare_out_vars(&self, expr: &Expr, state: &mut CodegenState, out: &mut String) {
+        match expr {
+            Expr::RefArg {
+                modifier: ParamModifier::Out,
+                expr,
+            } => {
+                if let Expr::Var(name) = expr.as_ref() {
+                    if !state.vars.contains_key(name) {
+                        let c_type = CType::GenericPtr("out_var".to_string());
+                        out.push_str(&emit_c_declaration(
+                            &sanitize_ident(name),
+                            c_type.clone(),
+                            "NULL",
+                        ));
+                        state.vars.insert(name.clone(), c_type);
+                        state.scopes.last_mut().unwrap().push(name.clone());
+                    }
+                }
+            }
+            Expr::FunctionCall { args, .. } | Expr::MethodCall { args, .. } => {
+                for arg in args {
+                    self.declare_out_vars(arg, state, out);
+                }
+            }
+            Expr::NamedArg { expr, .. }
+            | Expr::RefArg { expr, .. }
+            | Expr::Await(expr)
+            | Expr::Unary { expr, .. }
+            | Expr::IsPattern { expr, .. } => self.declare_out_vars(expr, state, out),
+            Expr::Binary { left, right, .. } => {
+                self.declare_out_vars(left, state, out);
+                self.declare_out_vars(right, state, out);
+            }
+            Expr::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => {
+                self.declare_out_vars(condition, state, out);
+                self.declare_out_vars(when_true, state, out);
+                self.declare_out_vars(when_false, state, out);
+            }
+            Expr::Index { target, index } => {
+                self.declare_out_vars(target, state, out);
+                self.declare_out_vars(index, state, out);
+            }
+            Expr::Field { target, .. } => self.declare_out_vars(target, state, out),
+            Expr::ArrayLiteral(values) | Expr::NewArray { values, .. } => {
+                for value in values {
+                    self.declare_out_vars(value, state, out);
+                }
+            }
+            Expr::NewObject { args, fields, .. } => {
+                for arg in args {
+                    self.declare_out_vars(arg, state, out);
+                }
+                for field in fields {
+                    self.declare_out_vars(&field.expr, state, out);
+                }
+            }
+            Expr::Lambda { body, .. } => self.declare_out_vars(body, state, out),
+            _ => {}
+        }
+    }
+
+    fn emit_expr(
+        &mut self,
+        expr: &Expr,
+        vars: &HashMap<String, CType>,
+    ) -> Result<EmittedExpr, String> {
+        match expr {
+            Expr::Int(v) => Ok(EmittedExpr {
+                code: v.to_string(),
+                c_type: CType::Scalar(ScalarType::I64),
+            }),
+            Expr::Float(v) => Ok(EmittedExpr {
+                code: v.to_string(),
+                c_type: CType::Scalar(ScalarType::F64),
+            }),
+            Expr::Bool(v) => Ok(EmittedExpr {
+                code: if *v { "1" } else { "0" }.to_string(),
+                c_type: CType::Scalar(ScalarType::Bool),
+            }),
+            Expr::Null => Ok(EmittedExpr {
+                code: "NULL".to_string(),
+                c_type: CType::Null,
+            }),
+            Expr::String(s) => Ok(EmittedExpr {
+                code: format!("glitch_strdup({})", c_string_literal(s)),
+                c_type: CType::String,
+            }),
+            Expr::Var(name) | Expr::Move(name) => {
+                let c_type = if let Some(c_type) = vars.get(name).cloned() {
+                    c_type
+                } else if let Some(this_type) = vars.get("this") {
+                    match this_type {
+                        CType::ClassPtr(type_name) => {
+                            if let Some(field) = self.field_access(type_name, "self", true, name) {
+                                return Ok(field);
+                            }
+                            return Err(format!("unknown variable '{name}'"));
+                        }
+                        CType::Struct(type_name) => {
+                            if let Some(field) = self.field_access(type_name, "self", false, name) {
+                                return Ok(field);
+                            }
+                            return Err(format!("unknown variable '{name}'"));
+                        }
+                        _ => return Err(format!("unknown variable '{name}'")),
+                    }
+                } else {
+                    return Err(format!("unknown variable '{name}'"));
+                };
+                match c_type {
+                    CType::Ptr(scalar) => Ok(EmittedExpr {
+                        code: format!("*{}", sanitize_ident(name)),
+                        c_type: CType::Scalar(scalar),
+                    }),
+                    other => Ok(EmittedExpr {
+                        code: sanitize_ident(name),
+                        c_type: other,
+                    }),
+                }
+            }
+            Expr::ArrayLiteral(values) => {
+                let values = values
+                    .iter()
+                    .map(|v| self.emit_expr(v, vars).map(|e| e.code))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(EmittedExpr {
+                    code: array_literal_code(ScalarType::I64, &values),
+                    c_type: CType::Array(ScalarType::I64, values.len()),
+                })
+            }
+            Expr::NewArray {
+                element_type,
+                values,
+            } => {
+                let values = values
+                    .iter()
+                    .map(|v| self.emit_expr(v, vars).map(|e| e.code))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let TypeSyntax::Scalar(element_type) = element_type else {
+                    return Ok(EmittedExpr {
+                        code: "NULL".to_string(),
+                        c_type: CType::GenericPtr(format!(
+                            "{}_array",
+                            type_syntax_symbol(element_type)
+                        )),
+                    });
+                };
+                Ok(EmittedExpr {
+                    code: array_literal_code(*element_type, &values),
+                    c_type: CType::Array(*element_type, values.len()),
+                })
+            }
+            Expr::Index { target, index } => {
+                let t = self.emit_expr(target, vars)?;
+                let i = self.emit_expr(index, vars)?;
+                match t.c_type {
+                    CType::ListInt => Ok(EmittedExpr {
+                        code: format!("List_int_get(&{}, {})", t.code, i.code),
+                        c_type: CType::Scalar(ScalarType::I32),
+                    }),
+                    CType::ListI64 => Ok(EmittedExpr {
+                        code: format!("List_i64_get(&{}, {})", t.code, i.code),
+                        c_type: CType::Scalar(ScalarType::I64),
+                    }),
+                    CType::ListBool => Ok(EmittedExpr {
+                        code: format!("List_bool_get(&{}, {})", t.code, i.code),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    CType::ListF64 => Ok(EmittedExpr {
+                        code: format!("List_f64_get(&{}, {})", t.code, i.code),
+                        c_type: CType::Scalar(ScalarType::F64),
+                    }),
+                    CType::ListString => Ok(EmittedExpr {
+                        code: format!("List_string_get(&{}, {})", t.code, i.code),
+                        c_type: CType::BorrowedString,
+                    }),
+                    CType::DictStringInt => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_int_get(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(index, vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::I32),
+                    }),
+                    CType::DictStringI64 => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_i64_get(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(index, vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::I64),
+                    }),
+                    CType::DictStringBool => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_bool_get(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(index, vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    CType::DictStringF64 => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_f64_get(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(index, vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::F64),
+                    }),
+                    CType::DictStringString => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_string_get(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(index, vars)?
+                        ),
+                        c_type: CType::BorrowedString,
+                    }),
+                    CType::Array(s, _) => Ok(EmittedExpr {
+                        code: format!("{}.data[{}]", t.code, i.code),
+                        c_type: CType::Scalar(s),
+                    }),
+                    CType::String | CType::BorrowedString => Ok(EmittedExpr {
+                        code: "\"\"".to_string(),
+                        c_type: CType::BorrowedString,
+                    }),
+                    CType::GenericPtr(type_name) => Ok(EmittedExpr {
+                        code: "NULL".to_string(),
+                        c_type: CType::GenericPtr(format!("{}_item", type_name)),
+                    }),
+                    other => Err(format!("index target is not indexable: {other}")),
+                }
+            }
+            Expr::Field { target, name } => {
+                if let Some(path) = expr_to_type_path(target) {
+                    let type_name = path.join(".");
+                    if self.types.get(&type_name) == Some(&TypeKind::Enum) {
+                        return Ok(EmittedExpr {
+                            code: enum_variant_symbol(&type_name, name),
+                            c_type: CType::Scalar(ScalarType::I32),
+                        });
+                    }
+                    if path.first().is_some_and(|first| !vars.contains_key(first)) {
+                        return Ok(EmittedExpr {
+                            code: "NULL".to_string(),
+                            c_type: CType::GenericPtr(format!("{}_{}", type_name, name)),
+                        });
+                    }
+                }
+                let t = self.emit_expr(target, vars)?;
+                match t.c_type {
+                    CType::ExceptionPtr if name == "Message" => Ok(EmittedExpr {
+                        code: format!("{}->message", t.code),
+                        c_type: CType::BorrowedString,
+                    }),
+                    CType::ListInt
+                    | CType::ListI64
+                    | CType::ListBool
+                    | CType::ListF64
+                    | CType::ListString
+                        if name == "Count" =>
+                    {
+                        Ok(EmittedExpr {
+                            code: format!("{}.len", t.code),
+                            c_type: CType::Scalar(ScalarType::I32),
+                        })
+                    }
+                    CType::DictStringInt
+                    | CType::DictStringI64
+                    | CType::DictStringBool
+                    | CType::DictStringF64
+                    | CType::DictStringString
+                        if name == "Count" =>
+                    {
+                        Ok(EmittedExpr {
+                            code: format!("{}.len", t.code),
+                            c_type: CType::Scalar(ScalarType::I32),
+                        })
+                    }
+                    CType::Array(_, _) if name == "Length" || name == "Count" => Ok(EmittedExpr {
+                        code: format!("{}.len", t.code),
+                        c_type: CType::Scalar(ScalarType::I32),
+                    }),
+                    CType::String | CType::BorrowedString if name == "Length" => Ok(EmittedExpr {
+                        code: "0".to_string(),
+                        c_type: CType::Scalar(ScalarType::I32),
+                    }),
+                    CType::Struct(type_name) => {
+                        if let Some(access) = self.field_access(&type_name, &t.code, false, name) {
+                            Ok(access)
+                        } else {
+                            self.emit_instance_property_getter(
+                                &type_name,
+                                &format!("&{}", t.code),
+                                name,
+                            )
+                        }
+                    }
+                    CType::ClassPtr(type_name) => {
+                        if let Some(access) = self.field_access(&type_name, &t.code, true, name) {
+                            Ok(access)
+                        } else {
+                            self.emit_instance_property_getter(&type_name, &t.code, name)
+                        }
+                    }
+                    CType::Task(result) if name == "Result" => Ok(EmittedExpr {
+                        code: format!("{}(&{})", task_result_function(&result), t.code),
+                        c_type: *result,
+                    }),
+                    CType::Task(_) if name == "IsCompleted" => Ok(EmittedExpr {
+                        code: "1".to_string(),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    CType::GenericPtr(type_name) => Ok(EmittedExpr {
+                        code: "NULL".to_string(),
+                        c_type: CType::GenericPtr(format!("{}_{}", type_name, name)),
+                    }),
+                    other => Err(format!(
+                        "field access target for '{name}' is not a struct/class/task: {other}"
+                    )),
+                }
+            }
+            Expr::IsPattern { expr, .. } => {
+                let code = match self.emit_expr(expr, vars) {
+                    Ok(value)
+                        if matches!(
+                            value.c_type,
+                            CType::ClassPtr(_)
+                                | CType::GenericPtr(_)
+                                | CType::String
+                                | CType::BorrowedString
+                                | CType::Null
+                        ) =>
+                    {
+                        format!("({} != NULL)", value.code)
+                    }
+                    Ok(_) | Err(_) => "1".to_string(),
+                };
+                Ok(EmittedExpr {
+                    code,
+                    c_type: CType::Scalar(ScalarType::Bool),
+                })
+            }
+            Expr::MethodCall { target, name, args } => {
+                if let Some(path) = expr_to_type_path(target) {
+                    if is_task_type_path(&path) && name == "Run" {
+                        let Some(Expr::Var(entry)) = args.first() else {
+                            return Err("Task.Run expects a function name".to_string());
+                        };
+                        let ret = self
+                            .functions
+                            .get(entry)
+                            .and_then(|functions| functions.first())
+                            .map(|f| f.return_type.clone())
+                            .ok_or_else(|| {
+                                format!("Task entry function '{entry}' does not exist")
+                            })?;
+                        return Ok(EmittedExpr {
+                            code: format!("{}({})", task_run_function(&ret), sanitize_ident(entry)),
+                            c_type: CType::Task(Box::new(ret)),
+                        });
+                    }
+                    if is_task_type_path(&path) && name == "FromResult" {
+                        let Some(arg) = args.first() else {
+                            return Err("Task.FromResult expects a value".to_string());
+                        };
+                        let emitted = self.emit_expr(arg, vars)?;
+                        let was_borrowed_string = emitted.c_type == CType::BorrowedString;
+                        let task_result = match emitted.c_type {
+                            CType::Scalar(ScalarType::I64) if matches!(arg, Expr::Int(_)) => {
+                                CType::Scalar(ScalarType::I32)
+                            }
+                            CType::BorrowedString => CType::String,
+                            other => other,
+                        };
+                        let function = if was_borrowed_string {
+                            "GlitchTask_string_from_result"
+                        } else {
+                            task_from_result_function(&task_result)
+                        };
+                        return Ok(EmittedExpr {
+                            code: format!("{}({})", function, emitted.code),
+                            c_type: CType::Task(Box::new(task_result)),
+                        });
+                    }
+                    if is_file_type_path(&path) && (name == "WriteAllText" || name == "ReadAllText")
+                    {
+                        let mut arg_codes = Vec::new();
+                        for arg in args {
+                            arg_codes.push(self.emit_expr(arg, vars)?.code);
+                        }
+                        if name == "WriteAllText" {
+                            return Ok(EmittedExpr {
+                                code: format!(
+                                    "System_IO_File_WriteAllText({})",
+                                    arg_codes.join(", ")
+                                ),
+                                c_type: CType::Void,
+                            });
+                        } else {
+                            return Ok(EmittedExpr {
+                                code: format!(
+                                    "System_IO_File_ReadAllText({})",
+                                    arg_codes.join(", ")
+                                ),
+                                c_type: CType::String,
+                            });
+                        }
+                    }
+                    if path.first().is_some_and(|first| !vars.contains_key(first)) {
+                        for arg in args {
+                            let _ = self.emit_expr(arg, vars)?;
+                        }
+                        return Ok(EmittedExpr {
+                            code: "NULL".to_string(),
+                            c_type: CType::GenericPtr(format!("{}_{}", path.join("."), name)),
+                        });
+                    }
+                }
+                if let Expr::Var(type_name) = target.as_ref() {
+                    if !vars.contains_key(type_name) && self.types.get(type_name).is_none() {
+                        for arg in args {
+                            let _ = self.emit_expr(arg, vars)?;
+                        }
+                        return Ok(EmittedExpr {
+                            code: "NULL".to_string(),
+                            c_type: CType::GenericPtr(format!("{}_{}", type_name, name)),
+                        });
+                    }
+                }
+                let t = self.emit_expr(target, vars)?;
+                match (t.c_type, name.as_str()) {
+                    (CType::ListInt, "Add") => Ok(EmittedExpr {
+                        code: format!(
+                            "List_int_add(&{}, {})",
+                            t.code,
+                            self.emit_expr(&args[0], vars)?.code
+                        ),
+                        c_type: CType::Void,
+                    }),
+                    (CType::ListI64, "Add") => Ok(EmittedExpr {
+                        code: format!(
+                            "List_i64_add(&{}, {})",
+                            t.code,
+                            self.emit_expr(&args[0], vars)?.code
+                        ),
+                        c_type: CType::Void,
+                    }),
+                    (CType::ListBool, "Add") => Ok(EmittedExpr {
+                        code: format!(
+                            "List_bool_add(&{}, {})",
+                            t.code,
+                            self.emit_expr(&args[0], vars)?.code
+                        ),
+                        c_type: CType::Void,
+                    }),
+                    (CType::ListF64, "Add") => Ok(EmittedExpr {
+                        code: format!(
+                            "List_f64_add(&{}, {})",
+                            t.code,
+                            self.emit_expr(&args[0], vars)?.code
+                        ),
+                        c_type: CType::Void,
+                    }),
+                    (CType::ListString, "Add") => Ok(EmittedExpr {
+                        code: self.emit_list_string_add(&t.code, &args[0], vars)?,
+                        c_type: CType::Void,
+                    }),
+                    (CType::DictStringInt, "Add") => Ok(EmittedExpr {
+                        code: self.emit_dict_string_scalar_add(
+                            "Dict_string_int_add",
+                            &t.code,
+                            &args[0],
+                            &args[1],
+                            vars,
+                        )?,
+                        c_type: CType::Void,
+                    }),
+                    (CType::DictStringI64, "Add") => Ok(EmittedExpr {
+                        code: self.emit_dict_string_scalar_add(
+                            "Dict_string_i64_add",
+                            &t.code,
+                            &args[0],
+                            &args[1],
+                            vars,
+                        )?,
+                        c_type: CType::Void,
+                    }),
+                    (CType::DictStringBool, "Add") => Ok(EmittedExpr {
+                        code: self.emit_dict_string_scalar_add(
+                            "Dict_string_bool_add",
+                            &t.code,
+                            &args[0],
+                            &args[1],
+                            vars,
+                        )?,
+                        c_type: CType::Void,
+                    }),
+                    (CType::DictStringF64, "Add") => Ok(EmittedExpr {
+                        code: self.emit_dict_string_scalar_add(
+                            "Dict_string_f64_add",
+                            &t.code,
+                            &args[0],
+                            &args[1],
+                            vars,
+                        )?,
+                        c_type: CType::Void,
+                    }),
+                    (CType::DictStringString, "Add") => Ok(EmittedExpr {
+                        code: self
+                            .emit_dict_string_string_add(&t.code, &args[0], &args[1], vars)?,
+                        c_type: CType::Void,
+                    }),
+                    (CType::ListInt, "Clear") => Ok(EmittedExpr {
+                        code: format!("List_int_clear(&{})", t.code),
+                        c_type: CType::Void,
+                    }),
+                    (CType::ListI64, "Clear") => Ok(EmittedExpr {
+                        code: format!("List_i64_clear(&{})", t.code),
+                        c_type: CType::Void,
+                    }),
+                    (CType::ListBool, "Clear") => Ok(EmittedExpr {
+                        code: format!("List_bool_clear(&{})", t.code),
+                        c_type: CType::Void,
+                    }),
+                    (CType::ListF64, "Clear") => Ok(EmittedExpr {
+                        code: format!("List_f64_clear(&{})", t.code),
+                        c_type: CType::Void,
+                    }),
+                    (CType::ListString, "Clear") => Ok(EmittedExpr {
+                        code: format!("List_string_clear(&{})", t.code),
+                        c_type: CType::Void,
+                    }),
+                    (CType::ListInt, "Contains") => Ok(EmittedExpr {
+                        code: format!(
+                            "List_int_contains(&{}, {})",
+                            t.code,
+                            self.emit_expr(&args[0], vars)?.code
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::ListI64, "Contains") => Ok(EmittedExpr {
+                        code: format!(
+                            "List_i64_contains(&{}, {})",
+                            t.code,
+                            self.emit_expr(&args[0], vars)?.code
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::ListBool, "Contains") => Ok(EmittedExpr {
+                        code: format!(
+                            "List_bool_contains(&{}, {})",
+                            t.code,
+                            self.emit_expr(&args[0], vars)?.code
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::ListF64, "Contains") => Ok(EmittedExpr {
+                        code: format!(
+                            "List_f64_contains(&{}, {})",
+                            t.code,
+                            self.emit_expr(&args[0], vars)?.code
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::ListString, "Contains") => Ok(EmittedExpr {
+                        code: format!(
+                            "List_string_contains(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (
+                        CType::ListInt
+                        | CType::ListI64
+                        | CType::ListBool
+                        | CType::ListF64
+                        | CType::ListString,
+                        "Any",
+                    ) => {
+                        for arg in args {
+                            let _ = self.emit_expr(arg, vars)?;
+                        }
+                        Ok(EmittedExpr {
+                            code: format!("({}.len > 0)", t.code),
+                            c_type: CType::Scalar(ScalarType::Bool),
+                        })
+                    }
+                    (
+                        CType::EnumerableInt
+                        | CType::EnumerableI64
+                        | CType::EnumerableBool
+                        | CType::EnumerableF64
+                        | CType::EnumerableString,
+                        "Any",
+                    ) => {
+                        for arg in args {
+                            let _ = self.emit_expr(arg, vars)?;
+                        }
+                        Ok(EmittedExpr {
+                            code: format!("({}.source && {}.source->len > 0)", t.code, t.code),
+                            c_type: CType::Scalar(ScalarType::Bool),
+                        })
+                    }
+                    (CType::DictStringInt, "Clear") => Ok(EmittedExpr {
+                        code: format!("Dict_string_int_clear(&{})", t.code),
+                        c_type: CType::Void,
+                    }),
+                    (CType::DictStringI64, "Clear") => Ok(EmittedExpr {
+                        code: format!("Dict_string_i64_clear(&{})", t.code),
+                        c_type: CType::Void,
+                    }),
+                    (CType::DictStringBool, "Clear") => Ok(EmittedExpr {
+                        code: format!("Dict_string_bool_clear(&{})", t.code),
+                        c_type: CType::Void,
+                    }),
+                    (CType::DictStringF64, "Clear") => Ok(EmittedExpr {
+                        code: format!("Dict_string_f64_clear(&{})", t.code),
+                        c_type: CType::Void,
+                    }),
+                    (CType::DictStringString, "Clear") => Ok(EmittedExpr {
+                        code: format!("Dict_string_string_clear(&{})", t.code),
+                        c_type: CType::Void,
+                    }),
+                    (CType::DictStringInt, "Remove") => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_int_remove(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::DictStringI64, "Remove") => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_i64_remove(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::DictStringBool, "Remove") => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_bool_remove(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::DictStringF64, "Remove") => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_f64_remove(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::DictStringString, "Remove") => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_string_remove(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::DictStringInt, "ContainsKey") => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_int_contains_key(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::DictStringI64, "ContainsKey") => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_i64_contains_key(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::DictStringBool, "ContainsKey") => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_bool_contains_key(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::DictStringF64, "ContainsKey") => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_f64_contains_key(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::DictStringString, "ContainsKey") => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_string_contains_key(&{}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::Array(_, _), "SequenceEqual") => {
+                        for arg in args {
+                            let _ = self.emit_expr(arg, vars)?;
+                        }
+                        Ok(EmittedExpr {
+                            code: "1".to_string(),
+                            c_type: CType::Scalar(ScalarType::Bool),
+                        })
+                    }
+                    (CType::String | CType::BorrowedString, "Contains")
+                    | (CType::String | CType::BorrowedString, "StartsWith")
+                    | (CType::String | CType::BorrowedString, "EndsWith") => {
+                        for arg in args {
+                            let _ = self.emit_expr(arg, vars)?;
+                        }
+                        Ok(EmittedExpr {
+                            code: "1".to_string(),
+                            c_type: CType::Scalar(ScalarType::Bool),
+                        })
+                    }
+                    (ctype @ (CType::String | CType::BorrowedString), "ToString")
+                    | (ctype @ (CType::String | CType::BorrowedString), "ToLower")
+                    | (ctype @ (CType::String | CType::BorrowedString), "ToUpper")
+                    | (ctype @ (CType::String | CType::BorrowedString), "Trim")
+                    | (ctype @ (CType::String | CType::BorrowedString), "TrimStart")
+                    | (ctype @ (CType::String | CType::BorrowedString), "TrimEnd")
+                    | (ctype @ (CType::String | CType::BorrowedString), "Replace") => {
+                        for arg in args {
+                            let _ = self.emit_expr(arg, vars)?;
+                        }
+                        Ok(EmittedExpr {
+                            code: t.code,
+                            c_type: ctype,
+                        })
+                    }
+                    (CType::String | CType::BorrowedString, "Substring")
+                    | (CType::String | CType::BorrowedString, "Remove") => {
+                        for arg in args {
+                            let _ = self.emit_expr(arg, vars)?;
+                        }
+                        Ok(EmittedExpr {
+                            code: "glitch_strdup(\"\")".to_string(),
+                            c_type: CType::String,
+                        })
+                    }
+                    (CType::String | CType::BorrowedString, "Split") => {
+                        for arg in args {
+                            let _ = self.emit_expr(arg, vars)?;
+                        }
+                        Ok(EmittedExpr {
+                            code: "NULL".to_string(),
+                            c_type: CType::GenericPtr("string_array".to_string()),
+                        })
+                    }
+                    (ctype @ (CType::String | CType::BorrowedString), method_name)
+                        if is_temporal_value_method(method_name) =>
+                    {
+                        for arg in args {
+                            let _ = self.emit_expr(arg, vars)?;
+                        }
+                        Ok(EmittedExpr {
+                            code: t.code,
+                            c_type: ctype,
+                        })
+                    }
+                    (CType::Thread, "Start") => Ok(EmittedExpr {
+                        code: format!("GlitchThread_start(&{})", t.code),
+                        c_type: CType::Void,
+                    }),
+                    (CType::Thread, "Join") => Ok(EmittedExpr {
+                        code: format!("GlitchThread_join(&{})", t.code),
+                        c_type: CType::Void,
+                    }),
+                    (CType::Task(result), "Wait") => Ok(EmittedExpr {
+                        code: format!("{}(&{})", task_wait_function(&result), t.code),
+                        c_type: CType::Void,
+                    }),
+                    (CType::Task(result), "GetResult") => Ok(EmittedExpr {
+                        code: format!("{}(&{})", task_result_function(&result), t.code),
+                        c_type: *result,
+                    }),
+                    (CType::Task(result), "GetAwaiter") => Ok(EmittedExpr {
+                        code: t.code,
+                        c_type: CType::Task(result),
+                    }),
+                    (CType::Scalar(_), "ToString")
+                    | (CType::ClassPtr(_), "ToString")
+                    | (CType::Struct(_), "ToString")
+                    | (CType::ExceptionPtr, "ToString") => {
+                        for arg in args {
+                            let _ = self.emit_expr(arg, vars)?;
+                        }
+                        Ok(EmittedExpr {
+                            code: "glitch_strdup(\"\")".to_string(),
+                            c_type: CType::String,
+                        })
+                    }
+                    (CType::ClassPtr(type_name), method_name) => {
+                        if let Some(registration) = self.emit_middleware_handler_registration(
+                            &type_name,
+                            &t.code,
+                            method_name,
+                            args,
+                        )? {
+                            return Ok(registration);
+                        }
+                        if let Some(registration) = self.emit_endpoint_handler_registration(
+                            &type_name,
+                            &t.code,
+                            method_name,
+                            args,
+                            vars,
+                        )? {
+                            return Ok(registration);
+                        }
+                        match self.method_owner_and_receiver(&type_name, &t.code, true, method_name)
+                        {
+                            Ok((owner, receiver)) => self.emit_instance_method_call(
+                                &owner,
+                                &receiver,
+                                method_name,
+                                args,
+                                vars,
+                            ),
+                            Err(method_error) => self
+                                .emit_extension_method_call(target, method_name, args, vars)
+                                .map_err(|_| method_error),
+                        }
+                    }
+                    (CType::Struct(type_name), method_name) => {
+                        match self.method_owner_and_receiver(
+                            &type_name,
+                            &t.code,
+                            false,
+                            method_name,
+                        ) {
+                            Ok((owner, receiver)) => self.emit_instance_method_call(
+                                &owner,
+                                &receiver,
+                                method_name,
+                                args,
+                                vars,
+                            ),
+                            Err(method_error) => self
+                                .emit_extension_method_call(target, method_name, args, vars)
+                                .map_err(|_| method_error),
+                        }
+                    }
+                    (CType::GenericPtr(type_name), method_name) => {
+                        for arg in args {
+                            let _ = self.emit_expr(arg, vars)?;
+                        }
+                        if matches!(method_name, "SequenceEqual" | "Any" | "All" | "Contains") {
+                            return Ok(EmittedExpr {
+                                code: "1".to_string(),
+                                c_type: CType::Scalar(ScalarType::Bool),
+                            });
+                        }
+                        Ok(EmittedExpr {
+                            code: "NULL".to_string(),
+                            c_type: CType::GenericPtr(format!("{}_{}", type_name, method_name)),
+                        })
+                    }
+                    (_, other) => Err(format!("unsupported method call '{other}'")),
+                }
+            }
+            Expr::FunctionCall { name, args } => {
+                if name == "typeof" {
+                    return Ok(EmittedExpr {
+                        code: "NULL".to_string(),
+                        c_type: CType::GenericPtr("System_Type".to_string()),
+                    });
+                }
+                let resolved = self.resolve_function_call(name, args, vars)?;
+                let arg_codes = resolved
+                    .args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        if let Some(expected) = resolved.info.params.get(i) {
+                            self.emit_arg_for_param(a, expected, vars)
+                        } else {
+                            self.emit_expr(a, vars).map(|e| e.code)
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(EmittedExpr {
+                    code: format!("{}({})", resolved.info.symbol, arg_codes.join(", ")),
+                    c_type: resolved.info.return_type,
+                })
+            }
+            Expr::NewObject {
+                type_name,
+                args,
+                fields,
+            } => {
+                if type_name == "__anonymous" {
+                    for field in fields {
+                        let _ = self.emit_expr(&field.expr, vars)?;
+                    }
+                    return Ok(EmittedExpr {
+                        code: "NULL".to_string(),
+                        c_type: CType::GenericPtr("AnonymousObject".to_string()),
+                    });
+                }
+                if !self.types.contains_key(type_name) && is_exception_type_name(type_name) {
+                    let message = if let Some(first) = args.first() {
+                        self.emit_expr(first, vars)?
+                    } else {
+                        EmittedExpr {
+                            code: "\"\"".to_string(),
+                            c_type: CType::BorrowedString,
+                        }
+                    };
+                    return match message.c_type {
+                        CType::String => Ok(EmittedExpr {
+                            code: format!("glitch_exception_from_owned({})", message.code),
+                            c_type: CType::Exception,
+                        }),
+                        CType::BorrowedString => Ok(EmittedExpr {
+                            code: format!("glitch_exception_new({})", message.code),
+                            c_type: CType::Exception,
+                        }),
+                        _ => Ok(EmittedExpr {
+                            code: "glitch_exception_new(\"\")".to_string(),
+                            c_type: CType::Exception,
+                        }),
+                    };
+                }
+                if !args.is_empty()
+                    || (fields.is_empty() && self.constructors.contains_key(type_name))
+                {
+                    let Some(info) = self.constructors.get(type_name).cloned() else {
+                        for arg in args {
+                            let _ = self.emit_expr(arg, vars)?;
+                        }
+                        for field in fields {
+                            let _ = self.emit_expr(&field.expr, vars)?;
+                        }
+                        return Ok(EmittedExpr {
+                            code: "NULL".to_string(),
+                            c_type: CType::GenericPtr(type_name.clone()),
+                        });
+                    };
+                    let normalized_args = self.normalize_call_args(&info, args)?;
+                    let arg_codes = normalized_args
+                        .iter()
+                        .enumerate()
+                        .map(|(i, arg)| {
+                            if let Some(expected) = info.params.get(i) {
+                                self.emit_arg_for_param(arg, expected, vars)
+                            } else {
+                                self.emit_expr(arg, vars).map(|e| e.code)
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return Ok(EmittedExpr {
+                        code: format!(
+                            "{}({})",
+                            constructor_symbol(type_name),
+                            arg_codes.join(", ")
+                        ),
+                        c_type: info.return_type,
+                    });
+                }
+                if !self.types.contains_key(type_name) {
+                    for field in fields {
+                        let _ = self.emit_expr(&field.expr, vars)?;
+                    }
+                    return Ok(EmittedExpr {
+                        code: "NULL".to_string(),
+                        c_type: CType::GenericPtr(type_name.clone()),
+                    });
+                }
+                let parts = fields
+                    .iter()
+                    .map(|f| {
+                        self.emit_expr(&f.expr, vars)
+                            .map(|e| format!(".{} = {}", sanitize_ident(&f.name), e.code))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let literal = format!(
+                    "(struct {}){{{}}}",
+                    sanitize_ident(type_name),
+                    parts.join(", ")
+                );
+                if self.types.get(type_name) == Some(&TypeKind::Class) {
+                    Ok(EmittedExpr {
+                        code: format!("glitch_alloc_{}({})", sanitize_ident(type_name), literal),
+                        c_type: CType::ClassPtr(type_name.clone()),
+                    })
+                } else {
+                    Ok(EmittedExpr {
+                        code: literal,
+                        c_type: CType::Struct(type_name.clone()),
+                    })
+                }
+            }
+            Expr::NewCollection(ty) => match self.type_syntax_to_ctype(ty)? {
+                CType::ListInt => Ok(EmittedExpr {
+                    code: "List_int_new()".to_string(),
+                    c_type: CType::ListInt,
+                }),
+                CType::ListI64 => Ok(EmittedExpr {
+                    code: "List_i64_new()".to_string(),
+                    c_type: CType::ListI64,
+                }),
+                CType::ListBool => Ok(EmittedExpr {
+                    code: "List_bool_new()".to_string(),
+                    c_type: CType::ListBool,
+                }),
+                CType::ListF64 => Ok(EmittedExpr {
+                    code: "List_f64_new()".to_string(),
+                    c_type: CType::ListF64,
+                }),
+                CType::ListString => Ok(EmittedExpr {
+                    code: "List_string_new()".to_string(),
+                    c_type: CType::ListString,
+                }),
+                CType::DictStringInt => Ok(EmittedExpr {
+                    code: "Dict_string_int_new()".to_string(),
+                    c_type: CType::DictStringInt,
+                }),
+                CType::DictStringI64 => Ok(EmittedExpr {
+                    code: "Dict_string_i64_new()".to_string(),
+                    c_type: CType::DictStringI64,
+                }),
+                CType::DictStringBool => Ok(EmittedExpr {
+                    code: "Dict_string_bool_new()".to_string(),
+                    c_type: CType::DictStringBool,
+                }),
+                CType::DictStringF64 => Ok(EmittedExpr {
+                    code: "Dict_string_f64_new()".to_string(),
+                    c_type: CType::DictStringF64,
+                }),
+                CType::DictStringString => Ok(EmittedExpr {
+                    code: "Dict_string_string_new()".to_string(),
+                    c_type: CType::DictStringString,
+                }),
+                CType::GenericPtr(name) => Ok(EmittedExpr {
+                    code: "NULL".to_string(),
+                    c_type: CType::GenericPtr(name),
+                }),
+                _ => Err("unsupported collection type".to_string()),
+            },
+            Expr::NewThread(entry) => Ok(EmittedExpr {
+                code: format!("GlitchThread_new({})", sanitize_ident(entry)),
+                c_type: CType::Thread,
+            }),
+            Expr::Borrow { name, .. } => {
+                let ty = vars
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(CType::Scalar(ScalarType::I64));
+                let scalar = if let CType::Scalar(s) = ty {
+                    s
+                } else {
+                    ScalarType::I64
+                };
+                Ok(EmittedExpr {
+                    code: format!("&{}", sanitize_ident(name)),
+                    c_type: CType::Ptr(scalar),
+                })
+            }
+            Expr::Await(inner) => {
+                let emitted = self.emit_expr(inner, vars)?;
+                if let CType::Task(result) = emitted.c_type {
+                    Ok(EmittedExpr {
+                        code: format!("{}(&{})", task_result_function(&result), emitted.code),
+                        c_type: *result,
+                    })
+                } else if let CType::GenericPtr(name) = emitted.c_type {
+                    Ok(EmittedExpr {
+                        code: "NULL".to_string(),
+                        c_type: CType::GenericPtr(format!("{}_awaited", name)),
+                    })
+                } else if emitted.c_type == CType::Null {
+                    Ok(EmittedExpr {
+                        code: "NULL".to_string(),
+                        c_type: CType::Null,
+                    })
+                } else {
+                    Err("await expects Task or Task<T>".to_string())
+                }
+            }
+            Expr::Unary { op, expr } => {
+                let emitted = self.emit_expr(expr, vars)?;
+                let (code, c_type) = match op {
+                    UnaryOp::Not => (format!("(!{})", emitted.code), CType::Scalar(ScalarType::Bool)),
+                    UnaryOp::Neg => (format!("(-{})", emitted.code), emitted.c_type),
+                };
+                Ok(EmittedExpr { code, c_type })
+            }
+            Expr::IncDec {
+                name,
+                delta,
+                prefix,
+            } => {
+                let c_name = sanitize_ident(name);
+                let op = if *delta >= 0 { "++" } else { "--" };
+                let code = if *prefix {
+                    format!("({op}{c_name})")
+                } else {
+                    format!("({c_name}{op})")
+                };
+                Ok(EmittedExpr {
+                    code,
+                    c_type: vars
+                        .get(name)
+                        .cloned()
+                        .unwrap_or(CType::Scalar(ScalarType::I32)),
+                })
+            }
+            Expr::Lambda { .. } => Ok(EmittedExpr {
+                code: "NULL".to_string(),
+                c_type: CType::GenericPtr("GlitchDelegate".to_string()),
+            }),
+            Expr::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => {
+                let condition = self.emit_expr(condition, vars)?;
+                let when_true = self.emit_expr(when_true, vars)?;
+                let when_false = self.emit_expr(when_false, vars)?;
+                let c_type = if when_true.c_type == CType::Null {
+                    when_false.c_type.clone()
+                } else {
+                    when_true.c_type.clone()
+                };
+                Ok(EmittedExpr {
+                    code: format!(
+                        "({} ? {} : {})",
+                        condition.code, when_true.code, when_false.code
+                    ),
+                    c_type,
+                })
+            }
+            Expr::Binary { left, op, right } => {
+                if *op == BinaryOp::Coalesce {
+                    let l = self.emit_expr(left, vars)?;
+                    let r = self.emit_expr(right, vars)?;
+                    if l.c_type == CType::Null {
+                        return Ok(r);
+                    }
+                    if matches!(
+                        l.c_type,
+                        CType::String
+                            | CType::BorrowedString
+                            | CType::ClassPtr(_)
+                            | CType::GenericPtr(_)
+                    ) {
+                        return Ok(EmittedExpr {
+                            code: format!("({0} ? {0} : {1})", l.code, r.code),
+                            c_type: l.c_type,
+                        });
+                    }
+                    return Ok(l);
+                }
+                if *op == BinaryOp::Add
+                    && self.expr_is_string_like(left, vars)
+                    && self.expr_is_string_like(right, vars)
+                {
+                    return Ok(EmittedExpr {
+                        code: format!(
+                            "glitch_string_concat({}, {})",
+                            self.emit_string_borrow_arg(left, vars)?,
+                            self.emit_string_borrow_arg(right, vars)?
+                        ),
+                        c_type: CType::String,
+                    });
+                }
+                let l = self.emit_expr(left, vars)?;
+                let r = self.emit_expr(right, vars)?;
+                let c_type = if op.is_comparison() {
+                    CType::Scalar(ScalarType::I32)
+                } else {
+                    l.c_type
+                };
+                Ok(EmittedExpr {
+                    code: format!("({} {} {})", l.code, op.c_operator(), r.code),
+                    c_type,
+                })
+            }
+            Expr::NamedArg { expr, .. } => self.emit_expr(expr, vars),
+            Expr::RefArg {
+                modifier: ParamModifier::Out,
+                expr,
+            } => {
+                if let Expr::Var(name) = expr.as_ref() {
+                    if !vars.contains_key(name) {
+                        return Ok(EmittedExpr {
+                            code: "NULL".to_string(),
+                            c_type: CType::GenericPtr("out_var".to_string()),
+                        });
+                    }
+                }
+                self.emit_expr(expr, vars)
+            }
+            Expr::RefArg { expr, .. } => self.emit_expr(expr, vars),
+        }
+    }
+
+    fn expr_is_string_like(&mut self, expr: &Expr, vars: &HashMap<String, CType>) -> bool {
+        match expr {
+            Expr::String(_) => true,
+            Expr::Var(name) | Expr::Move(name) => {
+                matches!(vars.get(name), Some(CType::String | CType::BorrowedString))
+            }
+            Expr::Index { .. }
+            | Expr::Field { .. }
+            | Expr::MethodCall { .. }
+            | Expr::FunctionCall { .. }
+            | Expr::Await(_) => self
+                .emit_expr(expr, vars)
+                .map(|emitted| matches!(emitted.c_type, CType::String | CType::BorrowedString))
+                .unwrap_or(false),
+            Expr::Unary { .. } => false,
+            Expr::Lambda { .. } => false,
+            Expr::Conditional { .. } => false,
+            Expr::Binary { left, op, right } if *op == BinaryOp::Add => {
+                self.expr_is_string_like(left, vars) && self.expr_is_string_like(right, vars)
+            }
+            Expr::NamedArg { expr, .. } | Expr::RefArg { expr, .. } => {
+                self.expr_is_string_like(expr, vars)
+            }
+            _ => false,
+        }
+    }
+
+    fn type_syntax_to_ctype(&self, ty: &TypeSyntax) -> Result<CType, String> {
+        match ty {
+            TypeSyntax::Scalar(s) => Ok(CType::Scalar(*s)),
+            TypeSyntax::String => Ok(CType::String),
+            TypeSyntax::Array(inner) => match inner.as_ref() {
+                TypeSyntax::Scalar(s) => Ok(CType::Array(*s, 0)),
+                TypeSyntax::String => Ok(CType::GenericPtr("string_array".to_string())),
+                other => Ok(CType::GenericPtr(format!(
+                    "{}_array",
+                    type_syntax_symbol(other)
+                ))),
+            },
+            TypeSyntax::Ref(inner) => match inner.as_ref() {
+                TypeSyntax::Scalar(s) => Ok(CType::Ptr(*s)),
+                _ => Err("ref supports scalar values only".to_string()),
+            },
+            TypeSyntax::Named(name) => match self.types.get(name) {
+                Some(TypeKind::Class) => Ok(CType::ClassPtr(name.clone())),
+                Some(TypeKind::Interface) => Ok(CType::ClassPtr(name.clone())),
+                Some(TypeKind::Enum) => Ok(CType::Scalar(ScalarType::I32)),
+                Some(_) => Ok(CType::Struct(name.clone())),
+                None if is_exception_type_name(name) => Ok(CType::Exception),
+                None => Ok(CType::GenericPtr(name.clone())),
+            },
+            TypeSyntax::GenericNamed { name, args } => {
+                Ok(CType::GenericPtr(generic_type_name(name, args.as_slice())))
+            }
+            TypeSyntax::List(element)
+                if element.as_ref() == &TypeSyntax::Scalar(ScalarType::I32) =>
+            {
+                Ok(CType::ListInt)
+            }
+            TypeSyntax::List(element)
+                if element.as_ref() == &TypeSyntax::Scalar(ScalarType::I64) =>
+            {
+                Ok(CType::ListI64)
+            }
+            TypeSyntax::List(element)
+                if element.as_ref() == &TypeSyntax::Scalar(ScalarType::Bool) =>
+            {
+                Ok(CType::ListBool)
+            }
+            TypeSyntax::List(element)
+                if element.as_ref() == &TypeSyntax::Scalar(ScalarType::F64) =>
+            {
+                Ok(CType::ListF64)
+            }
+            TypeSyntax::List(element) if element.as_ref() == &TypeSyntax::String => {
+                Ok(CType::ListString)
+            }
+            TypeSyntax::List(element) => Ok(CType::GenericPtr(generic_type_name(
+                "List",
+                std::slice::from_ref(element.as_ref()),
+            ))),
+            TypeSyntax::Dictionary(key, value)
+                if key.as_ref() == &TypeSyntax::String
+                    && value.as_ref() == &TypeSyntax::Scalar(ScalarType::I32) =>
+            {
+                Ok(CType::DictStringInt)
+            }
+            TypeSyntax::Dictionary(key, value)
+                if key.as_ref() == &TypeSyntax::String
+                    && value.as_ref() == &TypeSyntax::Scalar(ScalarType::I64) =>
+            {
+                Ok(CType::DictStringI64)
+            }
+            TypeSyntax::Dictionary(key, value)
+                if key.as_ref() == &TypeSyntax::String
+                    && value.as_ref() == &TypeSyntax::Scalar(ScalarType::Bool) =>
+            {
+                Ok(CType::DictStringBool)
+            }
+            TypeSyntax::Dictionary(key, value)
+                if key.as_ref() == &TypeSyntax::String
+                    && value.as_ref() == &TypeSyntax::Scalar(ScalarType::F64) =>
+            {
+                Ok(CType::DictStringF64)
+            }
+            TypeSyntax::Dictionary(key, value)
+                if key.as_ref() == &TypeSyntax::String && value.as_ref() == &TypeSyntax::String =>
+            {
+                Ok(CType::DictStringString)
+            }
+            TypeSyntax::Dictionary(key, value) => Ok(CType::GenericPtr(generic_type_name(
+                "Dictionary",
+                &[key.as_ref().clone(), value.as_ref().clone()],
+            ))),
+            TypeSyntax::IEnumerable(element)
+                if element.as_ref() == &TypeSyntax::Scalar(ScalarType::I32) =>
+            {
+                Ok(CType::EnumerableInt)
+            }
+            TypeSyntax::IEnumerable(element)
+                if element.as_ref() == &TypeSyntax::Scalar(ScalarType::I64) =>
+            {
+                Ok(CType::EnumerableI64)
+            }
+            TypeSyntax::IEnumerable(element)
+                if element.as_ref() == &TypeSyntax::Scalar(ScalarType::Bool) =>
+            {
+                Ok(CType::EnumerableBool)
+            }
+            TypeSyntax::IEnumerable(element)
+                if element.as_ref() == &TypeSyntax::Scalar(ScalarType::F64) =>
+            {
+                Ok(CType::EnumerableF64)
+            }
+            TypeSyntax::IEnumerable(element) if element.as_ref() == &TypeSyntax::String => {
+                Ok(CType::EnumerableString)
+            }
+            TypeSyntax::IEnumerable(element) => Ok(CType::GenericPtr(generic_type_name(
+                "IEnumerable",
+                std::slice::from_ref(element.as_ref()),
+            ))),
+            TypeSyntax::Thread => Ok(CType::Thread),
+            TypeSyntax::Task(result) => {
+                Ok(CType::Task(Box::new(self.type_syntax_to_ctype(result)?)))
+            }
+            TypeSyntax::Nullable(inner) => self.type_syntax_to_ctype(inner),
+            TypeSyntax::Void => Ok(CType::Void),
+        }
+    }
+
+    fn param_to_ctype(&self, param: &Param) -> Result<CType, String> {
+        let ty = self.type_syntax_to_ctype(&param.ty)?;
+        if matches!(
+            param.modifier,
+            ParamModifier::Ref | ParamModifier::Out | ParamModifier::In
+        ) {
+            match ty {
+                CType::Scalar(scalar) => Ok(CType::Ptr(scalar)),
+                other => Err(format!(
+                    "{:?} parameters currently support scalar values only, got {:?}",
+                    param.modifier, other
+                )),
+            }
+        } else {
+            Ok(ty)
+        }
+    }
+
+    fn concrete_base(&self, type_name: &str) -> Option<String> {
+        self.bases.get(type_name)?.iter().find_map(|base| {
+            matches!(
+                self.types.get(base),
+                Some(TypeKind::Class | TypeKind::Struct | TypeKind::RefStruct)
+            )
+            .then(|| base.clone())
+        })
+    }
+
+    fn inheritance_distance(&self, actual: &str, expected: &str) -> Option<u16> {
+        if actual == expected {
+            return Some(0);
+        }
+        for base in self.bases.get(actual)? {
+            if base == expected {
+                return Some(1);
+            }
+            if let Some(distance) = self.inheritance_distance(base, expected) {
+                return Some(distance + 1);
+            }
+        }
+        None
+    }
+
+    fn derives_from_name(&self, actual: &str, expected: &str) -> bool {
+        self.bases.get(actual).is_some_and(|bases| {
+            bases.iter().any(|base| {
+                base == expected
+                    || base.rsplit('.').next() == Some(expected)
+                    || self.derives_from_name(base, expected)
+            })
+        })
+    }
+
+    fn has_framework_base(&self, type_name: &str) -> bool {
+        [
+            "DbContext",
+            "ControllerBase",
+            "Controller",
+            "Migration",
+            "ModelSnapshot",
+            "ExceptionFilterAttribute",
+            "ActionFilterAttribute",
+            "SaveChangesInterceptor",
+            "ValueConverter",
+            "ValueComparer",
+        ]
+        .iter()
+        .any(|base| self.derives_from_name(type_name, base))
+    }
+
+    fn class_base_pointer_expr(
+        &self,
+        actual: &str,
+        expected: &str,
+        receiver: &str,
+    ) -> Option<String> {
+        if actual == expected {
+            return Some(receiver.to_string());
+        }
+        let base = self.concrete_base(actual)?;
+        let next = format!("{}->__base", receiver);
+        if base == expected {
+            return Some(format!("&{next}"));
+        }
+        self.class_base_pointer_expr(&base, expected, &next)
+    }
+
+    fn field_access(
+        &self,
+        type_name: &str,
+        receiver: &str,
+        pointer_receiver: bool,
+        field_name: &str,
+    ) -> Option<EmittedExpr> {
+        if let Some(field_type) = self
+            .fields
+            .get(type_name)
+            .and_then(|fields| fields.iter().find(|(name, _)| name == field_name))
+            .map(|(_, ty)| ty.clone())
+        {
+            let code = if pointer_receiver {
+                format!("{}->{}", receiver, sanitize_ident(field_name))
+            } else {
+                format!("{}.{}", receiver, sanitize_ident(field_name))
+            };
+            return Some(EmittedExpr {
+                code,
+                c_type: field_type,
+            });
+        }
+        let base = self.concrete_base(type_name)?;
+        let base_receiver = if pointer_receiver {
+            format!("{}->__base", receiver)
+        } else {
+            format!("{}.__base", receiver)
+        };
+        self.field_access(&base, &base_receiver, false, field_name)
+    }
+
+    fn implicit_this_field_access(
+        &self,
+        state: &CodegenState,
+        field_name: &str,
+    ) -> Option<EmittedExpr> {
+        match state.vars.get("this")? {
+            CType::ClassPtr(type_name) => self.field_access(type_name, "self", true, field_name),
+            CType::Struct(type_name) => self.field_access(type_name, "self", true, field_name),
+            _ => None,
+        }
+    }
+
+    fn constructor_return_type(&self, type_name: &str) -> CType {
+        self.constructors
+            .get(type_name)
+            .map(|constructor| constructor.return_type.clone())
+            .unwrap_or_else(|| match self.types.get(type_name) {
+                Some(TypeKind::Class) => CType::ClassPtr(type_name.to_string()),
+                _ => CType::Struct(type_name.to_string()),
+            })
+    }
+
+    fn constructor_params(
+        &self,
+        type_name: &str,
+        constructor: &Constructor,
+    ) -> Result<String, String> {
+        let info = self
+            .constructors
+            .get(type_name)
+            .ok_or_else(|| format!("constructor for '{type_name}' has no signature"))?;
+        if constructor.params.is_empty() {
+            return Ok("void".to_string());
+        }
+        Ok(constructor
+            .params
+            .iter()
+            .zip(info.params.iter())
+            .map(|(p, t)| format!("{} {}", t, sanitize_ident(&p.name)))
+            .collect::<Vec<_>>()
+            .join(", "))
+    }
+
+    fn method_return_type(&self, type_name: &str, method: &Function) -> CType {
+        self.method_info_for(type_name, method)
+            .map(|m| m.return_type.clone())
+            .unwrap_or(CType::Void)
+    }
+
+    fn method_params(&self, type_name: &str, method: &Function) -> Result<String, String> {
+        let info = self
+            .method_info_for(type_name, method)
+            .ok_or_else(|| format!("method '{}.{}' has no signature", type_name, method.name))?;
+        let mut params = Vec::with_capacity(method.params.len() + 1);
+        params.push(format!("struct {} * self", sanitize_ident(type_name)));
+        params.extend(
+            method
+                .params
+                .iter()
+                .zip(info.params.iter())
+                .map(|(p, t)| format!("{} {}", t, sanitize_ident(&p.name))),
+        );
+        Ok(params.join(", "))
+    }
+
+    fn method_symbol_for(&self, type_name: &str, method: &Function) -> String {
+        self.method_info_for(type_name, method)
+            .map(|info| info.symbol.clone())
+            .unwrap_or_else(|| sanitize_ident(&method.name))
+    }
+
+    fn method_info_for(&self, type_name: &str, method: &Function) -> Option<&FunctionInfo> {
+        let params = method
+            .params
+            .iter()
+            .filter_map(|param| self.param_to_ctype(param).ok())
+            .collect::<Vec<_>>();
+        self.methods
+            .get(&method_key(type_name, &method.name))?
+            .iter()
+            .find(|info| info.params == params)
+    }
+
+    fn foreach_info(
+        &self,
+        collection: &EmittedExpr,
+        index_name: &str,
+    ) -> Result<ForeachInfo, String> {
+        match &collection.c_type {
+            CType::ListInt => Ok(ForeachInfo {
+                declared_element_type: CType::Scalar(ScalarType::I32),
+                variable_type: CType::Scalar(ScalarType::I32),
+                length_expr: format!("{}.len", collection.code),
+                item_expr: format!("{}.data[{}]", collection.code, index_name),
+            }),
+            CType::ListI64 => Ok(ForeachInfo {
+                declared_element_type: CType::Scalar(ScalarType::I64),
+                variable_type: CType::Scalar(ScalarType::I64),
+                length_expr: format!("{}.len", collection.code),
+                item_expr: format!("{}.data[{}]", collection.code, index_name),
+            }),
+            CType::ListBool => Ok(ForeachInfo {
+                declared_element_type: CType::Scalar(ScalarType::Bool),
+                variable_type: CType::Scalar(ScalarType::Bool),
+                length_expr: format!("{}.len", collection.code),
+                item_expr: format!("{}.data[{}]", collection.code, index_name),
+            }),
+            CType::ListF64 => Ok(ForeachInfo {
+                declared_element_type: CType::Scalar(ScalarType::F64),
+                variable_type: CType::Scalar(ScalarType::F64),
+                length_expr: format!("{}.len", collection.code),
+                item_expr: format!("{}.data[{}]", collection.code, index_name),
+            }),
+            CType::ListString => Ok(ForeachInfo {
+                declared_element_type: CType::String,
+                variable_type: CType::BorrowedString,
+                length_expr: format!("{}.len", collection.code),
+                item_expr: format!("{}.data[{}]", collection.code, index_name),
+            }),
+            CType::Array(scalar, _) => Ok(ForeachInfo {
+                declared_element_type: CType::Scalar(*scalar),
+                variable_type: CType::Scalar(*scalar),
+                length_expr: format!("{}.len", collection.code),
+                item_expr: format!("{}.data[{}]", collection.code, index_name),
+            }),
+            CType::EnumerableInt => Ok(ForeachInfo {
+                declared_element_type: CType::Scalar(ScalarType::I32),
+                variable_type: CType::Scalar(ScalarType::I32),
+                length_expr: format!("{}.source->len", collection.code),
+                item_expr: format!("{}.source->data[{}]", collection.code, index_name),
+            }),
+            CType::EnumerableI64 => Ok(ForeachInfo {
+                declared_element_type: CType::Scalar(ScalarType::I64),
+                variable_type: CType::Scalar(ScalarType::I64),
+                length_expr: format!("{}.source->len", collection.code),
+                item_expr: format!("{}.source->data[{}]", collection.code, index_name),
+            }),
+            CType::EnumerableBool => Ok(ForeachInfo {
+                declared_element_type: CType::Scalar(ScalarType::Bool),
+                variable_type: CType::Scalar(ScalarType::Bool),
+                length_expr: format!("{}.source->len", collection.code),
+                item_expr: format!("{}.source->data[{}]", collection.code, index_name),
+            }),
+            CType::EnumerableF64 => Ok(ForeachInfo {
+                declared_element_type: CType::Scalar(ScalarType::F64),
+                variable_type: CType::Scalar(ScalarType::F64),
+                length_expr: format!("{}.source->len", collection.code),
+                item_expr: format!("{}.source->data[{}]", collection.code, index_name),
+            }),
+            CType::EnumerableString => Ok(ForeachInfo {
+                declared_element_type: CType::String,
+                variable_type: CType::BorrowedString,
+                length_expr: format!("{}.source->len", collection.code),
+                item_expr: format!("{}.source->data[{}]", collection.code, index_name),
+            }),
+            CType::GenericPtr(name) if name == "string_array" => Ok(ForeachInfo {
+                declared_element_type: CType::String,
+                variable_type: CType::BorrowedString,
+                length_expr: "0".to_string(),
+                item_expr: "\"\"".to_string(),
+            }),
+            CType::GenericPtr(name) if generic_ptr_string_collection(name) => Ok(ForeachInfo {
+                declared_element_type: CType::String,
+                variable_type: CType::BorrowedString,
+                length_expr: "0".to_string(),
+                item_expr: "\"\"".to_string(),
+            }),
+            CType::GenericPtr(name) => Ok(ForeachInfo {
+                declared_element_type: CType::GenericPtr("var".to_string()),
+                variable_type: CType::GenericPtr("var".to_string()),
+                length_expr: "0".to_string(),
+                item_expr: format!("/* opaque foreach over {} */ NULL", sanitize_ident(name)),
+            }),
+            _ => Err(
+                "foreach collection must be a supported array, List<T>, or IEnumerable<T>"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn emit_instance_method_call(
+        &mut self,
+        type_name: &str,
+        receiver: &str,
+        method_name: &str,
+        args: &[Expr],
+        vars: &HashMap<String, CType>,
+    ) -> Result<EmittedExpr, String> {
+        let resolved = self.resolve_method_call(type_name, method_name, args, vars)?;
+        let mut arg_codes = Vec::with_capacity(resolved.args.len() + 1);
+        arg_codes.push(receiver.to_string());
+        for (index, arg) in resolved.args.iter().enumerate() {
+            if let Some(expected) = resolved.info.params.get(index) {
+                arg_codes.push(self.emit_arg_for_param(arg, expected, vars)?);
+            } else {
+                arg_codes.push(self.emit_expr(arg, vars)?.code);
+            }
+        }
+        Ok(EmittedExpr {
+            code: format!("{}({})", resolved.info.symbol, arg_codes.join(", ")),
+            c_type: resolved.info.return_type,
+        })
+    }
+
+    fn emit_extension_method_call(
+        &mut self,
+        target: &Expr,
+        method_name: &str,
+        args: &[Expr],
+        vars: &HashMap<String, CType>,
+    ) -> Result<EmittedExpr, String> {
+        let Some(candidates) = self.functions.get(method_name).cloned() else {
+            return Err(format!("no extension method '{method_name}' exists"));
+        };
+        let extension_candidates = candidates
+            .into_iter()
+            .filter(|candidate| {
+                candidate
+                    .param_modifiers
+                    .first()
+                    .is_some_and(|modifier| *modifier == ParamModifier::This)
+            })
+            .collect::<Vec<_>>();
+        if extension_candidates.is_empty() {
+            return Err(format!("no extension method '{method_name}' exists"));
+        }
+        let mut full_args = Vec::with_capacity(args.len() + 1);
+        full_args.push(target.clone());
+        full_args.extend(args.iter().cloned());
+        let resolved =
+            self.select_overload(&extension_candidates, &full_args, vars, method_name)?;
+        let arg_codes = resolved
+            .args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                if let Some(expected) = resolved.info.params.get(index) {
+                    self.emit_arg_for_param(arg, expected, vars)
+                } else {
+                    self.emit_expr(arg, vars).map(|emitted| emitted.code)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(EmittedExpr {
+            code: format!("{}({})", resolved.info.symbol, arg_codes.join(", ")),
+            c_type: resolved.info.return_type,
+        })
+    }
+
+    fn emit_arg_for_param(
+        &mut self,
+        arg: &Expr,
+        expected: &CType,
+        vars: &HashMap<String, CType>,
+    ) -> Result<String, String> {
+        if expected == &CType::String {
+            self.emit_string_borrow_arg(arg, vars)
+        } else if matches!(expected, CType::Ptr(_)) {
+            self.emit_ref_arg_for_param(arg, expected, vars)
+        } else if matches!(expected, CType::Array(_, _)) {
+            self.emit_array_arg_for_param(arg, expected, vars)
+        } else {
+            let emitted = self.emit_expr(arg, vars)?;
+            if emitted.c_type == CType::Null
+                && matches!(
+                    expected,
+                    CType::String
+                        | CType::BorrowedString
+                        | CType::ClassPtr(_)
+                        | CType::GenericPtr(_)
+                )
+            {
+                return Ok("NULL".to_string());
+            }
+            if let Some(symbol) = self.user_conversion_symbol(expected, &emitted.c_type) {
+                return Ok(format!("{}({})", symbol, emitted.code));
+            }
+            if let (CType::ClassPtr(expected_type), CType::ClassPtr(actual_type)) =
+                (expected, &emitted.c_type)
+            {
+                if expected_type != actual_type {
+                    if let Some(converted) =
+                        self.class_base_pointer_expr(actual_type, expected_type, &emitted.code)
+                    {
+                        return Ok(converted);
+                    }
+                }
+            }
+            if matches!(
+                (expected, &emitted.c_type),
+                (CType::GenericPtr(_), CType::GenericPtr(_))
+            ) {
+                return Ok(emitted.code);
+            }
+            Ok(emitted.code)
+        }
+    }
+
+    fn emit_array_arg_for_param(
+        &mut self,
+        arg: &Expr,
+        expected: &CType,
+        vars: &HashMap<String, CType>,
+    ) -> Result<String, String> {
+        let CType::Array(element, _) = expected else {
+            return self.emit_expr(arg, vars).map(|emitted| emitted.code);
+        };
+        match call_arg_expr(arg) {
+            Expr::ArrayLiteral(values) => {
+                let values = values
+                    .iter()
+                    .map(|value| self.emit_expr(value, vars).map(|emitted| emitted.code))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(array_literal_code(*element, &values))
+            }
+            Expr::NewArray { values, .. } => {
+                let values = values
+                    .iter()
+                    .map(|value| self.emit_expr(value, vars).map(|emitted| emitted.code))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(array_literal_code(*element, &values))
+            }
+            other => self.emit_expr(other, vars).map(|emitted| emitted.code),
+        }
+    }
+
+    fn emit_ref_arg_for_param(
+        &self,
+        arg: &Expr,
+        expected: &CType,
+        vars: &HashMap<String, CType>,
+    ) -> Result<String, String> {
+        let Expr::RefArg { expr, .. } = arg else {
+            return Err("ref/out/in parameter requires a ref/out/in argument".to_string());
+        };
+        let Expr::Var(name) = expr.as_ref() else {
+            return Err("ref/out/in arguments currently require variables".to_string());
+        };
+        match (expected, vars.get(name)) {
+            (CType::Ptr(expected), Some(CType::Scalar(actual))) if expected == actual => {
+                Ok(format!("&{}", sanitize_ident(name)))
+            }
+            (CType::Ptr(expected), Some(CType::Ptr(actual))) if expected == actual => {
+                Ok(sanitize_ident(name))
+            }
+            (_, Some(actual)) => Err(format!(
+                "ref/out/in argument '{name}' has incompatible type {:?}",
+                actual
+            )),
+            (_, None) => Err(format!("unknown variable '{name}'")),
+        }
+    }
+
+    fn resolve_function_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        vars: &HashMap<String, CType>,
+    ) -> Result<ResolvedCall, String> {
+        let Some(candidates) = self.functions.get(name).cloned() else {
+            if let Some(info) = builtin_function_info(name) {
+                let args = self.normalize_call_args(&info, args)?;
+                return Ok(ResolvedCall { info, args });
+            }
+            return Ok(ResolvedCall {
+                info: FunctionInfo {
+                    params: Vec::new(),
+                    param_names: Vec::new(),
+                    param_modifiers: Vec::new(),
+                    param_is_params: Vec::new(),
+                    param_defaults: Vec::new(),
+                    return_type: CType::GenericPtr(name.to_string()),
+                    symbol: sanitize_ident(name),
+                },
+                args: args.iter().map(|arg| call_arg_expr(arg).clone()).collect(),
+            });
+        };
+        self.select_overload(&candidates, args, vars, &format!("'{name}'"))
+    }
+
+    fn resolve_method_call(
+        &mut self,
+        type_name: &str,
+        method_name: &str,
+        args: &[Expr],
+        vars: &HashMap<String, CType>,
+    ) -> Result<ResolvedCall, String> {
+        let Some(candidates) = self
+            .methods
+            .get(&method_key(type_name, method_name))
+            .cloned()
+        else {
+            return Err(format!("type '{type_name}' has no method '{method_name}'"));
+        };
+        self.select_overload(
+            &candidates,
+            args,
+            vars,
+            &format!("'{}.{}'", type_name, method_name),
+        )
+    }
+
+    fn call_arg_info(
+        &mut self,
+        arg: &Expr,
+        vars: &HashMap<String, CType>,
+    ) -> Result<CCallArg, String> {
+        let inner = call_arg_expr(arg);
+        if matches!(arg, Expr::RefArg { .. }) {
+            let Expr::Var(name) = inner else {
+                return Err("ref/out/in arguments currently require variables".to_string());
+            };
+            return match vars.get(name) {
+                Some(CType::Scalar(scalar) | CType::Ptr(scalar)) => Ok(CCallArg {
+                    c_type: CType::Ptr(*scalar),
+                    is_int_literal: false,
+                    int_value: None,
+                }),
+                Some(other) => Err(format!(
+                    "ref/out/in argument '{name}' has incompatible type {:?}",
+                    other
+                )),
+                None => Err(format!("unknown variable '{name}'")),
+            };
+        }
+        let emitted = self.emit_expr(inner, vars)?;
+        Ok(CCallArg {
+            c_type: emitted.c_type,
+            is_int_literal: matches!(inner, Expr::Int(_)),
+            int_value: match inner {
+                Expr::Int(value) => Some(*value),
+                _ => None,
+            },
+        })
+    }
+
+    fn normalize_call_args(&self, info: &FunctionInfo, args: &[Expr]) -> Result<Vec<Expr>, String> {
+        let mut normalized = vec![None::<Expr>; info.params.len()];
+        let mut next_positional = 0usize;
+        let mut arg_index = 0usize;
+        while arg_index < args.len() {
+            let arg = &args[arg_index];
+            let modifier = call_arg_modifier(arg);
+            let expr = if matches!(arg, Expr::RefArg { .. }) {
+                arg.clone()
+            } else {
+                call_arg_expr(arg).clone()
+            };
+            let index = if let Some(name) = call_arg_name(arg) {
+                info.param_names
+                    .iter()
+                    .position(|param| param == name)
+                    .ok_or_else(|| format!("unknown named argument '{name}'"))?
+            } else {
+                while next_positional < normalized.len() && normalized[next_positional].is_some() {
+                    next_positional += 1;
+                }
+                if next_positional >= normalized.len() {
+                    if info.param_is_params.last().copied().unwrap_or(false) {
+                        return Err(
+                            "expanded params arguments require array packing, which is not implemented yet"
+                                .to_string(),
+                        );
+                    }
+                    return Err(format!(
+                        "too many arguments for parameter list ({})",
+                        info.param_names.join(", ")
+                    ));
+                }
+                let index = next_positional;
+                if info.param_is_params.get(index).copied().unwrap_or(false)
+                    && index + 1 == normalized.len()
+                {
+                    let values = args[arg_index..]
+                        .iter()
+                        .map(|arg| call_arg_expr(arg).clone())
+                        .collect::<Vec<_>>();
+                    normalized[index] = Some(Expr::ArrayLiteral(values));
+                    break;
+                }
+                next_positional += 1;
+                index
+            };
+            if normalized[index].is_some() {
+                return Err(format!(
+                    "argument for parameter '{}' was specified more than once",
+                    info.param_names
+                        .get(index)
+                        .map(String::as_str)
+                        .unwrap_or("<unknown>")
+                ));
+            }
+            let expected_modifier = info
+                .param_modifiers
+                .get(index)
+                .copied()
+                .unwrap_or(ParamModifier::None);
+            if !call_modifier_matches(expected_modifier, modifier) {
+                return Err(format!(
+                    "argument modifier {:?} does not match parameter modifier {:?}",
+                    modifier, expected_modifier
+                ));
+            }
+            normalized[index] = Some(expr);
+            arg_index += 1;
+        }
+        normalized
+            .into_iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                arg.or_else(|| info.param_defaults.get(index).cloned().flatten())
+                    .or_else(|| {
+                        info.params.get(index).and_then(|param| {
+                            (info.symbol.ends_with("_new") && ctype_accepts_null(param))
+                                .then_some(Expr::Null)
+                        })
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "missing argument for parameter '{}'",
+                            info.param_names
+                                .get(index)
+                                .map(String::as_str)
+                                .unwrap_or("<unknown>")
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    fn select_overload(
+        &mut self,
+        candidates: &[FunctionInfo],
+        args: &[Expr],
+        vars: &HashMap<String, CType>,
+        context: &str,
+    ) -> Result<ResolvedCall, String> {
+        let mut applicable = Vec::<(&FunctionInfo, Vec<Expr>, Vec<u16>)>::new();
+        for candidate in candidates {
+            let Ok(normalized_args) = self.normalize_call_args(candidate, args) else {
+                continue;
+            };
+            let call_args = normalized_args
+                .iter()
+                .map(|arg| self.call_arg_info(arg, vars))
+                .collect::<Result<Vec<_>, _>>()?;
+            let Some(ranks) = candidate
+                .params
+                .iter()
+                .zip(call_args.iter())
+                .map(|(expected, arg)| self.c_conversion_rank(expected, arg))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            applicable.push((candidate, normalized_args, ranks));
+        }
+
+        if applicable.is_empty() {
+            let arg_types = args
+                .iter()
+                .map(|arg| {
+                    self.call_arg_info(arg, vars)
+                        .map(|arg| format!("{:?}", arg.c_type))
+                        .unwrap_or_else(|_| "<invalid>".to_string())
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "no overload of {context} matches argument types [{arg_types}]"
+            ));
+        }
+
+        let Some((best, best_args, best_ranks)) = applicable.iter().find(|(_, _, ranks)| {
+            applicable.iter().all(|(_, _, other)| {
+                ranks == other
+                    || ranks
+                        .iter()
+                        .zip(other.iter())
+                        .all(|(candidate, other)| candidate <= other)
+            })
+        }) else {
+            return Err(format!("ambiguous overload resolution for {context}"));
+        };
+
+        let tied = applicable
+            .iter()
+            .filter(|(_, _, ranks)| ranks == best_ranks)
+            .count();
+        if tied > 1 {
+            return Err(format!("ambiguous overload resolution for {context}"));
+        }
+
+        Ok(ResolvedCall {
+            info: (*best).clone(),
+            args: best_args.clone(),
+        })
+    }
+
+    fn c_conversion_rank(&self, expected: &CType, arg: &CCallArg) -> Option<u16> {
+        if expected == &arg.c_type {
+            return Some(
+                if arg.is_int_literal
+                    && expected == &CType::Scalar(ScalarType::I64)
+                    && arg
+                        .int_value
+                        .is_some_and(|value| i32::try_from(value).is_ok())
+                {
+                    1
+                } else {
+                    0
+                },
+            );
+        }
+        if let Some(rank) = c_numeric_conversion_rank(expected, arg) {
+            return Some(rank);
+        }
+        match (expected, &arg.c_type) {
+            (
+                CType::String | CType::BorrowedString | CType::ClassPtr(_) | CType::GenericPtr(_),
+                CType::Null,
+            ) => Some(1),
+            (CType::String, CType::BorrowedString) | (CType::BorrowedString, CType::String) => {
+                Some(0)
+            }
+            (CType::Array(_, _), CType::Array(_, _)) => Some(0),
+            (CType::GenericPtr(expected), CType::GenericPtr(actual)) => {
+                Some(if expected == actual { 0 } else { 5 })
+            }
+            (CType::ClassPtr(expected), CType::ClassPtr(actual)) => self
+                .inheritance_distance(actual, expected)
+                .map(|distance| 10 + distance),
+            (CType::GenericPtr(_), _) | (_, CType::GenericPtr(_)) => Some(100),
+            _ => self
+                .user_conversion_symbol(expected, &arg.c_type)
+                .map(|_| 20),
+        }
+    }
+
+    fn user_conversion_symbol(&self, expected: &CType, actual: &CType) -> Option<String> {
+        self.functions
+            .get("op_Implicit")?
+            .iter()
+            .find_map(|candidate| {
+                if candidate.params.len() == 1
+                    && c_type_same_for_conversion(&candidate.params[0], actual)
+                    && c_type_same_for_conversion(&candidate.return_type, expected)
+                {
+                    Some(candidate.symbol.clone())
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn emit_endpoint_handler_registration(
+        &mut self,
+        type_name: &str,
+        receiver: &str,
+        method_name: &str,
+        args: &[Expr],
+        vars: &HashMap<String, CType>,
+    ) -> Result<Option<EmittedExpr>, String> {
+        if type_name != "WebApplication" || !matches!(method_name, "MapGet" | "MapPost") {
+            return Ok(None);
+        }
+        let [path, Expr::Var(handler_name)] = args else {
+            return Ok(None);
+        };
+        if !self.is_string_endpoint_handler(handler_name) {
+            return Ok(None);
+        }
+        let http_method = if method_name == "MapGet" {
+            "GET"
+        } else {
+            "POST"
+        };
+        Ok(Some(EmittedExpr {
+            code: format!(
+                "GlitchEndpointHandlers_Add({}, {}, {}, {})",
+                receiver,
+                c_string_literal(http_method),
+                self.emit_string_borrow_arg(path, vars)?,
+                sanitize_ident(handler_name)
+            ),
+            c_type: CType::Void,
+        }))
+    }
+
+    fn emit_middleware_handler_registration(
+        &self,
+        type_name: &str,
+        receiver: &str,
+        method_name: &str,
+        args: &[Expr],
+    ) -> Result<Option<EmittedExpr>, String> {
+        if type_name != "WebApplication" || method_name != "Use" {
+            return Ok(None);
+        }
+        let [Expr::Var(handler_name)] = args else {
+            return Ok(None);
+        };
+        if !self.is_string_middleware_handler(handler_name) {
+            return Err(format!(
+                "middleware '{handler_name}' must have signature string {handler_name}(string)"
+            ));
+        }
+        Ok(Some(EmittedExpr {
+            code: format!(
+                "GlitchMiddlewareHandlers_Add({}, {}, {})",
+                receiver,
+                c_string_literal(handler_name),
+                sanitize_ident(handler_name)
+            ),
+            c_type: CType::Void,
+        }))
+    }
+
+    fn is_string_endpoint_handler(&self, name: &str) -> bool {
+        self.endpoint_handler_symbols
+            .iter()
+            .any(|handler| handler == name)
+    }
+
+    fn is_string_middleware_handler(&self, name: &str) -> bool {
+        self.functions.get(name).is_some_and(|functions| {
+            functions.iter().any(|function| {
+                function.params == vec![CType::String] && function.return_type == CType::String
+            })
+        })
+    }
+
+    fn emit_list_string_add(
+        &mut self,
+        list_code: &str,
+        value: &Expr,
+        vars: &HashMap<String, CType>,
+    ) -> Result<String, String> {
+        match value {
+            Expr::String(s) => Ok(format!(
+                "List_string_add(&{}, {})",
+                list_code,
+                c_string_literal(s)
+            )),
+            Expr::Move(name) => Ok(format!(
+                "List_string_add_owned(&{}, {})",
+                list_code,
+                sanitize_ident(name)
+            )),
+            _ => {
+                let value = self.emit_expr(value, vars)?;
+                Ok(format!("List_string_add(&{}, {})", list_code, value.code))
+            }
+        }
+    }
+
+    fn emit_string_borrow_arg(
+        &mut self,
+        expr: &Expr,
+        vars: &HashMap<String, CType>,
+    ) -> Result<String, String> {
+        match expr {
+            Expr::String(s) => Ok(c_string_literal(s)),
+            _ => Ok(self.emit_expr(expr, vars)?.code),
+        }
+    }
+
+    fn emit_dict_string_scalar_add(
+        &mut self,
+        function: &str,
+        dict_code: &str,
+        key: &Expr,
+        value: &Expr,
+        vars: &HashMap<String, CType>,
+    ) -> Result<String, String> {
+        Ok(format!(
+            "{}(&{}, {}, {})",
+            function,
+            dict_code,
+            self.emit_string_borrow_arg(key, vars)?,
+            self.emit_expr(value, vars)?.code
+        ))
+    }
+
+    fn emit_dict_string_string_add(
+        &mut self,
+        dict_code: &str,
+        key: &Expr,
+        value: &Expr,
+        vars: &HashMap<String, CType>,
+    ) -> Result<String, String> {
+        let key = match key {
+            Expr::String(s) => c_string_literal(s),
+            _ => self.emit_expr(key, vars)?.code,
+        };
+        let value = match value {
+            Expr::String(s) => c_string_literal(s),
+            Expr::Move(name) => {
+                return Ok(format!(
+                    "Dict_string_string_add_owned(&{}, {}, {})",
+                    dict_code,
+                    key,
+                    sanitize_ident(name)
+                ));
+            }
+            _ => self.emit_expr(value, vars)?.code,
+        };
+        Ok(format!(
+            "Dict_string_string_add(&{}, {}, {})",
+            dict_code, key, value
+        ))
+    }
+
+    fn method_owner_and_receiver(
+        &self,
+        type_name: &str,
+        receiver: &str,
+        pointer_receiver: bool,
+        method_name: &str,
+    ) -> Result<(String, String), String> {
+        if self
+            .methods
+            .contains_key(&method_key(type_name, method_name))
+        {
+            let receiver = if pointer_receiver {
+                receiver.to_string()
+            } else {
+                format!("&{}", receiver)
+            };
+            return Ok((type_name.to_string(), receiver));
+        }
+        if let Some(base) = self.concrete_base(type_name) {
+            let base_receiver = if pointer_receiver {
+                format!("{}->__base", receiver)
+            } else {
+                format!("{}.__base", receiver)
+            };
+            return self.method_owner_and_receiver(&base, &base_receiver, false, method_name);
+        }
+        Err(format!("type '{type_name}' has no method '{method_name}'"))
+    }
+
+    fn emit_instance_property_getter(
+        &self,
+        type_name: &str,
+        receiver: &str,
+        property_name: &str,
+    ) -> Result<EmittedExpr, String> {
+        let getter = property_getter_name(property_name);
+        let (owner, receiver) =
+            match self.method_owner_and_receiver(type_name, receiver, true, &getter) {
+                Ok(owner_receiver) => owner_receiver,
+                Err(_) if self.has_framework_base(type_name) => {
+                    return Ok(EmittedExpr {
+                        code: "NULL".to_string(),
+                        c_type: CType::GenericPtr(format!("{}_{}", type_name, property_name)),
+                    });
+                }
+                Err(err) => return Err(err),
+            };
+        let info = self
+            .methods
+            .get(&method_key(&owner, &getter))
+            .and_then(|methods| methods.first())
+            .cloned()
+            .ok_or_else(|| {
+                format!("type '{type_name}' has no field or property '{property_name}'")
+            })?;
+        Ok(EmittedExpr {
+            code: format!("{}({})", info.symbol, receiver),
+            c_type: info.return_type,
+        })
+    }
+
+    fn function_return_type(&self, f: &Function) -> CType {
+        if f.name == "main" {
+            CType::Scalar(ScalarType::I32)
+        } else {
+            self.function_info_for(f)
+                .map(|info| info.return_type.clone())
+                .unwrap_or(CType::Void)
+        }
+    }
+
+    fn function_symbol_for(&self, f: &Function) -> String {
+        self.function_info_for(f)
+            .map(|info| info.symbol.clone())
+            .unwrap_or_else(|| sanitize_ident(&f.name))
+    }
+
+    fn function_info_for(&self, f: &Function) -> Option<&FunctionInfo> {
+        let params = f
+            .params
+            .iter()
+            .filter_map(|param| self.param_to_ctype(param).ok())
+            .collect::<Vec<_>>();
+        self.functions
+            .get(&f.name)?
+            .iter()
+            .find(|info| info.params == params)
+    }
+
+    fn function_params(&self, f: &Function) -> Result<String, String> {
+        if f.params.is_empty() {
+            return Ok("void".to_string());
+        }
+        let info = self
+            .function_info_for(f)
+            .ok_or_else(|| format!("function '{}' has no signature", f.name))?;
+        Ok(f.params
+            .iter()
+            .zip(info.params.iter())
+            .map(|(p, t)| format!("{} {}", t, sanitize_ident(&p.name)))
+            .collect::<Vec<_>>()
+            .join(", "))
+    }
+
+    fn emit_scope_drops(&self, state: &mut CodegenState, out: &mut String) {
+        if let Some(scope) = state.scopes.pop() {
+            for name in scope.iter().rev() {
+                if state.moved.contains(name) {
+                    continue;
+                }
+                if let Some(ty) = state.vars.get(name) {
+                    if let Some(drop) = self.emit_drop(name, ty) {
+                        out.push_str(&drop);
+                    }
+                }
+            }
+            for name in scope {
+                state.vars.remove(&name);
+            }
+        }
+    }
+
+    fn emit_all_scope_drops(&self, state: &mut CodegenState, out: &mut String) {
+        while !state.scopes.is_empty() {
+            self.emit_scope_drops(state, out);
+        }
+    }
+
+    fn emit_drop(&self, name: &str, ty: &CType) -> Option<String> {
+        self.emit_drop_for_expr(&sanitize_ident(name), ty)
+    }
+
+    fn emit_drop_for_expr(&self, expr: &str, ty: &CType) -> Option<String> {
+        match ty {
+            CType::String => Some(format!("    free({});\n", expr)),
+            CType::Exception => Some(format!("    glitch_exception_free(&{});\n", expr)),
+            CType::ClassPtr(name) => Some(format!(
+                "    if ({0}) {{ glitch_drop_{1}({0}); free({0}); }}\n",
+                expr,
+                sanitize_ident(name)
+            )),
+            CType::Struct(name) => Some(format!(
+                "    glitch_drop_{}(&{});\n",
+                sanitize_ident(name),
+                expr
+            )),
+            CType::ListInt => Some(format!("    List_int_free(&{});\n", expr)),
+            CType::ListI64 => Some(format!("    List_i64_free(&{});\n", expr)),
+            CType::ListBool => Some(format!("    List_bool_free(&{});\n", expr)),
+            CType::ListF64 => Some(format!("    List_f64_free(&{});\n", expr)),
+            CType::ListString => Some(format!("    List_string_free(&{});\n", expr)),
+            CType::DictStringInt => Some(format!("    Dict_string_int_free(&{});\n", expr)),
+            CType::DictStringI64 => Some(format!("    Dict_string_i64_free(&{});\n", expr)),
+            CType::DictStringBool => Some(format!("    Dict_string_bool_free(&{});\n", expr)),
+            CType::DictStringF64 => Some(format!("    Dict_string_f64_free(&{});\n", expr)),
+            CType::DictStringString => Some(format!("    Dict_string_string_free(&{});\n", expr)),
+            CType::Task(result) => {
+                Some(format!("    {}(&{});\n", task_free_function(result), expr))
+            }
+            _ => None,
+        }
+    }
+
+    fn remember_moves(&self, expr: &Expr, state: &mut CodegenState) {
+        match expr {
+            Expr::Move(name) => state.moved.push(name.clone()),
+            Expr::ArrayLiteral(values) => {
+                for value in values {
+                    self.remember_moves(value, state);
+                }
+            }
+            Expr::NewArray { values, .. } => {
+                for value in values {
+                    self.remember_moves(value, state);
+                }
+            }
+            Expr::FunctionCall { args, .. } | Expr::MethodCall { args, .. } => {
+                for arg in args {
+                    self.remember_moves(arg, state);
+                }
+            }
+            Expr::NewObject { args, fields, .. } => {
+                for arg in args {
+                    self.remember_moves(arg, state);
+                }
+                for field in fields {
+                    self.remember_moves(&field.expr, state);
+                }
+            }
+            Expr::Index { target, index }
+            | Expr::Binary {
+                left: target,
+                right: index,
+                ..
+            } => {
+                self.remember_moves(target, state);
+                self.remember_moves(index, state);
+            }
+            Expr::Field { target, .. } | Expr::Await(target) => {
+                self.remember_moves(target, state);
+            }
+            _ => {}
+        }
+    }
+
+    fn emit_metadata_comment(
+        &self,
+        namespace: &[String],
+        attributes: &[Attribute],
+        out: &mut String,
+    ) {
+        if namespace.is_empty() && attributes.is_empty() {
+            return;
+        }
+        out.push_str("/* metadata:");
+        if !namespace.is_empty() {
+            out.push_str(" namespace=");
+            out.push_str(&namespace.join("."));
+        }
+        if !attributes.is_empty() {
+            out.push_str(" attributes=");
+            let rendered = attributes
+                .iter()
+                .map(render_attribute)
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&rendered);
+        }
+        out.push_str(" */\n");
+    }
+}
+
+fn emit_c_declaration(name: &str, c_type: CType, initializer: &str) -> String {
+    match c_type {
+        CType::Scalar(s) => format!("    {} {} = {};\n", s.c_name(), name, initializer),
+        CType::Ptr(s) => format!("    {} * {} = {};\n", s.c_name(), name, initializer),
+        CType::Array(s, _) => format!(
+            "    struct {} {} = {};\n",
+            array_runtime_name(s),
+            name,
+            initializer
+        ),
+        CType::Null => format!("    void * {} = {};\n", name, initializer),
+        CType::String => format!("    char * {} = {};\n", name, initializer),
+        CType::BorrowedString => format!("    char * {} = {};\n", name, initializer),
+        CType::Exception => format!("    struct GlitchException {} = {};\n", name, initializer),
+        CType::ExceptionPtr => {
+            format!("    struct GlitchException * {} = {};\n", name, initializer)
+        }
+        CType::Struct(type_name) => format!(
+            "    struct {} {} = {};\n",
+            sanitize_ident(&type_name),
+            name,
+            initializer
+        ),
+        CType::ClassPtr(type_name) => format!(
+            "    struct {} * {} = {};\n",
+            sanitize_ident(&type_name),
+            name,
+            initializer
+        ),
+        CType::GenericPtr(type_name) => format!(
+            "    struct {} * {} = {};\n",
+            sanitize_ident(&type_name),
+            name,
+            initializer
+        ),
+        CType::ListInt => format!("    struct List_int {} = {};\n", name, initializer),
+        CType::ListI64 => format!("    struct List_i64 {} = {};\n", name, initializer),
+        CType::ListBool => format!("    struct List_bool {} = {};\n", name, initializer),
+        CType::ListF64 => format!("    struct List_f64 {} = {};\n", name, initializer),
+        CType::ListString => format!("    struct List_string {} = {};\n", name, initializer),
+        CType::DictStringInt => format!("    struct Dict_string_int {} = {};\n", name, initializer),
+        CType::DictStringI64 => {
+            format!("    struct Dict_string_i64 {} = {};\n", name, initializer)
+        }
+        CType::DictStringBool => {
+            format!("    struct Dict_string_bool {} = {};\n", name, initializer)
+        }
+        CType::DictStringF64 => {
+            format!("    struct Dict_string_f64 {} = {};\n", name, initializer)
+        }
+        CType::DictStringString => {
+            format!(
+                "    struct Dict_string_string {} = {};\n",
+                name, initializer
+            )
+        }
+        CType::EnumerableInt => format!("    struct IEnumerable_int {} = {};\n", name, initializer),
+        CType::EnumerableI64 => {
+            format!("    struct IEnumerable_i64 {} = {};\n", name, initializer)
+        }
+        CType::EnumerableBool => {
+            format!("    struct IEnumerable_bool {} = {};\n", name, initializer)
+        }
+        CType::EnumerableF64 => {
+            format!("    struct IEnumerable_f64 {} = {};\n", name, initializer)
+        }
+        CType::EnumerableString => {
+            format!(
+                "    struct IEnumerable_string {} = {};\n",
+                name, initializer
+            )
+        }
+        CType::Thread => format!("    struct GlitchThread {} = {};\n", name, initializer),
+        CType::Task(result) => format!(
+            "    struct {} {} = {};\n",
+            task_runtime_name(&result),
+            name,
+            initializer
+        ),
+        CType::Void => format!("    {};\n", initializer),
+    }
+}
+
+fn default_c_value(ty: &CType) -> &'static str {
+    match ty {
+        CType::Scalar(ScalarType::F64) => "0.0",
+        CType::Scalar(_) => "0",
+        CType::String
+        | CType::BorrowedString
+        | CType::ClassPtr(_)
+        | CType::GenericPtr(_)
+        | CType::Null => "NULL",
+        _ => "0",
+    }
+}
+
+fn emit_c_field_declaration(name: &str, c_type: &CType) -> String {
+    match c_type {
+        CType::Scalar(s) => format!("    {} {};\n", s.c_name(), name),
+        CType::String => format!("    char * {};\n", name),
+        CType::BorrowedString => format!("    char * {};\n", name),
+        CType::Exception => format!("    struct GlitchException {};\n", name),
+        CType::ExceptionPtr => format!("    struct GlitchException * {};\n", name),
+        CType::Struct(type_name) => format!("    struct {} {};\n", sanitize_ident(type_name), name),
+        CType::ClassPtr(type_name) => {
+            format!("    struct {} * {};\n", sanitize_ident(type_name), name)
+        }
+        CType::GenericPtr(type_name) => {
+            format!("    struct {} * {};\n", sanitize_ident(type_name), name)
+        }
+        CType::Array(s, _) => format!("    struct {} {};\n", array_runtime_name(*s), name),
+        CType::Null => format!("    void * {};\n", name),
+        CType::ListInt => format!("    struct List_int {};\n", name),
+        CType::ListI64 => format!("    struct List_i64 {};\n", name),
+        CType::ListBool => format!("    struct List_bool {};\n", name),
+        CType::ListF64 => format!("    struct List_f64 {};\n", name),
+        CType::ListString => format!("    struct List_string {};\n", name),
+        CType::DictStringInt => format!("    struct Dict_string_int {};\n", name),
+        CType::DictStringI64 => format!("    struct Dict_string_i64 {};\n", name),
+        CType::DictStringBool => format!("    struct Dict_string_bool {};\n", name),
+        CType::DictStringF64 => format!("    struct Dict_string_f64 {};\n", name),
+        CType::DictStringString => format!("    struct Dict_string_string {};\n", name),
+        CType::EnumerableInt => format!("    struct IEnumerable_int {};\n", name),
+        CType::EnumerableI64 => format!("    struct IEnumerable_i64 {};\n", name),
+        CType::EnumerableBool => format!("    struct IEnumerable_bool {};\n", name),
+        CType::EnumerableF64 => format!("    struct IEnumerable_f64 {};\n", name),
+        CType::EnumerableString => format!("    struct IEnumerable_string {};\n", name),
+        CType::Thread => format!("    struct GlitchThread {};\n", name),
+        CType::Task(result) => format!("    struct {} {};\n", task_runtime_name(result), name),
+        CType::Ptr(s) => format!("    {} * {};\n", s.c_name(), name),
+        CType::Void => String::new(),
+    }
+}
+
+pub(crate) fn sanitize_ident(name: &str) -> String {
+    if name == "this" {
+        return "self".to_string();
+    }
+    let mut result = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            result.push(ch);
+        } else {
+            result.push('_');
+        }
+    }
+    if result.is_empty() || result.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        result.insert(0, '_');
+    }
+    result
+}
+
+fn method_key(type_name: &str, method_name: &str) -> String {
+    format!("{type_name}.{method_name}")
+}
+
+fn function_symbol(name: &str, params: &[CType], overloaded: bool) -> String {
+    if !overloaded {
+        return sanitize_ident(name);
+    }
+    let suffix = params
+        .iter()
+        .map(c_type_symbol_suffix)
+        .collect::<Vec<_>>()
+        .join("_");
+    if suffix.is_empty() {
+        format!("{}__overload", sanitize_ident(name))
+    } else {
+        format!("{}__{}", sanitize_ident(name), suffix)
+    }
+}
+
+fn c_type_symbol_suffix(ty: &CType) -> String {
+    match ty {
+        CType::Scalar(ScalarType::Bool) => "bool".to_string(),
+        CType::Scalar(ScalarType::Byte) => "byte".to_string(),
+        CType::Scalar(ScalarType::Short) => "short".to_string(),
+        CType::Scalar(ScalarType::I32) => "int".to_string(),
+        CType::Scalar(ScalarType::I64) => "long".to_string(),
+        CType::Scalar(ScalarType::U32) => "uint".to_string(),
+        CType::Scalar(ScalarType::F64) => "double".to_string(),
+        CType::Scalar(ScalarType::Decimal) => "decimal".to_string(),
+        CType::String | CType::BorrowedString => "string".to_string(),
+        CType::Null => "null".to_string(),
+        CType::Void => "void".to_string(),
+        CType::ClassPtr(name) | CType::Struct(name) | CType::GenericPtr(name) => {
+            sanitize_ident(name)
+        }
+        CType::Task(inner) => format!("task_{}", c_type_symbol_suffix(inner)),
+        other => sanitize_ident(&format!("{other:?}")),
+    }
+}
+
+fn array_runtime_name(scalar: ScalarType) -> &'static str {
+    match scalar {
+        ScalarType::Bool => "GlitchArray_bool",
+        ScalarType::Byte => "GlitchArray_byte",
+        ScalarType::Short => "GlitchArray_short",
+        ScalarType::I32 => "GlitchArray_int",
+        ScalarType::I64 => "GlitchArray_i64",
+        ScalarType::U32 => "GlitchArray_uint",
+        ScalarType::F64 => "GlitchArray_f64",
+        ScalarType::Decimal => "GlitchArray_decimal",
+    }
+}
+
+fn array_literal_code(element: ScalarType, values: &[String]) -> String {
+    format!(
+        "(struct {}){{({}[]){{{}}}, {}}}",
+        array_runtime_name(element),
+        element.c_name(),
+        values.join(", "),
+        values.len()
+    )
+}
+
+fn call_arg_expr(arg: &Expr) -> &Expr {
+    match arg {
+        Expr::NamedArg { expr, .. } | Expr::RefArg { expr, .. } => expr,
+        other => other,
+    }
+}
+
+fn call_arg_name(arg: &Expr) -> Option<&str> {
+    match arg {
+        Expr::NamedArg { name, .. } => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn call_arg_modifier(arg: &Expr) -> ParamModifier {
+    match arg {
+        Expr::RefArg { modifier, .. } => *modifier,
+        _ => ParamModifier::None,
+    }
+}
+
+fn call_modifier_matches(expected: ParamModifier, actual: ParamModifier) -> bool {
+    match expected {
+        ParamModifier::None | ParamModifier::This => actual == ParamModifier::None,
+        ParamModifier::In => matches!(actual, ParamModifier::None | ParamModifier::In),
+        ParamModifier::Ref => actual == ParamModifier::Ref,
+        ParamModifier::Out => actual == ParamModifier::Out,
+    }
+}
+
+fn c_type_same_for_conversion(left: &CType, right: &CType) -> bool {
+    left == right
+        || matches!(
+            (left, right),
+            (CType::String, CType::BorrowedString)
+                | (CType::BorrowedString, CType::String)
+                | (CType::GenericPtr(_), CType::GenericPtr(_))
+        )
+}
+
+fn c_numeric_conversion_rank(expected: &CType, arg: &CCallArg) -> Option<u16> {
+    if let Some(value) = arg.int_value {
+        return int_literal_c_conversion_rank(expected, value);
+    }
+    let (CType::Scalar(actual), CType::Scalar(expected)) = (&arg.c_type, expected) else {
+        return None;
+    };
+    match (actual, expected) {
+        (ScalarType::Byte, ScalarType::Short) => Some(1),
+        (ScalarType::Byte, ScalarType::I32) => Some(2),
+        (ScalarType::Byte, ScalarType::U32) => Some(2),
+        (ScalarType::Byte, ScalarType::I64) => Some(3),
+        (ScalarType::Byte, ScalarType::F64) | (ScalarType::Byte, ScalarType::Decimal) => Some(4),
+        (ScalarType::Short, ScalarType::I32) => Some(1),
+        (ScalarType::Short, ScalarType::I64) => Some(2),
+        (ScalarType::Short, ScalarType::F64) | (ScalarType::Short, ScalarType::Decimal) => Some(3),
+        (ScalarType::I32, ScalarType::I64) => Some(1),
+        (ScalarType::I32, ScalarType::F64) | (ScalarType::I32, ScalarType::Decimal) => Some(2),
+        (ScalarType::U32, ScalarType::I64) => Some(1),
+        (ScalarType::U32, ScalarType::F64) | (ScalarType::U32, ScalarType::Decimal) => Some(2),
+        (ScalarType::I64, ScalarType::F64) | (ScalarType::I64, ScalarType::Decimal) => Some(1),
+        _ => None,
+    }
+}
+
+fn int_literal_c_conversion_rank(expected: &CType, value: i64) -> Option<u16> {
+    match expected {
+        CType::Scalar(ScalarType::I32) if i32::try_from(value).is_ok() => Some(0),
+        CType::Scalar(ScalarType::I64) => Some(1),
+        CType::Scalar(ScalarType::Short) if i16::try_from(value).is_ok() => Some(2),
+        CType::Scalar(ScalarType::Byte) if u8::try_from(value).is_ok() => Some(3),
+        CType::Scalar(ScalarType::U32) if u32::try_from(value).is_ok() => Some(4),
+        CType::Scalar(ScalarType::F64 | ScalarType::Decimal) => Some(5),
+        _ => None,
+    }
+}
+
+fn method_symbol(type_name: &str, method_name: &str, params: &[CType], overloaded: bool) -> String {
+    let base = format!(
+        "{}_{}",
+        sanitize_ident(type_name),
+        sanitize_ident(method_name)
+    );
+    if !overloaded {
+        return base;
+    }
+    let suffix = params
+        .iter()
+        .map(c_type_symbol_suffix)
+        .collect::<Vec<_>>()
+        .join("_");
+    if suffix.is_empty() {
+        format!("{base}__overload")
+    } else {
+        format!("{base}__{suffix}")
+    }
+}
+
+fn enum_variant_symbol(type_name: &str, variant_name: &str) -> String {
+    format!(
+        "{}_{}",
+        sanitize_ident(type_name),
+        sanitize_ident(variant_name)
+    )
+}
+
+fn constructor_symbol(type_name: &str) -> String {
+    format!("{}_new", sanitize_ident(type_name))
+}
+
+fn generic_type_name(name: &str, args: &[TypeSyntax]) -> String {
+    let suffix = args
+        .iter()
+        .map(type_syntax_symbol)
+        .collect::<Vec<_>>()
+        .join("_");
+    if suffix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}_{}", name, suffix)
+    }
+}
+
+fn type_syntax_symbol(ty: &TypeSyntax) -> String {
+    match ty {
+        TypeSyntax::Scalar(ScalarType::Bool) => "bool".to_string(),
+        TypeSyntax::Scalar(ScalarType::Byte) => "byte".to_string(),
+        TypeSyntax::Scalar(ScalarType::Short) => "short".to_string(),
+        TypeSyntax::Scalar(ScalarType::I32) => "int".to_string(),
+        TypeSyntax::Scalar(ScalarType::I64) => "long".to_string(),
+        TypeSyntax::Scalar(ScalarType::U32) => "uint".to_string(),
+        TypeSyntax::Scalar(ScalarType::F64) => "double".to_string(),
+        TypeSyntax::Scalar(ScalarType::Decimal) => "decimal".to_string(),
+        TypeSyntax::String => "string".to_string(),
+        TypeSyntax::Array(inner) => format!("array_{}", type_syntax_symbol(inner)),
+        TypeSyntax::Ref(inner) => format!("ref_{}", type_syntax_symbol(inner)),
+        TypeSyntax::Named(name) => sanitize_ident(name),
+        TypeSyntax::GenericNamed { name, args } => sanitize_ident(&generic_type_name(name, args)),
+        TypeSyntax::List(inner) => sanitize_ident(&generic_type_name(
+            "List",
+            std::slice::from_ref(inner.as_ref()),
+        )),
+        TypeSyntax::Dictionary(key, value) => sanitize_ident(&generic_type_name(
+            "Dictionary",
+            &[key.as_ref().clone(), value.as_ref().clone()],
+        )),
+        TypeSyntax::IEnumerable(inner) => sanitize_ident(&generic_type_name(
+            "IEnumerable",
+            std::slice::from_ref(inner.as_ref()),
+        )),
+        TypeSyntax::Thread => "Thread".to_string(),
+        TypeSyntax::Task(inner) => sanitize_ident(&generic_type_name(
+            "Task",
+            std::slice::from_ref(inner.as_ref()),
+        )),
+        TypeSyntax::Nullable(inner) => format!("nullable_{}", type_syntax_symbol(inner)),
+        TypeSyntax::Void => "void".to_string(),
+    }
+}
+
+fn property_getter_name(name: &str) -> String {
+    format!("get_{name}")
+}
+
+fn c_string_literal(value: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn render_attribute(attribute: &Attribute) -> String {
+    if attribute.args.is_empty() {
+        return attribute.name.clone();
+    }
+    let args = attribute
+        .args
+        .iter()
+        .map(render_attribute_arg)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{}({})", attribute.name, args)
+}
+
+fn render_attribute_arg(expr: &Expr) -> String {
+    match expr {
+        Expr::String(value) => c_string_literal(value),
+        Expr::Int(value) => value.to_string(),
+        Expr::Float(value) => value.to_string(),
+        Expr::Bool(value) => value.to_string(),
+        Expr::Var(name) => name.clone(),
+        Expr::NamedArg { name, expr } => format!("{} = {}", name, render_attribute_arg(expr)),
+        Expr::Await(_) => "<await>".to_string(),
+        _ => "<expr>".to_string(),
+    }
+}
+
+struct ControllerRoute {
+    method: String,
+    path: String,
+    handler: String,
+}
+
+fn controller_routes(program: &Program) -> Vec<ControllerRoute> {
+    let mut routes = Vec::new();
+    for ty in &program.types {
+        if !has_attribute(&ty.attributes, "ApiController") {
+            continue;
+        }
+        let prefix =
+            attribute_string_arg(&ty.attributes, "Route").unwrap_or_else(|| "/".to_string());
+        for method in &ty.methods {
+            if let Some(path) = attribute_string_arg(&method.attributes, "HttpGet") {
+                routes.push(ControllerRoute {
+                    method: "GET".to_string(),
+                    path: join_route_path(&prefix, &path),
+                    handler: format!("{}.{}", ty.name, method.name),
+                });
+            }
+            if let Some(path) = attribute_string_arg(&method.attributes, "HttpPost") {
+                routes.push(ControllerRoute {
+                    method: "POST".to_string(),
+                    path: join_route_path(&prefix, &path),
+                    handler: format!("{}.{}", ty.name, method.name),
+                });
+            }
+        }
+    }
+    routes
+}
+
+fn has_attribute(attributes: &[Attribute], name: &str) -> bool {
+    attributes
+        .iter()
+        .any(|attribute| attribute_name_matches(&attribute.name, name))
+}
+
+fn attribute_string_arg(attributes: &[Attribute], name: &str) -> Option<String> {
+    attributes
+        .iter()
+        .find(|attribute| attribute_name_matches(&attribute.name, name))
+        .and_then(|attribute| match attribute.args.first() {
+            Some(Expr::String(value)) => Some(value.clone()),
+            None => Some(String::new()),
+            _ => None,
+        })
+}
+
+fn attribute_name_matches(actual: &str, expected: &str) -> bool {
+    let short = actual.rsplit('.').next().unwrap_or(actual);
+    short == expected || short.strip_suffix("Attribute") == Some(expected)
+}
+
+fn join_route_path(prefix: &str, path: &str) -> String {
+    let normalized_prefix = if prefix.is_empty() { "/" } else { prefix };
+    let normalized_path = if path.is_empty() { "/" } else { path };
+    if normalized_path == "/" {
+        return if normalized_prefix == "/" {
+            "/".to_string()
+        } else if normalized_prefix.starts_with('/') {
+            normalized_prefix.trim_end_matches('/').to_string()
+        } else {
+            format!("/{}", normalized_prefix.trim_end_matches('/'))
+        };
+    }
+    let left = normalized_prefix.trim_end_matches('/');
+    let right = normalized_path.trim_start_matches('/');
+    if left.is_empty() || left == "/" {
+        format!("/{right}")
+    } else if left.starts_with('/') {
+        format!("{left}/{right}")
+    } else {
+        format!("/{left}/{right}")
+    }
+}
+
+fn expr_to_type_path(expr: &Expr) -> Option<Vec<String>> {
+    match expr {
+        Expr::Var(name) => Some(vec![name.clone()]),
+        Expr::Field { target, name } => {
+            let mut path = expr_to_type_path(target)?;
+            path.push(name.clone());
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+fn is_task_type_path(parts: &[String]) -> bool {
+    parts == ["Task"]
+        || parts == ["System", "Threading", "Tasks", "Task"]
+        || parts == ["ValueTask"]
+        || parts == ["System", "Threading", "Tasks", "ValueTask"]
+}
+
+fn is_file_type_path(parts: &[String]) -> bool {
+    parts == ["File"] || parts == ["System", "IO", "File"]
+}
+
+fn is_temporal_value_method(name: &str) -> bool {
+    matches!(
+        name,
+        "AddTicks"
+            | "AddDays"
+            | "AddHours"
+            | "AddMinutes"
+            | "AddSeconds"
+            | "AddMilliseconds"
+            | "AddMonths"
+            | "AddYears"
+            | "Subtract"
+            | "ToDateTime"
+    )
+}
+
+fn generic_ptr_string_collection(name: &str) -> bool {
+    name == "HashSet_string"
+        || name == "ICollection_string"
+        || name == "IReadOnlyCollection_string"
+        || name == "IEnumerable_string"
+        || name == "IQueryable_string"
+        || name == "string_array"
+}
+
+fn ctype_accepts_null(ty: &CType) -> bool {
+    matches!(
+        ty,
+        CType::String
+            | CType::BorrowedString
+            | CType::ClassPtr(_)
+            | CType::GenericPtr(_)
+            | CType::Exception
+            | CType::ExceptionPtr
+    )
+}
+
+fn is_exception_type_name(name: &str) -> bool {
+    name == "Exception" || name == "System.Exception" || name.ends_with("Exception")
+}
+
+fn task_runtime_name(result: &CType) -> &'static str {
+    match result {
+        CType::Void => "GlitchTask",
+        CType::Scalar(ScalarType::Bool) => "GlitchTask_bool",
+        CType::Scalar(ScalarType::I32) => "GlitchTask_i32",
+        CType::Scalar(ScalarType::I64) => "GlitchTask_i64",
+        CType::Scalar(ScalarType::F64) => "GlitchTask_f64",
+        CType::String => "GlitchTask_string",
+        CType::ClassPtr(_) | CType::GenericPtr(_) | CType::Null => "GlitchTask_ptr",
+        _ => "GlitchTask_unsupported",
+    }
+}
+
+fn task_run_function(result: &CType) -> &'static str {
+    match result {
+        CType::Void => "GlitchTask_run",
+        CType::Scalar(ScalarType::Bool) => "GlitchTask_bool_run",
+        CType::Scalar(ScalarType::I32) => "GlitchTask_i32_run",
+        CType::Scalar(ScalarType::I64) => "GlitchTask_i64_run",
+        CType::Scalar(ScalarType::F64) => "GlitchTask_f64_run",
+        CType::String => "GlitchTask_string_run",
+        CType::ClassPtr(_) | CType::GenericPtr(_) | CType::Null => "GlitchTask_ptr_run",
+        _ => "GlitchTask_unsupported_run",
+    }
+}
+
+fn task_from_result_function(result: &CType) -> &'static str {
+    match result {
+        CType::Scalar(ScalarType::Bool) => "GlitchTask_bool_from_result",
+        CType::Scalar(ScalarType::I32) => "GlitchTask_i32_from_result",
+        CType::Scalar(ScalarType::I64) => "GlitchTask_i64_from_result",
+        CType::Scalar(ScalarType::F64) => "GlitchTask_f64_from_result",
+        CType::String => "GlitchTask_string_from_owned",
+        CType::ClassPtr(_) | CType::GenericPtr(_) | CType::Null => "GlitchTask_ptr_from_result",
+        _ => "GlitchTask_unsupported_from_result",
+    }
+}
+
+fn task_wait_function(result: &CType) -> &'static str {
+    match result {
+        CType::Void => "GlitchTask_wait",
+        CType::Scalar(ScalarType::Bool) => "GlitchTask_bool_wait",
+        CType::Scalar(ScalarType::I32) => "GlitchTask_i32_wait",
+        CType::Scalar(ScalarType::I64) => "GlitchTask_i64_wait",
+        CType::Scalar(ScalarType::F64) => "GlitchTask_f64_wait",
+        CType::String => "GlitchTask_string_wait",
+        CType::ClassPtr(_) | CType::GenericPtr(_) | CType::Null => "GlitchTask_ptr_wait",
+        _ => "GlitchTask_unsupported_wait",
+    }
+}
+
+fn task_free_function(result: &CType) -> &'static str {
+    match result {
+        CType::Void => "GlitchTask_wait",
+        CType::Scalar(ScalarType::Bool) => "GlitchTask_bool_free",
+        CType::Scalar(ScalarType::I32) => "GlitchTask_i32_free",
+        CType::Scalar(ScalarType::I64) => "GlitchTask_i64_free",
+        CType::Scalar(ScalarType::F64) => "GlitchTask_f64_free",
+        CType::String => "GlitchTask_string_free",
+        CType::ClassPtr(_) | CType::GenericPtr(_) | CType::Null => "GlitchTask_ptr_free",
+        _ => "GlitchTask_unsupported_free",
+    }
+}
+
+fn task_result_function(result: &CType) -> &'static str {
+    match result {
+        CType::Scalar(ScalarType::Bool) => "GlitchTask_bool_result",
+        CType::Scalar(ScalarType::I32) => "GlitchTask_i32_result",
+        CType::Scalar(ScalarType::I64) => "GlitchTask_i64_result",
+        CType::Scalar(ScalarType::F64) => "GlitchTask_f64_result",
+        CType::String => "GlitchTask_string_result",
+        CType::ClassPtr(_) | CType::GenericPtr(_) | CType::Null => "GlitchTask_ptr_result",
+        _ => "GlitchTask_unsupported_result",
+    }
+}
+
+fn builtin_function_info(name: &str) -> Option<FunctionInfo> {
+    match name {
+        "SystemTextJson_SerializeString"
+        | "SystemTextJson_DeserializeString"
+        | "JsonSerializer_SerializeString"
+        | "JsonSerializer_DeserializeString" => Some(FunctionInfo {
+            params: vec![CType::String],
+            param_names: vec!["value".to_string()],
+            param_modifiers: vec![ParamModifier::None],
+            param_is_params: vec![false],
+            param_defaults: vec![None],
+            return_type: CType::String,
+            symbol: sanitize_ident(name),
+        }),
+        "GlitchEndpointHandlers_Contains" => Some(FunctionInfo {
+            params: vec![
+                CType::ClassPtr("WebApplication".to_string()),
+                CType::String,
+                CType::String,
+            ],
+            param_names: vec!["app".to_string(), "method".to_string(), "path".to_string()],
+            param_modifiers: vec![ParamModifier::None; 3],
+            param_is_params: vec![false; 3],
+            param_defaults: vec![None; 3],
+            return_type: CType::Scalar(ScalarType::Bool),
+            symbol: sanitize_ident(name),
+        }),
+        "GlitchEndpointHandlers_Invoke" => Some(FunctionInfo {
+            params: vec![
+                CType::ClassPtr("WebApplication".to_string()),
+                CType::String,
+                CType::String,
+                CType::String,
+            ],
+            param_names: vec![
+                "app".to_string(),
+                "method".to_string(),
+                "path".to_string(),
+                "body".to_string(),
+            ],
+            param_modifiers: vec![ParamModifier::None; 4],
+            param_is_params: vec![false; 4],
+            param_defaults: vec![None; 4],
+            return_type: CType::String,
+            symbol: sanitize_ident(name),
+        }),
+        "GlitchMiddlewareHandlers_Apply" => Some(FunctionInfo {
+            params: vec![CType::ClassPtr("WebApplication".to_string()), CType::String],
+            param_names: vec!["app".to_string(), "input".to_string()],
+            param_modifiers: vec![ParamModifier::None; 2],
+            param_is_params: vec![false; 2],
+            param_defaults: vec![None; 2],
+            return_type: CType::String,
+            symbol: sanitize_ident(name),
+        }),
+        _ => None,
+    }
+}
+
+const RUNTIME_C: &str = r#"
+struct GlitchArray_bool { int *data; int len; };
+struct GlitchArray_byte { unsigned char *data; int len; };
+struct GlitchArray_short { short *data; int len; };
+struct GlitchArray_int { int *data; int len; };
+struct GlitchArray_i64 { long long *data; int len; };
+struct GlitchArray_uint { unsigned int *data; int len; };
+struct GlitchArray_f64 { double *data; int len; };
+struct GlitchArray_decimal { long double *data; int len; };
+
+struct List_int { int *data; int len; int cap; };
+static char * glitch_strdup(const char *source);
+static struct List_int List_int_new(void) { struct List_int list; list.len = 0; list.cap = 4; list.data = malloc(sizeof(int) * (size_t)list.cap); if (!list.data) { abort(); } return list; }
+static void List_int_add(struct List_int *list, int value) { if (list->len >= list->cap) { list->cap *= 2; list->data = realloc(list->data, sizeof(int) * (size_t)list->cap); if (!list->data) { abort(); } } list->data[list->len++] = value; }
+static int List_int_get(struct List_int *list, int index) { if (index < 0 || index >= list->len) { abort(); } return list->data[index]; }
+static int List_int_contains(struct List_int *list, int value) { for (int i = 0; i < list->len; i++) { if (list->data[i] == value) { return 1; } } return 0; }
+static void List_int_clear(struct List_int *list) { list->len = 0; }
+static void List_int_free(struct List_int *list) { free(list->data); list->data = NULL; list->len = 0; list->cap = 0; }
+
+struct List_i64 { long long *data; int len; int cap; };
+static struct List_i64 List_i64_new(void) { struct List_i64 list; list.len = 0; list.cap = 4; list.data = malloc(sizeof(long long) * (size_t)list.cap); if (!list.data) { abort(); } return list; }
+static void List_i64_add(struct List_i64 *list, long long value) { if (list->len >= list->cap) { list->cap *= 2; list->data = realloc(list->data, sizeof(long long) * (size_t)list->cap); if (!list->data) { abort(); } } list->data[list->len++] = value; }
+static long long List_i64_get(struct List_i64 *list, int index) { if (index < 0 || index >= list->len) { abort(); } return list->data[index]; }
+static int List_i64_contains(struct List_i64 *list, long long value) { for (int i = 0; i < list->len; i++) { if (list->data[i] == value) { return 1; } } return 0; }
+static void List_i64_clear(struct List_i64 *list) { list->len = 0; }
+static void List_i64_free(struct List_i64 *list) { free(list->data); list->data = NULL; list->len = 0; list->cap = 0; }
+
+struct List_bool { int *data; int len; int cap; };
+static struct List_bool List_bool_new(void) { struct List_bool list; list.len = 0; list.cap = 4; list.data = malloc(sizeof(int) * (size_t)list.cap); if (!list.data) { abort(); } return list; }
+static void List_bool_add(struct List_bool *list, int value) { if (list->len >= list->cap) { list->cap *= 2; list->data = realloc(list->data, sizeof(int) * (size_t)list->cap); if (!list->data) { abort(); } } list->data[list->len++] = value; }
+static int List_bool_get(struct List_bool *list, int index) { if (index < 0 || index >= list->len) { abort(); } return list->data[index]; }
+static int List_bool_contains(struct List_bool *list, int value) { for (int i = 0; i < list->len; i++) { if (list->data[i] == value) { return 1; } } return 0; }
+static void List_bool_clear(struct List_bool *list) { list->len = 0; }
+static void List_bool_free(struct List_bool *list) { free(list->data); list->data = NULL; list->len = 0; list->cap = 0; }
+
+struct List_f64 { double *data; int len; int cap; };
+static struct List_f64 List_f64_new(void) { struct List_f64 list; list.len = 0; list.cap = 4; list.data = malloc(sizeof(double) * (size_t)list.cap); if (!list.data) { abort(); } return list; }
+static void List_f64_add(struct List_f64 *list, double value) { if (list->len >= list->cap) { list->cap *= 2; list->data = realloc(list->data, sizeof(double) * (size_t)list->cap); if (!list->data) { abort(); } } list->data[list->len++] = value; }
+static double List_f64_get(struct List_f64 *list, int index) { if (index < 0 || index >= list->len) { abort(); } return list->data[index]; }
+static int List_f64_contains(struct List_f64 *list, double value) { for (int i = 0; i < list->len; i++) { if (list->data[i] == value) { return 1; } } return 0; }
+static void List_f64_clear(struct List_f64 *list) { list->len = 0; }
+static void List_f64_free(struct List_f64 *list) { free(list->data); list->data = NULL; list->len = 0; list->cap = 0; }
+
+struct List_string { char **data; int len; int cap; };
+static struct List_string List_string_new(void) { struct List_string list; list.len = 0; list.cap = 4; list.data = malloc(sizeof(char *) * (size_t)list.cap); if (!list.data) { abort(); } return list; }
+static void List_string_reserve_one(struct List_string *list) { if (list->len >= list->cap) { list->cap *= 2; list->data = realloc(list->data, sizeof(char *) * (size_t)list->cap); if (!list->data) { abort(); } } }
+static void List_string_add_owned(struct List_string *list, char *value) { List_string_reserve_one(list); list->data[list->len++] = value ? value : glitch_strdup(""); }
+static void List_string_add(struct List_string *list, const char *value) { List_string_add_owned(list, glitch_strdup(value ? value : "")); }
+static char * List_string_get(struct List_string *list, int index) { if (index < 0 || index >= list->len) { abort(); } return list->data[index]; }
+static int List_string_contains(struct List_string *list, const char *value) { for (int i = 0; i < list->len; i++) { if (strcmp(list->data[i], value) == 0) { return 1; } } return 0; }
+static void List_string_clear(struct List_string *list) { for (int i = 0; i < list->len; i++) { free(list->data[i]); } list->len = 0; }
+static void List_string_free(struct List_string *list) { List_string_clear(list); free(list->data); list->data = NULL; list->cap = 0; }
+
+struct IEnumerable_int { struct List_int *source; };
+struct IEnumerable_i64 { struct List_i64 *source; };
+struct IEnumerable_bool { struct List_bool *source; };
+struct IEnumerable_f64 { struct List_f64 *source; };
+struct IEnumerable_string { struct List_string *source; };
+static struct IEnumerable_int IEnumerable_int_from_List_int(struct List_int *source) { struct IEnumerable_int enumerable; enumerable.source = source; return enumerable; }
+static struct IEnumerable_i64 IEnumerable_i64_from_List_i64(struct List_i64 *source) { struct IEnumerable_i64 enumerable; enumerable.source = source; return enumerable; }
+static struct IEnumerable_bool IEnumerable_bool_from_List_bool(struct List_bool *source) { struct IEnumerable_bool enumerable; enumerable.source = source; return enumerable; }
+static struct IEnumerable_f64 IEnumerable_f64_from_List_f64(struct List_f64 *source) { struct IEnumerable_f64 enumerable; enumerable.source = source; return enumerable; }
+static struct IEnumerable_string IEnumerable_string_from_List_string(struct List_string *source) { struct IEnumerable_string enumerable; enumerable.source = source; return enumerable; }
+
+struct Dict_string_int_entry { char *key; int value; };
+struct Dict_string_int { struct Dict_string_int_entry *entries; int len; int cap; };
+static char * glitch_strdup(const char *source) { size_t len = strlen(source) + 1; char *copy = malloc(len); if (!copy) { abort(); } memcpy(copy, source, len); return copy; }
+static char * glitch_string_concat(const char *left, const char *right) { left = left ? left : ""; right = right ? right : ""; size_t left_len = strlen(left); size_t right_len = strlen(right); char *copy = malloc(left_len + right_len + 1); if (!copy) { abort(); } memcpy(copy, left, left_len); memcpy(copy + left_len, right, right_len + 1); return copy; }
+struct GlitchException { char *message; };
+struct GlitchExceptionFrame { jmp_buf env; struct GlitchExceptionFrame *prev; struct GlitchException exception; };
+static struct GlitchExceptionFrame *glitch_exception_stack = NULL;
+static struct GlitchException glitch_exception_from_owned(char *message) { struct GlitchException ex; ex.message = message ? message : glitch_strdup(""); return ex; }
+static struct GlitchException glitch_exception_new(const char *message) { return glitch_exception_from_owned(glitch_strdup(message ? message : "")); }
+static struct GlitchException glitch_exception_clone(struct GlitchException *source) { return glitch_exception_new(source && source->message ? source->message : ""); }
+static void glitch_exception_free(struct GlitchException *exception) { if (!exception) { return; } free(exception->message); exception->message = NULL; }
+static void glitch_exception_push(struct GlitchExceptionFrame *frame) { frame->prev = glitch_exception_stack; frame->exception.message = NULL; glitch_exception_stack = frame; }
+static void glitch_exception_pop(struct GlitchExceptionFrame *frame) { if (glitch_exception_stack == frame) { glitch_exception_stack = frame->prev; } }
+static void glitch_throw(struct GlitchException exception) { if (!glitch_exception_stack) { fprintf(stderr, "Unhandled exception: %s\n", exception.message ? exception.message : ""); glitch_exception_free(&exception); abort(); } glitch_exception_stack->exception = exception; longjmp(glitch_exception_stack->env, 1); }
+static struct Dict_string_int Dict_string_int_new(void) { struct Dict_string_int dict; dict.len = 0; dict.cap = 4; dict.entries = malloc(sizeof(struct Dict_string_int_entry) * (size_t)dict.cap); if (!dict.entries) { abort(); } return dict; }
+static void Dict_string_int_add(struct Dict_string_int *dict, const char *key, int value) { if (dict->len >= dict->cap) { dict->cap *= 2; dict->entries = realloc(dict->entries, sizeof(struct Dict_string_int_entry) * (size_t)dict->cap); if (!dict->entries) { abort(); } } dict->entries[dict->len].key = glitch_strdup(key); dict->entries[dict->len].value = value; dict->len++; }
+static int Dict_string_int_contains_key(struct Dict_string_int *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return 1; } } return 0; }
+static int Dict_string_int_get(struct Dict_string_int *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return dict->entries[i].value; } } abort(); }
+static int Dict_string_int_remove(struct Dict_string_int *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { free(dict->entries[i].key); for (int j = i + 1; j < dict->len; j++) { dict->entries[j - 1] = dict->entries[j]; } dict->len--; return 1; } } return 0; }
+static void Dict_string_int_clear(struct Dict_string_int *dict) { for (int i = 0; i < dict->len; i++) { free(dict->entries[i].key); } dict->len = 0; }
+static void Dict_string_int_free(struct Dict_string_int *dict) { Dict_string_int_clear(dict); free(dict->entries); dict->entries = NULL; dict->cap = 0; }
+
+struct Dict_string_i64_entry { char *key; long long value; };
+struct Dict_string_i64 { struct Dict_string_i64_entry *entries; int len; int cap; };
+static struct Dict_string_i64 Dict_string_i64_new(void) { struct Dict_string_i64 dict; dict.len = 0; dict.cap = 4; dict.entries = malloc(sizeof(struct Dict_string_i64_entry) * (size_t)dict.cap); if (!dict.entries) { abort(); } return dict; }
+static void Dict_string_i64_add(struct Dict_string_i64 *dict, const char *key, long long value) { if (dict->len >= dict->cap) { dict->cap *= 2; dict->entries = realloc(dict->entries, sizeof(struct Dict_string_i64_entry) * (size_t)dict->cap); if (!dict->entries) { abort(); } } dict->entries[dict->len].key = glitch_strdup(key); dict->entries[dict->len].value = value; dict->len++; }
+static int Dict_string_i64_contains_key(struct Dict_string_i64 *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return 1; } } return 0; }
+static long long Dict_string_i64_get(struct Dict_string_i64 *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return dict->entries[i].value; } } abort(); }
+static int Dict_string_i64_remove(struct Dict_string_i64 *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { free(dict->entries[i].key); for (int j = i + 1; j < dict->len; j++) { dict->entries[j - 1] = dict->entries[j]; } dict->len--; return 1; } } return 0; }
+static void Dict_string_i64_clear(struct Dict_string_i64 *dict) { for (int i = 0; i < dict->len; i++) { free(dict->entries[i].key); } dict->len = 0; }
+static void Dict_string_i64_free(struct Dict_string_i64 *dict) { Dict_string_i64_clear(dict); free(dict->entries); dict->entries = NULL; dict->cap = 0; }
+
+struct Dict_string_bool_entry { char *key; int value; };
+struct Dict_string_bool { struct Dict_string_bool_entry *entries; int len; int cap; };
+static struct Dict_string_bool Dict_string_bool_new(void) { struct Dict_string_bool dict; dict.len = 0; dict.cap = 4; dict.entries = malloc(sizeof(struct Dict_string_bool_entry) * (size_t)dict.cap); if (!dict.entries) { abort(); } return dict; }
+static void Dict_string_bool_add(struct Dict_string_bool *dict, const char *key, int value) { if (dict->len >= dict->cap) { dict->cap *= 2; dict->entries = realloc(dict->entries, sizeof(struct Dict_string_bool_entry) * (size_t)dict->cap); if (!dict->entries) { abort(); } } dict->entries[dict->len].key = glitch_strdup(key); dict->entries[dict->len].value = value; dict->len++; }
+static int Dict_string_bool_contains_key(struct Dict_string_bool *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return 1; } } return 0; }
+static int Dict_string_bool_get(struct Dict_string_bool *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return dict->entries[i].value; } } abort(); }
+static int Dict_string_bool_remove(struct Dict_string_bool *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { free(dict->entries[i].key); for (int j = i + 1; j < dict->len; j++) { dict->entries[j - 1] = dict->entries[j]; } dict->len--; return 1; } } return 0; }
+static void Dict_string_bool_clear(struct Dict_string_bool *dict) { for (int i = 0; i < dict->len; i++) { free(dict->entries[i].key); } dict->len = 0; }
+static void Dict_string_bool_free(struct Dict_string_bool *dict) { Dict_string_bool_clear(dict); free(dict->entries); dict->entries = NULL; dict->cap = 0; }
+
+struct Dict_string_f64_entry { char *key; double value; };
+struct Dict_string_f64 { struct Dict_string_f64_entry *entries; int len; int cap; };
+static struct Dict_string_f64 Dict_string_f64_new(void) { struct Dict_string_f64 dict; dict.len = 0; dict.cap = 4; dict.entries = malloc(sizeof(struct Dict_string_f64_entry) * (size_t)dict.cap); if (!dict.entries) { abort(); } return dict; }
+static void Dict_string_f64_add(struct Dict_string_f64 *dict, const char *key, double value) { if (dict->len >= dict->cap) { dict->cap *= 2; dict->entries = realloc(dict->entries, sizeof(struct Dict_string_f64_entry) * (size_t)dict->cap); if (!dict->entries) { abort(); } } dict->entries[dict->len].key = glitch_strdup(key); dict->entries[dict->len].value = value; dict->len++; }
+static int Dict_string_f64_contains_key(struct Dict_string_f64 *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return 1; } } return 0; }
+static double Dict_string_f64_get(struct Dict_string_f64 *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return dict->entries[i].value; } } abort(); }
+static int Dict_string_f64_remove(struct Dict_string_f64 *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { free(dict->entries[i].key); for (int j = i + 1; j < dict->len; j++) { dict->entries[j - 1] = dict->entries[j]; } dict->len--; return 1; } } return 0; }
+static void Dict_string_f64_clear(struct Dict_string_f64 *dict) { for (int i = 0; i < dict->len; i++) { free(dict->entries[i].key); } dict->len = 0; }
+static void Dict_string_f64_free(struct Dict_string_f64 *dict) { Dict_string_f64_clear(dict); free(dict->entries); dict->entries = NULL; dict->cap = 0; }
+
+struct Dict_string_string_entry { char *key; char *value; };
+struct Dict_string_string { struct Dict_string_string_entry *entries; int len; int cap; };
+static struct Dict_string_string Dict_string_string_new(void) { struct Dict_string_string dict; dict.len = 0; dict.cap = 4; dict.entries = malloc(sizeof(struct Dict_string_string_entry) * (size_t)dict.cap); if (!dict.entries) { abort(); } return dict; }
+static void Dict_string_string_reserve_one(struct Dict_string_string *dict) { if (dict->len >= dict->cap) { dict->cap *= 2; dict->entries = realloc(dict->entries, sizeof(struct Dict_string_string_entry) * (size_t)dict->cap); if (!dict->entries) { abort(); } } }
+static void Dict_string_string_add_owned(struct Dict_string_string *dict, const char *key, char *value) { const char *safe_key = key ? key : ""; for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, safe_key) == 0) { free(dict->entries[i].value); dict->entries[i].value = value ? value : glitch_strdup(""); return; } } Dict_string_string_reserve_one(dict); dict->entries[dict->len].key = glitch_strdup(safe_key); dict->entries[dict->len].value = value ? value : glitch_strdup(""); dict->len++; }
+static void Dict_string_string_add(struct Dict_string_string *dict, const char *key, const char *value) { Dict_string_string_add_owned(dict, key, glitch_strdup(value ? value : "")); }
+static int Dict_string_string_contains_key(struct Dict_string_string *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return 1; } } return 0; }
+static char * Dict_string_string_get(struct Dict_string_string *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return dict->entries[i].value; } } abort(); }
+static int Dict_string_string_remove(struct Dict_string_string *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { free(dict->entries[i].key); free(dict->entries[i].value); for (int j = i + 1; j < dict->len; j++) { dict->entries[j - 1] = dict->entries[j]; } dict->len--; return 1; } } return 0; }
+static void Dict_string_string_clear(struct Dict_string_string *dict) { for (int i = 0; i < dict->len; i++) { free(dict->entries[i].key); free(dict->entries[i].value); } dict->len = 0; }
+static void Dict_string_string_free(struct Dict_string_string *dict) { Dict_string_string_clear(dict); free(dict->entries); dict->entries = NULL; dict->cap = 0; }
+
+typedef void (*glitch_thread_entry)(void);
+struct GlitchThread { glitch_thread_entry entry; };
+static struct GlitchThread GlitchThread_new(glitch_thread_entry entry) { struct GlitchThread thread; thread.entry = entry; return thread; }
+static void GlitchThread_start(struct GlitchThread *thread) { thread->entry(); }
+static void GlitchThread_join(struct GlitchThread *thread) { (void)thread; }
+struct GlitchTask { struct GlitchThread thread; };
+static struct GlitchTask GlitchTask_run(glitch_thread_entry entry) { struct GlitchTask task; task.thread = GlitchThread_new(entry); GlitchThread_start(&task.thread); return task; }
+static void GlitchTask_wait(struct GlitchTask *task) { GlitchThread_join(&task->thread); }
+
+typedef int (*glitch_task_i32_entry)(void);
+typedef long long (*glitch_task_i64_entry)(void);
+typedef int (*glitch_task_bool_entry)(void);
+typedef double (*glitch_task_f64_entry)(void);
+typedef char * (*glitch_task_string_entry)(void);
+typedef void * (*glitch_task_ptr_entry)(void);
+struct GlitchTask_bool { int result; };
+struct GlitchTask_i32 { int result; };
+struct GlitchTask_i64 { long long result; };
+struct GlitchTask_f64 { double result; };
+struct GlitchTask_string { char *result; };
+struct GlitchTask_ptr { void *result; };
+static struct GlitchTask_bool GlitchTask_bool_run(glitch_task_bool_entry entry) { struct GlitchTask_bool task; task.result = entry(); return task; }
+static struct GlitchTask_i32 GlitchTask_i32_run(glitch_task_i32_entry entry) { struct GlitchTask_i32 task; task.result = entry(); return task; }
+static struct GlitchTask_i64 GlitchTask_i64_run(glitch_task_i64_entry entry) { struct GlitchTask_i64 task; task.result = entry(); return task; }
+static struct GlitchTask_f64 GlitchTask_f64_run(glitch_task_f64_entry entry) { struct GlitchTask_f64 task; task.result = entry(); return task; }
+static struct GlitchTask_string GlitchTask_string_run(glitch_task_string_entry entry) { struct GlitchTask_string task; task.result = entry(); return task; }
+static struct GlitchTask_ptr GlitchTask_ptr_run(glitch_task_ptr_entry entry) { struct GlitchTask_ptr task; task.result = entry(); return task; }
+static struct GlitchTask_bool GlitchTask_bool_from_result(int result) { struct GlitchTask_bool task; task.result = result; return task; }
+static struct GlitchTask_i32 GlitchTask_i32_from_result(int result) { struct GlitchTask_i32 task; task.result = result; return task; }
+static struct GlitchTask_i64 GlitchTask_i64_from_result(long long result) { struct GlitchTask_i64 task; task.result = result; return task; }
+static struct GlitchTask_f64 GlitchTask_f64_from_result(double result) { struct GlitchTask_f64 task; task.result = result; return task; }
+static struct GlitchTask_string GlitchTask_string_from_result(const char *result) { struct GlitchTask_string task; task.result = glitch_strdup(result ? result : ""); return task; }
+static struct GlitchTask_string GlitchTask_string_from_owned(char *result) { struct GlitchTask_string task; task.result = result; return task; }
+static struct GlitchTask_ptr GlitchTask_ptr_from_result(void *result) { struct GlitchTask_ptr task; task.result = result; return task; }
+static void GlitchTask_bool_wait(struct GlitchTask_bool *task) { (void)task; }
+static void GlitchTask_i32_wait(struct GlitchTask_i32 *task) { (void)task; }
+static void GlitchTask_i64_wait(struct GlitchTask_i64 *task) { (void)task; }
+static void GlitchTask_f64_wait(struct GlitchTask_f64 *task) { (void)task; }
+static void GlitchTask_string_wait(struct GlitchTask_string *task) { (void)task; }
+static void GlitchTask_ptr_wait(struct GlitchTask_ptr *task) { (void)task; }
+static int GlitchTask_bool_result(struct GlitchTask_bool *task) { return task->result; }
+static int GlitchTask_i32_result(struct GlitchTask_i32 *task) { return task->result; }
+static long long GlitchTask_i64_result(struct GlitchTask_i64 *task) { return task->result; }
+static double GlitchTask_f64_result(struct GlitchTask_f64 *task) { return task->result; }
+static char * GlitchTask_string_result(struct GlitchTask_string *task) { char *result = task->result; task->result = NULL; return result; }
+static void * GlitchTask_ptr_result(struct GlitchTask_ptr *task) { return task->result; }
+static void GlitchTask_bool_free(struct GlitchTask_bool *task) { (void)task; }
+static void GlitchTask_i32_free(struct GlitchTask_i32 *task) { (void)task; }
+static void GlitchTask_i64_free(struct GlitchTask_i64 *task) { (void)task; }
+static void GlitchTask_f64_free(struct GlitchTask_f64 *task) { (void)task; }
+static void GlitchTask_string_free(struct GlitchTask_string *task) { free(task->result); task->result = NULL; }
+static void GlitchTask_ptr_free(struct GlitchTask_ptr *task) { task->result = NULL; }
+"#;

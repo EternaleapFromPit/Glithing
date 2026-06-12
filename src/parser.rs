@@ -111,7 +111,8 @@ impl Parser {
                         };
                         let stmt = temp_parser.parse_stmt()?;
                         self.test_registrations.push(stmt);
-                        self.test_registrations.extend(temp_parser.test_registrations);
+                        self.test_registrations
+                            .extend(temp_parser.test_registrations);
                     }
                     continue;
                 }
@@ -181,8 +182,11 @@ impl Parser {
                     .push(self.parse_enum_def(current_namespace.clone(), attributes)?);
             } else {
                 let checkpoint = self.pos;
-                match self.parse_function(current_namespace.clone(), attributes.clone(), modifiers.is_async)
-                {
+                match self.parse_function(
+                    current_namespace.clone(),
+                    attributes.clone(),
+                    modifiers.is_async,
+                ) {
                     Ok(function) => program.functions.push(function),
                     Err(_) => {
                         self.pos = checkpoint;
@@ -438,7 +442,8 @@ impl Parser {
                         };
                         let stmt = temp_parser.parse_stmt()?;
                         self.test_registrations.push(stmt);
-                        self.test_registrations.extend(temp_parser.test_registrations);
+                        self.test_registrations
+                            .extend(temp_parser.test_registrations);
                     }
                     continue;
                 }
@@ -459,7 +464,12 @@ impl Parser {
                 || self.at(&TokenKind::Class)
                 || self.at(&TokenKind::Interface)
             {
-                let nested = self.parse_type_def(namespace.clone(), member_attributes, nested_types, native_c)?;
+                let nested = self.parse_type_def(
+                    namespace.clone(),
+                    member_attributes,
+                    nested_types,
+                    native_c,
+                )?;
                 nested_types.push(nested);
                 continue;
             }
@@ -584,7 +594,9 @@ impl Parser {
                 self.parse_expr()?;
                 self.expect(TokenKind::Semi)?;
             } else {
-                return Err(self.error_here("expected semicolon, arrow, or body for property accessor"));
+                return Err(
+                    self.error_here("expected semicolon, arrow, or body for property accessor")
+                );
             }
         }
         self.expect(TokenKind::RBrace)?;
@@ -1007,9 +1019,13 @@ impl Parser {
         }
         if matches!(self.current().kind, TokenKind::Ident(_)) {
             if let TokenKind::Ident(name) = self.current().kind.clone() {
-                println!("STMT IDENT: {}, peek1: {:?}, peek2: {:?}", name, self.tokens.get(self.pos + 1).map(|t| &t.kind), self.tokens.get(self.pos + 2).map(|t| &t.kind));
-                if self.peek_is(1, &TokenKind::Plus) && self.peek_is(2, &TokenKind::Plus) {
-                    self.advance();
+                println!(
+                    "STMT IDENT: {}, peek1: {:?}, peek2: {:?}",
+                    name,
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    self.tokens.get(self.pos + 2).map(|t| &t.kind)
+                );
+                if self.peek_is(1, &TokenKind::PlusPlus) {
                     self.advance();
                     self.advance();
                     self.expect(TokenKind::Semi)?;
@@ -1022,8 +1038,7 @@ impl Parser {
                         },
                     });
                 }
-                if self.peek_is(1, &TokenKind::Minus) && self.peek_is(2, &TokenKind::Minus) {
-                    self.advance();
+                if self.peek_is(1, &TokenKind::MinusMinus) {
                     self.advance();
                     self.advance();
                     self.expect(TokenKind::Semi)?;
@@ -1118,8 +1133,7 @@ impl Parser {
             });
         }
         if let TokenKind::Ident(name) = self.current().kind.clone() {
-            if self.peek_is(1, &TokenKind::Plus) && self.peek_is(2, &TokenKind::Plus) {
-                self.advance();
+            if self.peek_is(1, &TokenKind::PlusPlus) {
                 self.advance();
                 self.advance();
                 return Ok(Stmt::Assign {
@@ -1131,8 +1145,7 @@ impl Parser {
                     },
                 });
             }
-            if self.peek_is(1, &TokenKind::Minus) && self.peek_is(2, &TokenKind::Minus) {
-                self.advance();
+            if self.peek_is(1, &TokenKind::MinusMinus) {
                 self.advance();
                 self.advance();
                 return Ok(Stmt::Assign {
@@ -1297,12 +1310,25 @@ impl Parser {
     }
 
     fn parse_and(&mut self) -> Result<Expr, String> {
-        let mut expr = self.parse_coalesce()?;
+        let mut expr = self.parse_bit_and()?;
         while self.match_kind(&TokenKind::AmpAmp) {
-            let right = self.parse_coalesce()?;
+            let right = self.parse_bit_and()?;
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op: BinaryOp::And,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_bit_and(&mut self) -> Result<Expr, String> {
+        let mut expr = self.parse_coalesce()?;
+        while self.match_kind(&TokenKind::Amp) {
+            let right = self.parse_coalesce()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::BitAnd,
                 right: Box::new(right),
             };
         }
@@ -1397,11 +1423,20 @@ impl Parser {
 
     fn parse_multiplicative(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_unary()?;
-        while self.match_kind(&TokenKind::Star) {
+        loop {
+            let op = if self.match_kind(&TokenKind::Star) {
+                BinaryOp::Mul
+            } else if self.match_kind(&TokenKind::Slash) {
+                BinaryOp::Div
+            } else if self.match_kind(&TokenKind::Percent) {
+                BinaryOp::Mod
+            } else {
+                break;
+            };
             let right = self.parse_unary()?;
             expr = Expr::Binary {
                 left: Box::new(expr),
-                op: BinaryOp::Mul,
+                op,
                 right: Box::new(right),
             };
         }
@@ -1409,9 +1444,28 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, String> {
+        if self.match_kind(&TokenKind::PlusPlus) || self.match_kind(&TokenKind::MinusMinus) {
+            let delta = if self.previous_is(&TokenKind::PlusPlus) {
+                1
+            } else {
+                -1
+            };
+            let name = self.expect_ident()?;
+            return Ok(Expr::IncDec {
+                name,
+                delta,
+                prefix: true,
+            });
+        }
         if self.match_kind(&TokenKind::Bang) {
             return Ok(Expr::Unary {
                 op: UnaryOp::Not,
+                expr: Box::new(self.parse_unary()?),
+            });
+        }
+        if self.match_kind(&TokenKind::Minus) {
+            return Ok(Expr::Unary {
+                op: UnaryOp::Neg,
                 expr: Box::new(self.parse_unary()?),
             });
         }
@@ -1452,21 +1506,21 @@ impl Parser {
                 }
             } else if self.match_kind(&TokenKind::Bang) {
                 // C# null-forgiving operator is compile-time only.
-            } else if self.at(&TokenKind::Plus) && self.peek_is(1, &TokenKind::Plus) {
-                self.advance();
-                self.advance();
-                expr = Expr::Binary {
-                    left: Box::new(expr),
-                    op: BinaryOp::Add,
-                    right: Box::new(Expr::Int(1)),
+            } else if self.match_kind(&TokenKind::PlusPlus)
+                || self.match_kind(&TokenKind::MinusMinus)
+            {
+                let delta = if self.previous_is(&TokenKind::PlusPlus) {
+                    1
+                } else {
+                    -1
                 };
-            } else if self.at(&TokenKind::Minus) && self.peek_is(1, &TokenKind::Minus) {
-                self.advance();
-                self.advance();
-                expr = Expr::Binary {
-                    left: Box::new(expr),
-                    op: BinaryOp::Sub,
-                    right: Box::new(Expr::Int(1)),
+                let Expr::Var(name) = expr else {
+                    return Err(self.error_here("++ and -- currently require a simple variable"));
+                };
+                expr = Expr::IncDec {
+                    name,
+                    delta,
+                    prefix: false,
                 };
             } else {
                 break;
@@ -2225,12 +2279,22 @@ impl Parser {
                 | TokenKind::LBracket
                 | TokenKind::LBrace
                 | TokenKind::Bang
+                | TokenKind::Minus
+                | TokenKind::PlusPlus
+                | TokenKind::MinusMinus
         )
     }
 
     fn peek_is(&self, offset: usize, kind: &TokenKind) -> bool {
         self.tokens
             .get(self.pos + offset)
+            .is_some_and(|token| token.kind == *kind)
+    }
+
+    fn previous_is(&self, kind: &TokenKind) -> bool {
+        self.pos
+            .checked_sub(1)
+            .and_then(|index| self.tokens.get(index))
             .is_some_and(|token| token.kind == *kind)
     }
 
@@ -2270,15 +2334,21 @@ impl Parser {
             match tok.kind {
                 TokenKind::LParen => paren_level += 1,
                 TokenKind::RParen => {
-                    if paren_level > 0 { paren_level -= 1; }
+                    if paren_level > 0 {
+                        paren_level -= 1;
+                    }
                 }
                 TokenKind::LBrace => brace_level += 1,
                 TokenKind::RBrace => {
-                    if brace_level > 0 { brace_level -= 1; }
+                    if brace_level > 0 {
+                        brace_level -= 1;
+                    }
                 }
                 TokenKind::LBracket => bracket_level += 1,
                 TokenKind::RBracket => {
-                    if bracket_level > 0 { bracket_level -= 1; }
+                    if bracket_level > 0 {
+                        bracket_level -= 1;
+                    }
                 }
                 TokenKind::Semi => {
                     if paren_level == 0 && brace_level == 0 && bracket_level == 0 {
@@ -2295,11 +2365,8 @@ impl Parser {
             self.advance();
         }
 
-        self.macros.insert(name.clone(), MacroDef {
-            name,
-            params,
-            body,
-        });
+        self.macros
+            .insert(name.clone(), MacroDef { name, params, body });
         Ok(())
     }
 
@@ -2500,8 +2567,13 @@ fn token_to_string(tok: &Token) -> String {
         TokenKind::Semi => ";".to_string(),
         TokenKind::Colon => ":".to_string(),
         TokenKind::Plus => "+".to_string(),
+        TokenKind::PlusPlus => "++".to_string(),
         TokenKind::Minus => "-".to_string(),
+        TokenKind::MinusMinus => "--".to_string(),
         TokenKind::Star => "*".to_string(),
+        TokenKind::Slash => "/".to_string(),
+        TokenKind::Percent => "%".to_string(),
+        TokenKind::Amp => "&".to_string(),
         TokenKind::AmpAmp => "&&".to_string(),
         TokenKind::Pipe => "|".to_string(),
         TokenKind::PipePipe => "||".to_string(),

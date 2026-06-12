@@ -227,6 +227,11 @@ pub(crate) enum TypedExprKind {
         op: UnaryOp,
         expr: Box<TypedExpr>,
     },
+    IncDec {
+        name: String,
+        delta: i32,
+        prefix: bool,
+    },
     Binary {
         left: Box<TypedExpr>,
         op: BinaryOp,
@@ -1108,6 +1113,7 @@ fn summarize_typed_expr(expr: &TypedExpr, indent: &str, out: &mut String) {
         TypedExprKind::Unary { expr, .. } => {
             summarize_typed_expr(expr, indent, out);
         }
+        TypedExprKind::IncDec { .. } => {}
         TypedExprKind::NewObject { args, fields, .. } => {
             for arg in args {
                 summarize_typed_expr(arg, indent, out);
@@ -1590,10 +1596,13 @@ impl OwnershipChecker {
                     (IrType::Task(inner), "GetAwaiter") => IrType::Task(inner.clone()),
                     (_, "Contains") | (_, "ContainsKey") | (_, "Remove") => IrType::Bool,
                     (_, "Add") | (_, "Clear") | (_, "Wait") => IrType::Void,
-                    (IrType::Unknown(target) | IrType::Class(target), "Run") if target == "Task" => args
-                        .first()
-                        .map(|arg| IrType::Task(Box::new(arg.ty.clone())))
-                        .unwrap_or_else(|| IrType::Task(Box::new(IrType::Void))),
+                    (IrType::Unknown(target) | IrType::Class(target), "Run")
+                        if target == "Task" =>
+                    {
+                        args.first()
+                            .map(|arg| IrType::Task(Box::new(arg.ty.clone())))
+                            .unwrap_or_else(|| IrType::Task(Box::new(IrType::Void)))
+                    }
                     _ => IrType::Unknown(name.clone()),
                 };
                 CheckedExpr {
@@ -1698,12 +1707,28 @@ impl OwnershipChecker {
                     is_move: false,
                 }
             }
-            Expr::Unary { expr, .. } => {
-                Self::check_expr(expr, env, state)?;
+            Expr::Unary { op, expr } => {
+                let expr = Self::check_expr(expr, env, state)?;
+                let ty = match op {
+                    UnaryOp::Not => IrType::Bool,
+                    UnaryOp::Neg => expr.ty,
+                };
                 CheckedExpr {
-                    ty: IrType::Bool,
+                    ty,
                     ownership: Ownership::Copy,
                     source_var: None,
+                    is_move: false,
+                }
+            }
+            Expr::IncDec { name, .. } => {
+                let ty = state
+                    .get(name)
+                    .map(|var| var.ty.clone())
+                    .unwrap_or_else(|| IrType::Unknown(name.clone()));
+                CheckedExpr {
+                    ty,
+                    ownership: Ownership::Copy,
+                    source_var: Some(name.clone()),
                     is_move: false,
                 }
             }
@@ -2188,6 +2213,7 @@ impl<'a> EndpointHandlerCollector<'a> {
                 self.collect_expr(index)?;
             }
             Expr::Unary { expr, .. } => self.collect_expr(expr)?,
+            Expr::IncDec { .. } => {}
             Expr::Lambda { body, .. } => self.collect_expr(body)?,
             Expr::Conditional {
                 condition,
@@ -3120,10 +3146,7 @@ fn lower_stmt(
     Ok(())
 }
 
-fn find_expected_types(
-    candidates: &[FunctionSignature],
-    args: &[Expr],
-) -> Vec<Option<IrType>> {
+fn find_expected_types(candidates: &[FunctionSignature], args: &[Expr]) -> Vec<Option<IrType>> {
     let mut expected = vec![None; args.len()];
     for sig in candidates {
         if sig.params.len() == args.len() {
@@ -3144,7 +3167,11 @@ fn lower_lambda(
     env: &TypeEnv,
     scopes: &[HashMap<String, TypedBinding>],
 ) -> Result<TypedExpr, String> {
-    let param_types: Vec<IrType> = if let Some(IrType::Function { params: expected_params, .. }) = expected_type {
+    let param_types: Vec<IrType> = if let Some(IrType::Function {
+        params: expected_params,
+        ..
+    }) = expected_type
+    {
         expected_params.iter().cloned().collect()
     } else {
         vec![IrType::Unknown("lambda_param".to_string()); params.len()]
@@ -3188,9 +3215,7 @@ fn lower_call_args(
     for (i, arg) in args.iter().enumerate() {
         let expected = expected_types.get(i).and_then(|x| x.as_ref());
         let typed_arg = match arg {
-            Expr::Lambda { params, body } => {
-                lower_lambda(params, body, expected, env, scopes)?
-            }
+            Expr::Lambda { params, body } => lower_lambda(params, body, expected, env, scopes)?,
             Expr::NamedArg { name: _, expr } => {
                 let inner = match expr.as_ref() {
                     Expr::Lambda { params, body } => {
@@ -3259,11 +3284,7 @@ fn lower_typed_expr_with_expected(
                     TypeKind::Enum => IrType::Int,
                     _ => IrType::Struct(name.clone()),
                 };
-                typed_expr_with_ownership(
-                    TypedExprKind::Var(name.clone()),
-                    ty,
-                    Ownership::Shared,
-                )
+                typed_expr_with_ownership(TypedExprKind::Var(name.clone()), ty, Ownership::Shared)
             } else if name == "Exception" || name == "System.Exception" {
                 typed_expr_with_ownership(
                     TypedExprKind::Var(name.clone()),
@@ -3349,7 +3370,10 @@ fn lower_typed_expr_with_expected(
         }
         Expr::Field { target, name } => {
             let target = lower_typed_expr(target, env, scopes)?;
-            if let IrType::Class(type_name) | IrType::Struct(type_name) | IrType::Interface(type_name) = &target.ty {
+            if let IrType::Class(type_name)
+            | IrType::Struct(type_name)
+            | IrType::Interface(type_name) = &target.ty
+            {
                 let getter_name = format!("get_{name}");
                 if let Some(signature) = env.resolve_method(type_name, &getter_name, &[]) {
                     return Ok(typed_expr(
@@ -3414,7 +3438,10 @@ fn lower_typed_expr_with_expected(
         Expr::MethodCall { target, name, args } => {
             let target = lower_typed_expr(target, env, scopes)?;
             let mut candidates = Vec::new();
-            if let IrType::Class(type_name) | IrType::Struct(type_name) | IrType::Interface(type_name) = &target.ty {
+            if let IrType::Class(type_name)
+            | IrType::Struct(type_name)
+            | IrType::Interface(type_name) = &target.ty
+            {
                 if let Some(sigs) = env.methods.get(&(type_name.clone(), name.clone())) {
                     candidates = sigs.clone();
                 }
@@ -3567,17 +3594,36 @@ fn lower_typed_expr_with_expected(
         }
         Expr::Unary { op, expr } => {
             let expr = lower_typed_expr(expr, env, scopes)?;
+            let ty = match op {
+                UnaryOp::Not => IrType::Bool,
+                UnaryOp::Neg => expr.ty.clone(),
+            };
             typed_expr(
                 TypedExprKind::Unary {
                     op: *op,
                     expr: Box::new(expr),
                 },
-                IrType::Bool,
+                ty,
             )
         }
-        Expr::Lambda { params, body } => {
-            lower_lambda(params, body, expected, env, scopes)?
+        Expr::IncDec {
+            name,
+            delta,
+            prefix,
+        } => {
+            let ty = lookup(scopes, name)
+                .map(|binding| binding.ty)
+                .unwrap_or_else(|| IrType::Unknown(name.clone()));
+            typed_expr(
+                TypedExprKind::IncDec {
+                    name: name.clone(),
+                    delta: *delta,
+                    prefix: *prefix,
+                },
+                ty,
+            )
         }
+        Expr::Lambda { params, body } => lower_lambda(params, body, expected, env, scopes)?,
         Expr::Conditional {
             condition,
             when_true,
@@ -3802,14 +3848,19 @@ fn lower_expr(
                 (IrType::Task(inner), "GetAwaiter") => IrType::Task(inner.clone()),
                 (_, "Contains") | (_, "ContainsKey") | (_, "Remove") => IrType::Bool,
                 (_, "Add") | (_, "Clear") | (_, "Wait") => IrType::Void,
-                (IrType::Unknown(target) | IrType::Class(target), "Run") if target == "Task" => args
-                    .first()
-                    .map(|arg| IrType::Task(Box::new(arg.ty.clone())))
-                    .unwrap_or_else(|| IrType::Task(Box::new(IrType::Void))),
-                (IrType::Unknown(target) | IrType::Class(target), "ReadAllText") if target == "File" || target == "System.IO.File" => {
+                (IrType::Unknown(target) | IrType::Class(target), "Run") if target == "Task" => {
+                    args.first()
+                        .map(|arg| IrType::Task(Box::new(arg.ty.clone())))
+                        .unwrap_or_else(|| IrType::Task(Box::new(IrType::Void)))
+                }
+                (IrType::Unknown(target) | IrType::Class(target), "ReadAllText")
+                    if target == "File" || target == "System.IO.File" =>
+                {
                     IrType::String
                 }
-                (IrType::Unknown(target) | IrType::Class(target), "WriteAllText") if target == "File" || target == "System.IO.File" => {
+                (IrType::Unknown(target) | IrType::Class(target), "WriteAllText")
+                    if target == "File" || target == "System.IO.File" =>
+                {
                     IrType::Void
                 }
                 _ => IrType::Unknown(name.clone()),
@@ -4146,25 +4197,33 @@ fn resolve_method_call(
                 CallResolution::StaticFunction,
             ))
         }
-        (IrType::Unknown(target) | IrType::Class(target), "ReadAllText") if target == "File" || target == "System.IO.File" => {
+        (IrType::Unknown(target) | IrType::Class(target), "ReadAllText")
+            if target == "File" || target == "System.IO.File" =>
+        {
             Ok((
                 IrType::String,
                 "System_IO_File_ReadAllText".to_string(),
                 CallResolution::StaticFunction,
             ))
         }
-        (IrType::Unknown(target) | IrType::Class(target), "WriteAllText") if target == "File" || target == "System.IO.File" => {
+        (IrType::Unknown(target) | IrType::Class(target), "WriteAllText")
+            if target == "File" || target == "System.IO.File" =>
+        {
             Ok((
                 IrType::Void,
                 "System_IO_File_WriteAllText".to_string(),
                 CallResolution::StaticFunction,
             ))
         }
-        (IrType::Unknown(target) | IrType::Class(target), "WriteLine") if target == "Console" || target == "System.Console" => {
+        (IrType::Unknown(target) | IrType::Class(target), "WriteLine")
+            if target == "Console" || target == "System.Console" =>
+        {
             let arg_ty = args.first().map(|arg| &arg.ty).unwrap_or(&IrType::Void);
             let symbol = match arg_ty {
                 IrType::String => "System_Console_WriteLine_String",
-                IrType::Byte | IrType::Short | IrType::Int | IrType::Long | IrType::UInt => "System_Console_WriteLine_I64",
+                IrType::Byte | IrType::Short | IrType::Int | IrType::Long | IrType::UInt => {
+                    "System_Console_WriteLine_I64"
+                }
                 IrType::Double => "System_Console_WriteLine_Double",
                 IrType::Bool => "System_Console_WriteLine_Bool",
                 _ => "System_Console_WriteLine_String",
@@ -4175,7 +4234,10 @@ fn resolve_method_call(
                 CallResolution::StaticFunction,
             ))
         }
-        (IrType::Class(type_name) | IrType::Struct(type_name) | IrType::Interface(type_name), method_name) => {
+        (
+            IrType::Class(type_name) | IrType::Struct(type_name) | IrType::Interface(type_name),
+            method_name,
+        ) => {
             if let Some(signature) = env.resolve_method_call(type_name, method_name, args)? {
                 Ok((
                     signature.return_type.clone(),
@@ -4200,11 +4262,9 @@ fn resolve_method_call(
             name.to_string(),
             CallResolution::TaskMethod,
         )),
-        (IrType::Weak(_), "TryGetTarget") => Ok((
-            IrType::Bool,
-            name.to_string(),
-            CallResolution::WeakMethod,
-        )),
+        (IrType::Weak(_), "TryGetTarget") => {
+            Ok((IrType::Bool, name.to_string(), CallResolution::WeakMethod))
+        }
         (IrType::List(_), "Contains") | (IrType::Dictionary(_, _), "ContainsKey" | "Remove") => {
             Ok((
                 IrType::Bool,
@@ -4229,7 +4289,10 @@ fn resolve_method_call(
 fn type_syntax_to_ir(ty: &TypeSyntax, env: &TypeEnv) -> IrType {
     match ty {
         TypeSyntax::GenericNamed { name, args }
-            if name == "own" || name == "borrow" || name == "System.Ownership.own" || name == "System.Ownership.borrow" =>
+            if name == "own"
+                || name == "borrow"
+                || name == "System.Ownership.own"
+                || name == "System.Ownership.borrow" =>
         {
             if let Some(first_arg) = args.first() {
                 type_syntax_to_ir(first_arg, env)
@@ -4266,9 +4329,7 @@ fn type_syntax_to_ir(ty: &TypeSyntax, env: &TypeEnv) -> IrType {
                 IrType::Weak(Box::new(IrType::Unknown("T".to_string())))
             }
         }
-        TypeSyntax::GenericNamed { name, args }
-            if name == "Func" || name == "System.Func" =>
-        {
+        TypeSyntax::GenericNamed { name, args } if name == "Func" || name == "System.Func" => {
             if args.is_empty() {
                 IrType::Function {
                     params: vec![],
@@ -4276,14 +4337,18 @@ fn type_syntax_to_ir(ty: &TypeSyntax, env: &TypeEnv) -> IrType {
                 }
             } else {
                 let (params_args, ret_arg) = args.split_at(args.len() - 1);
-                let params = params_args.iter().map(|arg| type_syntax_to_ir(arg, env)).collect();
+                let params = params_args
+                    .iter()
+                    .map(|arg| type_syntax_to_ir(arg, env))
+                    .collect();
                 let return_type = Box::new(type_syntax_to_ir(&ret_arg[0], env));
-                IrType::Function { params, return_type }
+                IrType::Function {
+                    params,
+                    return_type,
+                }
             }
         }
-        TypeSyntax::GenericNamed { name, args }
-            if name == "Action" || name == "System.Action" =>
-        {
+        TypeSyntax::GenericNamed { name, args } if name == "Action" || name == "System.Action" => {
             let params = args.iter().map(|arg| type_syntax_to_ir(arg, env)).collect();
             IrType::Function {
                 params,

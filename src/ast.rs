@@ -232,6 +232,11 @@ pub(crate) enum Expr {
         op: UnaryOp,
         expr: Box<Expr>,
     },
+    IncDec {
+        name: String,
+        delta: i32,
+        prefix: bool,
+    },
     Binary {
         left: Box<Expr>,
         op: BinaryOp,
@@ -250,6 +255,7 @@ pub(crate) enum Expr {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UnaryOp {
     Not,
+    Neg,
 }
 
 #[derive(Debug, Clone)]
@@ -263,9 +269,12 @@ pub(crate) enum BinaryOp {
     Add,
     Sub,
     Mul,
+    Div,
+    Mod,
     Coalesce,
     And,
     Or,
+    BitAnd,
     BitOr,
     Eq,
     NotEq,
@@ -281,9 +290,12 @@ impl BinaryOp {
             BinaryOp::Add => "+",
             BinaryOp::Sub => "-",
             BinaryOp::Mul => "*",
+            BinaryOp::Div => "/",
+            BinaryOp::Mod => "%",
             BinaryOp::Coalesce => "??",
             BinaryOp::And => "&&",
             BinaryOp::Or => "||",
+            BinaryOp::BitAnd => "&",
             BinaryOp::BitOr => "|",
             BinaryOp::Eq => "==",
             BinaryOp::NotEq => "!=",
@@ -297,7 +309,14 @@ impl BinaryOp {
     pub(crate) fn is_comparison(self) -> bool {
         !matches!(
             self,
-            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Coalesce | BinaryOp::BitOr
+            BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Mod
+                | BinaryOp::Coalesce
+                | BinaryOp::BitAnd
+                | BinaryOp::BitOr
         )
     }
 }

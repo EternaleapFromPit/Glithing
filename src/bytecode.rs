@@ -335,6 +335,14 @@ impl BytecodeEmitter {
                 self.emit_expr(expr);
                 self.out.push_str(&format!("  unary {:?}\n", op));
             }
+            Expr::IncDec {
+                name,
+                delta,
+                prefix,
+            } => {
+                self.out
+                    .push_str(&format!("  incdec {name} {delta} {prefix}\n"));
+            }
             Expr::Binary { left, op, right } => {
                 self.emit_expr(left);
                 self.emit_expr(right);

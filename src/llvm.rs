@@ -502,7 +502,7 @@ impl LlvmEmitter {
               %val = ptrtoint ptr %ptr to i64\n\
               %res = bitcast i64 %val to double\n\
               ret double %res\n\
-            }\n"
+            }\n",
         );
         out.push_str(
             "define ptr @glitch_calloc(i64 %count, i64 %size) {\nentry:\n  %value = call ptr @calloc(i64 %count, i64 %size)\n  %is_null = icmp eq ptr %value, null\n  br i1 %is_null, label %done, label %count_alloc\ncount_alloc:\n  %live = load i64, ptr @glitch_live_allocations\n  %next = add i64 %live, 1\n  store i64 %next, ptr @glitch_live_allocations\n  br label %done\ndone:\n  ret ptr %value\n}\n",
@@ -1212,9 +1212,12 @@ impl LlvmEmitter {
                             BinaryOp::Add
                             | BinaryOp::Sub
                             | BinaryOp::Mul
+                            | BinaryOp::Div
+                            | BinaryOp::Mod
                             | BinaryOp::Coalesce
                             | BinaryOp::And
                             | BinaryOp::Or
+                            | BinaryOp::BitAnd
                             | BinaryOp::BitOr => unreachable!(),
                         };
                         self.body.push_str(&format!(
@@ -1232,9 +1235,12 @@ impl LlvmEmitter {
                             BinaryOp::Add
                             | BinaryOp::Sub
                             | BinaryOp::Mul
+                            | BinaryOp::Div
+                            | BinaryOp::Mod
                             | BinaryOp::Coalesce
                             | BinaryOp::And
                             | BinaryOp::Or
+                            | BinaryOp::BitAnd
                             | BinaryOp::BitOr => unreachable!(),
                         };
                         self.body.push_str(&format!(
@@ -1248,9 +1254,27 @@ impl LlvmEmitter {
                         value: tmp,
                         ty: LlType::I1,
                     })
-                } else if left.ty == LlType::Double {
+                } else if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr) {
+                    let op_name = if *op == BinaryOp::BitAnd { "and" } else { "or" };
                     self.body.push_str(&format!(
-                        "  {tmp} = fadd double {}, {}\n",
+                        "  {tmp} = {op_name} {} {}, {}\n",
+                        left.ty.as_ir(),
+                        left.value, right.value
+                    ));
+                    Ok(LlValue {
+                        value: tmp,
+                        ty: left.ty,
+                    })
+                } else if left.ty == LlType::Double {
+                    let op_name = match op {
+                        BinaryOp::Sub => "fsub",
+                        BinaryOp::Mul => "fmul",
+                        BinaryOp::Div => "fdiv",
+                        BinaryOp::Mod => "frem",
+                        _ => "fadd",
+                    };
+                    self.body.push_str(&format!(
+                        "  {tmp} = {op_name} double {}, {}\n",
                         left.value, right.value
                     ));
                     Ok(LlValue {
@@ -1258,8 +1282,15 @@ impl LlvmEmitter {
                         ty: LlType::Double,
                     })
                 } else {
+                    let op_name = match op {
+                        BinaryOp::Sub => "sub",
+                        BinaryOp::Mul => "mul",
+                        BinaryOp::Div => "sdiv",
+                        BinaryOp::Mod => "srem",
+                        _ => "add",
+                    };
                     self.body.push_str(&format!(
-                        "  {tmp} = add {} {}, {}\n",
+                        "  {tmp} = {op_name} {} {}, {}\n",
                         left.ty.as_ir(),
                         left.value,
                         right.value
@@ -1274,8 +1305,14 @@ impl LlvmEmitter {
                 let value = self.emit_expr(expr)?;
                 match op {
                     UnaryOp::Not => self.emit_not_value(value),
+                    UnaryOp::Neg => self.emit_neg_value(value),
                 }
             }
+            Expr::IncDec {
+                name,
+                delta,
+                prefix,
+            } => self.emit_inc_dec_value(name, *delta, *prefix),
             Expr::IsPattern { expr, .. } => {
                 let _ = self.emit_expr(expr);
                 Ok(LlValue {
@@ -1523,8 +1560,11 @@ impl LlvmEmitter {
                 let ptr = self.emit_field_ptr(expr)?;
                 let ty = llvm_ir_type(&expr.ty);
                 let value = self.tmp();
-                self.body
-                    .push_str(&format!("  {value} = load {}, ptr {}\n", ty.as_ir(), ptr.value));
+                self.body.push_str(&format!(
+                    "  {value} = load {}, ptr {}\n",
+                    ty.as_ir(),
+                    ptr.value
+                ));
                 Ok(LlValue { value, ty })
             }
             TypedExprKind::IsPattern {
@@ -1647,11 +1687,15 @@ impl LlvmEmitter {
                 let value = self.emit_typed_expr(expr)?;
                 match op {
                     UnaryOp::Not => self.emit_not_value(value),
+                    UnaryOp::Neg => self.emit_neg_value(value),
                 }
             }
-            TypedExprKind::Lambda { params, body } => {
-                self.emit_lambda_function(params, body)
-            }
+            TypedExprKind::IncDec {
+                name,
+                delta,
+                prefix,
+            } => self.emit_inc_dec_value(name, *delta, *prefix),
+            TypedExprKind::Lambda { params, body } => self.emit_lambda_function(params, body),
             TypedExprKind::Conditional {
                 condition,
                 when_true,
@@ -1707,184 +1751,137 @@ impl LlvmEmitter {
                     }
                 }
                 match &call.kind {
-                TypedCallKind::Function { name, symbol } => {
-                    if matches!(
-                        name.as_str(),
-                        "Ok" | "Created" | "CreatedAtAction" | "Accepted"
-                    ) {
-                        return self.emit_mvc_result_value(name, &call.args);
-                    }
-                    if matches!(name.as_str(), "NoContent" | "NotFound" | "BadRequest") {
-                        for arg in &call.args {
-                            let value = self.emit_typed_expr(arg)?;
-                            self.emit_temporary_drop(arg, &value);
+                    TypedCallKind::Function { name, symbol } => {
+                        if matches!(
+                            name.as_str(),
+                            "Ok" | "Created" | "CreatedAtAction" | "Accepted"
+                        ) {
+                            return self.emit_mvc_result_value(name, &call.args);
                         }
-                        return Ok(LlValue {
-                            value: self.string_global(""),
-                            ty: LlType::Ptr,
-                        });
-                    }
-                    if name == "GlitchRestHost_Run" || symbol == "GlitchRestHost_Run" {
-                        return self.emit_rest_host_run(&call.args);
-                    }
-                    if name == "glitch_register_attribute_routes"
-                        || symbol == "glitch_register_attribute_routes"
-                    {
-                        for arg in &call.args {
-                            let value = self.emit_typed_expr(arg)?;
-                            self.emit_temporary_drop(arg, &value);
+                        if matches!(name.as_str(), "NoContent" | "NotFound" | "BadRequest") {
+                            for arg in &call.args {
+                                let value = self.emit_typed_expr(arg)?;
+                                self.emit_temporary_drop(arg, &value);
+                            }
+                            return Ok(LlValue {
+                                value: self.string_global(""),
+                                ty: LlType::Ptr,
+                            });
                         }
-                        return Ok(void_value());
-                    }
-                    if name == "GlitchEndpointHandlers_Contains"
-                        || symbol == "GlitchEndpointHandlers_Contains"
-                    {
-                        return self.emit_generated_endpoint_call(
-                            "glitch_endpoint_handlers_contains",
-                            &call.args,
-                            LlType::I1,
-                        );
-                    }
-                    if name == "GlitchEndpointHandlers_Invoke"
-                        || symbol == "GlitchEndpointHandlers_Invoke"
-                    {
-                        return self.emit_generated_endpoint_call(
-                            "glitch_endpoint_handlers_invoke",
-                            &call.args,
-                            LlType::Ptr,
-                        );
-                    }
-                    if name == "GlitchMiddlewareHandlers_Apply"
-                        || symbol == "GlitchMiddlewareHandlers_Apply"
-                    {
-                        let [app, text] = call.args.as_slice() else {
-                            return Err(
+                        if name == "GlitchRestHost_Run" || symbol == "GlitchRestHost_Run" {
+                            return self.emit_rest_host_run(&call.args);
+                        }
+                        if name == "glitch_register_attribute_routes"
+                            || symbol == "glitch_register_attribute_routes"
+                        {
+                            for arg in &call.args {
+                                let value = self.emit_typed_expr(arg)?;
+                                self.emit_temporary_drop(arg, &value);
+                            }
+                            return Ok(void_value());
+                        }
+                        if name == "GlitchEndpointHandlers_Contains"
+                            || symbol == "GlitchEndpointHandlers_Contains"
+                        {
+                            return self.emit_generated_endpoint_call(
+                                "glitch_endpoint_handlers_contains",
+                                &call.args,
+                                LlType::I1,
+                            );
+                        }
+                        if name == "GlitchEndpointHandlers_Invoke"
+                            || symbol == "GlitchEndpointHandlers_Invoke"
+                        {
+                            return self.emit_generated_endpoint_call(
+                                "glitch_endpoint_handlers_invoke",
+                                &call.args,
+                                LlType::Ptr,
+                            );
+                        }
+                        if name == "GlitchMiddlewareHandlers_Apply"
+                            || symbol == "GlitchMiddlewareHandlers_Apply"
+                        {
+                            let [app, text] = call.args.as_slice() else {
+                                return Err(
                                 "LLVM TIR backend: GlitchMiddlewareHandlers_Apply expects app and text"
                                     .to_string(),
                             );
-                        };
-                        let app_value = self.emit_typed_expr(app)?;
-                        let text_value = self.emit_typed_expr(text)?;
-                        self.emit_temporary_drop(app, &app_value);
-                        return self.cast_value(text_value, &LlType::Ptr);
-                    }
-                    if self.functions.contains_key(symbol) {
-                        self.emit_typed_function_call(symbol, &call.args)
-                    } else if self.vars.contains_key(symbol) {
-                        let var = self.vars.get(symbol).unwrap().clone();
-                        let delegate_ptr = self.tmp();
-                        self.body.push_str(&format!(
-                            "  {} = load ptr, ptr {}\n",
-                            delegate_ptr, var.ptr
-                        ));
-                        let fn_ptr_addr = self.tmp();
-                        self.body.push_str(&format!(
+                            };
+                            let app_value = self.emit_typed_expr(app)?;
+                            let text_value = self.emit_typed_expr(text)?;
+                            self.emit_temporary_drop(app, &app_value);
+                            return self.cast_value(text_value, &LlType::Ptr);
+                        }
+                        if self.functions.contains_key(symbol) {
+                            self.emit_typed_function_call(symbol, &call.args)
+                        } else if self.vars.contains_key(symbol) {
+                            let var = self.vars.get(symbol).unwrap().clone();
+                            let delegate_ptr = self.tmp();
+                            self.body.push_str(&format!(
+                                "  {} = load ptr, ptr {}\n",
+                                delegate_ptr, var.ptr
+                            ));
+                            let fn_ptr_addr = self.tmp();
+                            self.body.push_str(&format!(
                             "  {} = getelementptr inbounds {{ ptr, ptr }}, ptr {}, i32 0, i32 0\n",
                             fn_ptr_addr, delegate_ptr
                         ));
-                        let fn_ptr = self.tmp();
-                        self.body.push_str(&format!(
-                            "  {} = load ptr, ptr {}\n",
-                            fn_ptr, fn_ptr_addr
-                        ));
-                        let env_ptr_addr = self.tmp();
-                        self.body.push_str(&format!(
+                            let fn_ptr = self.tmp();
+                            self.body.push_str(&format!(
+                                "  {} = load ptr, ptr {}\n",
+                                fn_ptr, fn_ptr_addr
+                            ));
+                            let env_ptr_addr = self.tmp();
+                            self.body.push_str(&format!(
                             "  {} = getelementptr inbounds {{ ptr, ptr }}, ptr {}, i32 0, i32 1\n",
                             env_ptr_addr, delegate_ptr
                         ));
-                        let env_ptr = self.tmp();
-                        self.body.push_str(&format!(
-                            "  {} = load ptr, ptr {}\n",
-                            env_ptr, env_ptr_addr
-                        ));
-                        let mut arg_vals = Vec::new();
-                        arg_vals.push(format!("ptr {env_ptr}"));
-                        for arg in &call.args {
-                            let val = self.emit_typed_expr(arg)?;
-                            arg_vals.push(format!("{} {}", val.ty.as_ir(), val.value));
-                        }
-                        let result_reg = self.tmp();
-                        let ret_ty = llvm_ir_type(&expr.ty);
-                        self.body.push_str(&format!(
-                            "  {} = call {} {}({})\n",
-                            result_reg,
-                            ret_ty.as_ir(),
-                            fn_ptr,
-                            arg_vals.join(", ")
-                        ));
-                        Ok(LlValue {
-                            value: result_reg,
-                            ty: ret_ty,
-                        })
-                    } else {
-                        self.emit_opaque_call(None, &call.args, &expr.ty)
-                    }
-                }
-                TypedCallKind::Method {
-                    target,
-                    name,
-                    symbol,
-                    resolution,
-                } => match resolution {
-                    CallResolution::InstanceMethod => {
-                        let resolved_symbol = match &target.ty {
-                            IrType::Interface(interface_name) => self
-                                .resolve_interface_method_symbol(
-                                    interface_name,
-                                    name,
-                                    call.args.len(),
-                                )
-                                .unwrap_or_else(|| symbol.clone()),
-                            _ => symbol.clone(),
-                        };
-                        if self.functions.contains_key(&resolved_symbol) {
-                            let receiver = self.emit_typed_expr(target)?;
-                            let result = self.emit_typed_call(
-                                &resolved_symbol,
-                                std::iter::once(receiver.clone()),
-                                &call.args,
-                            )?;
-                            self.emit_temporary_drop(target, &receiver);
-                            Ok(result)
-                        } else {
-                            self.emit_opaque_call(Some(target), &call.args, &expr.ty)
-                        }
-                    }
-                    CallResolution::StaticFunction => {
-                        if self.functions.contains_key(symbol) {
-                            self.emit_typed_function_call(symbol, &call.args)
-                        } else {
-                            self.emit_opaque_call(Some(target), &call.args, &expr.ty)
-                        }
-                    }
-                    CallResolution::CollectionMethod => {
-                        self.emit_collection_method(target, name, &call.args)
-                    }
-                    CallResolution::TaskMethod => {
-                        self.emit_task_method(target, name, &call.args, &expr.ty)
-                    }
-                    CallResolution::WeakMethod => {
-                        self.emit_weak_method(target, name, &call.args)
-                    }
-                    CallResolution::EndpointHandlerRegistration { .. } => {
-                        let receiver = self.emit_typed_expr(target)?;
-                        for arg in &call.args {
-                            if matches!(arg.kind, TypedExprKind::FunctionSymbol(_)) {
-                                continue;
+                            let env_ptr = self.tmp();
+                            self.body.push_str(&format!(
+                                "  {} = load ptr, ptr {}\n",
+                                env_ptr, env_ptr_addr
+                            ));
+                            let mut arg_vals = Vec::new();
+                            arg_vals.push(format!("ptr {env_ptr}"));
+                            for arg in &call.args {
+                                let val = self.emit_typed_expr(arg)?;
+                                arg_vals.push(format!("{} {}", val.ty.as_ir(), val.value));
                             }
-                            let value = self.emit_typed_expr(arg)?;
-                            self.emit_temporary_drop(arg, &value);
+                            let result_reg = self.tmp();
+                            let ret_ty = llvm_ir_type(&expr.ty);
+                            self.body.push_str(&format!(
+                                "  {} = call {} {}({})\n",
+                                result_reg,
+                                ret_ty.as_ir(),
+                                fn_ptr,
+                                arg_vals.join(", ")
+                            ));
+                            Ok(LlValue {
+                                value: result_reg,
+                                ty: ret_ty,
+                            })
+                        } else {
+                            self.emit_opaque_call(None, &call.args, &expr.ty)
                         }
-                        self.emit_temporary_drop(target, &receiver);
-                        Ok(void_value())
                     }
-                    CallResolution::Unknown => {
-                        if let IrType::Interface(interface_name) = &target.ty {
-                            if let Some(resolved_symbol) = self.resolve_interface_method_symbol(
-                                interface_name,
-                                name,
-                                call.args.len(),
-                            ) {
+                    TypedCallKind::Method {
+                        target,
+                        name,
+                        symbol,
+                        resolution,
+                    } => match resolution {
+                        CallResolution::InstanceMethod => {
+                            let resolved_symbol = match &target.ty {
+                                IrType::Interface(interface_name) => self
+                                    .resolve_interface_method_symbol(
+                                        interface_name,
+                                        name,
+                                        call.args.len(),
+                                    )
+                                    .unwrap_or_else(|| symbol.clone()),
+                                _ => symbol.clone(),
+                            };
+                            if self.functions.contains_key(&resolved_symbol) {
                                 let receiver = self.emit_typed_expr(target)?;
                                 let result = self.emit_typed_call(
                                     &resolved_symbol,
@@ -1892,14 +1889,61 @@ impl LlvmEmitter {
                                     &call.args,
                                 )?;
                                 self.emit_temporary_drop(target, &receiver);
-                                return Ok(result);
+                                Ok(result)
+                            } else {
+                                self.emit_opaque_call(Some(target), &call.args, &expr.ty)
                             }
                         }
-                        self.emit_opaque_call(Some(target), &call.args, &expr.ty)
-                    }
-                },
+                        CallResolution::StaticFunction => {
+                            if self.functions.contains_key(symbol) {
+                                self.emit_typed_function_call(symbol, &call.args)
+                            } else {
+                                self.emit_opaque_call(Some(target), &call.args, &expr.ty)
+                            }
+                        }
+                        CallResolution::CollectionMethod => {
+                            self.emit_collection_method(target, name, &call.args)
+                        }
+                        CallResolution::TaskMethod => {
+                            self.emit_task_method(target, name, &call.args, &expr.ty)
+                        }
+                        CallResolution::WeakMethod => {
+                            self.emit_weak_method(target, name, &call.args)
+                        }
+                        CallResolution::EndpointHandlerRegistration { .. } => {
+                            let receiver = self.emit_typed_expr(target)?;
+                            for arg in &call.args {
+                                if matches!(arg.kind, TypedExprKind::FunctionSymbol(_)) {
+                                    continue;
+                                }
+                                let value = self.emit_typed_expr(arg)?;
+                                self.emit_temporary_drop(arg, &value);
+                            }
+                            self.emit_temporary_drop(target, &receiver);
+                            Ok(void_value())
+                        }
+                        CallResolution::Unknown => {
+                            if let IrType::Interface(interface_name) = &target.ty {
+                                if let Some(resolved_symbol) = self.resolve_interface_method_symbol(
+                                    interface_name,
+                                    name,
+                                    call.args.len(),
+                                ) {
+                                    let receiver = self.emit_typed_expr(target)?;
+                                    let result = self.emit_typed_call(
+                                        &resolved_symbol,
+                                        std::iter::once(receiver.clone()),
+                                        &call.args,
+                                    )?;
+                                    self.emit_temporary_drop(target, &receiver);
+                                    return Ok(result);
+                                }
+                            }
+                            self.emit_opaque_call(Some(target), &call.args, &expr.ty)
+                        }
+                    },
+                }
             }
-        },
             TypedExprKind::Borrow { name, .. } => {
                 if !self.vars.contains_key(name) {
                     let inner_type = match &expr.ty {
@@ -1961,7 +2005,7 @@ impl LlvmEmitter {
                 let id = self.lambda_id;
                 self.lambda_id += 1;
                 let wrapper_name = format!("glitch_delegate_wrapper_{name}_{id}");
-                
+
                 let (ret_ty, params) = if let Some(sig) = self.functions.get(name) {
                     (sig.return_type.clone(), sig.params.clone())
                 } else {
@@ -2007,10 +2051,8 @@ impl LlvmEmitter {
 
                 // Allocate the delegate struct on the stack of the current function.
                 let delegate_ptr = self.tmp();
-                self.body.push_str(&format!(
-                    "  {} = alloca {{ ptr, ptr }}\n",
-                    delegate_ptr
-                ));
+                self.body
+                    .push_str(&format!("  {} = alloca {{ ptr, ptr }}\n", delegate_ptr));
                 let fn_field = self.tmp();
                 self.body.push_str(&format!(
                     "  {} = getelementptr inbounds {{ ptr, ptr }}, ptr {}, i32 0, i32 0\n",
@@ -2025,10 +2067,8 @@ impl LlvmEmitter {
                     "  {} = getelementptr inbounds {{ ptr, ptr }}, ptr {}, i32 0, i32 1\n",
                     env_field, delegate_ptr
                 ));
-                self.body.push_str(&format!(
-                    "  store ptr null, ptr {}\n",
-                    env_field
-                ));
+                self.body
+                    .push_str(&format!("  store ptr null, ptr {}\n", env_field));
 
                 Ok(LlValue {
                     value: delegate_ptr,
@@ -2627,19 +2667,17 @@ impl LlvmEmitter {
             return Err("Task.Run expects exactly one argument".to_string());
         };
         let worker_val = self.emit_typed_expr(worker_expr)?;
-        
+
         let result_ty = match return_type {
             IrType::Task(inner) => inner.as_ref().clone(),
             _ => IrType::Void,
         };
-        
+
         let result_llvm_type = llvm_ir_type(&result_ty);
-        
+
         if matches!(result_ty, IrType::Void) {
-            self.body.push_str(&format!(
-                "  call void {}()\n",
-                worker_val.value
-            ));
+            self.body
+                .push_str(&format!("  call void {}()\n", worker_val.value));
             let task_ptr = self.tmp();
             self.body.push_str(&format!(
                 "  {} = call ptr @glitch_task_from_result_ptr(ptr null)\n",
@@ -2657,7 +2695,7 @@ impl LlvmEmitter {
                 result_llvm_type.as_ir(),
                 worker_val.value
             ));
-            
+
             let task_ptr = self.tmp();
             let helper_name = match &result_ty {
                 IrType::Int | IrType::UInt => "glitch_task_from_result_i32",
@@ -2688,12 +2726,12 @@ impl LlvmEmitter {
             return Err("Task.FromResult expects exactly one argument".to_string());
         };
         let value_val = self.emit_typed_expr(val_expr)?;
-        
+
         let result_ty = match return_type {
             IrType::Task(inner) => inner.as_ref().clone(),
             _ => IrType::Void,
         };
-        
+
         let result_llvm_type = llvm_ir_type(&result_ty);
         let task_ptr = self.tmp();
         let helper_name = match &result_ty {
@@ -2702,7 +2740,7 @@ impl LlvmEmitter {
             IrType::Double | IrType::Decimal => "glitch_task_from_result_double",
             _ => "glitch_task_from_result_ptr",
         };
-        
+
         self.body.push_str(&format!(
             "  {} = call ptr @{}({} {})\n",
             task_ptr,
@@ -2710,7 +2748,7 @@ impl LlvmEmitter {
             result_llvm_type.as_ir(),
             value_val.value
         ));
-        
+
         Ok(LlValue {
             value: task_ptr,
             ty: LlType::Ptr,
@@ -2817,7 +2855,9 @@ impl LlvmEmitter {
                 }
             }
         } else {
-            Err(format!("LLVM TIR backend: unsupported Task method '{name}'"))
+            Err(format!(
+                "LLVM TIR backend: unsupported Task method '{name}'"
+            ))
         }
     }
 
@@ -3655,8 +3695,10 @@ impl LlvmEmitter {
         // Bind explicit params into alloca slots.
         for p in params {
             let ptr = self.tmp();
-            self.body
-                .push_str(&format!("  {ptr} = alloca ptr\n  store ptr %{}, ptr {ptr}\n", sanitize(p)));
+            self.body.push_str(&format!(
+                "  {ptr} = alloca ptr\n  store ptr %{}, ptr {ptr}\n",
+                sanitize(p)
+            ));
             self.vars.insert(
                 p.clone(),
                 LlVar {
@@ -3671,7 +3713,8 @@ impl LlvmEmitter {
         // Bind captured vars: load them from the environment pointer.
         for (i, (name, lv)) in free_vars.iter().enumerate() {
             let ptr = self.tmp();
-            self.body.push_str(&format!("  {ptr} = alloca {}\n", lv.ty.as_ir()));
+            self.body
+                .push_str(&format!("  {ptr} = alloca {}\n", lv.ty.as_ir()));
             let field_ptr = self.tmp();
             self.body.push_str(&format!(
                 "  {} = getelementptr inbounds %{}, ptr %env, i32 0, i32 {}\n",
@@ -3680,11 +3723,15 @@ impl LlvmEmitter {
             let loaded_val = self.tmp();
             self.body.push_str(&format!(
                 "  {} = load {}, ptr {}\n",
-                loaded_val, lv.ty.as_ir(), field_ptr
+                loaded_val,
+                lv.ty.as_ir(),
+                field_ptr
             ));
             self.body.push_str(&format!(
                 "  store {} {}, ptr {}\n",
-                lv.ty.as_ir(), loaded_val, ptr
+                lv.ty.as_ir(),
+                loaded_val,
+                ptr
             ));
             self.vars.insert(
                 name.clone(),
@@ -3743,10 +3790,8 @@ impl LlvmEmitter {
 
         // Build the delegate struct `{ ptr fn_ptr, ptr env_ptr }` on the stack.
         let delegate_ptr = self.tmp();
-        self.body.push_str(&format!(
-            "  {} = alloca {{ ptr, ptr }}\n",
-            delegate_ptr
-        ));
+        self.body
+            .push_str(&format!("  {} = alloca {{ ptr, ptr }}\n", delegate_ptr));
 
         // Store fn_ptr
         let fn_field = self.tmp();
@@ -3754,10 +3799,8 @@ impl LlvmEmitter {
             "  {} = getelementptr inbounds {{ ptr, ptr }}, ptr {}, i32 0, i32 0\n",
             fn_field, delegate_ptr
         ));
-        self.body.push_str(&format!(
-            "  store ptr @{}, ptr {}\n",
-            fn_name, fn_field
-        ));
+        self.body
+            .push_str(&format!("  store ptr @{}, ptr {}\n", fn_name, fn_field));
 
         // Store env_ptr
         let env_field = self.tmp();
@@ -3767,24 +3810,22 @@ impl LlvmEmitter {
         ));
 
         if free_vars.is_empty() {
-            self.body.push_str(&format!(
-                "  store ptr null, ptr {}\n",
-                env_field
-            ));
+            self.body
+                .push_str(&format!("  store ptr null, ptr {}\n", env_field));
         } else {
             // Allocate the environment struct on the stack and store captures.
             let env_ptr = self.tmp();
-            self.body.push_str(&format!(
-                "  {} = alloca %{}\n",
-                env_ptr, env_struct_name
-            ));
+            self.body
+                .push_str(&format!("  {} = alloca %{}\n", env_ptr, env_struct_name));
 
             for (i, (name, lv)) in free_vars.iter().enumerate() {
                 if let Some(var) = self.vars.get(name).cloned() {
                     let cap_val = self.tmp();
                     self.body.push_str(&format!(
                         "  {} = load {}, ptr {}\n",
-                        cap_val, lv.ty.as_ir(), var.ptr
+                        cap_val,
+                        lv.ty.as_ir(),
+                        var.ptr
                     ));
                     let field_ptr = self.tmp();
                     self.body.push_str(&format!(
@@ -3793,15 +3834,15 @@ impl LlvmEmitter {
                     ));
                     self.body.push_str(&format!(
                         "  store {} {}, ptr {}\n",
-                        lv.ty.as_ir(), cap_val, field_ptr
+                        lv.ty.as_ir(),
+                        cap_val,
+                        field_ptr
                     ));
                 }
             }
 
-            self.body.push_str(&format!(
-                "  store ptr {}, ptr {}\n",
-                env_ptr, env_field
-            ));
+            self.body
+                .push_str(&format!("  store ptr {}, ptr {}\n", env_ptr, env_field));
         }
 
         Ok(LlValue {
@@ -4015,7 +4056,6 @@ impl LlvmEmitter {
     }
 
     fn emit_endpoint_dispatch(&mut self) -> Result<(), String> {
-
         let handlers = self.endpoint_handlers.clone();
         let mut thunk_names = Vec::with_capacity(handlers.len());
         for (index, handler) in handlers.iter().enumerate() {
@@ -4805,9 +4845,12 @@ impl LlvmEmitter {
                     BinaryOp::Add
                     | BinaryOp::Sub
                     | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
                     | BinaryOp::Coalesce
                     | BinaryOp::And
                     | BinaryOp::Or
+                    | BinaryOp::BitAnd
                     | BinaryOp::BitOr => unreachable!(),
                 };
                 self.body.push_str(&format!(
@@ -4825,9 +4868,12 @@ impl LlvmEmitter {
                     BinaryOp::Add
                     | BinaryOp::Sub
                     | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
                     | BinaryOp::Coalesce
                     | BinaryOp::And
                     | BinaryOp::Or
+                    | BinaryOp::BitAnd
                     | BinaryOp::BitOr => unreachable!(),
                 };
                 self.body.push_str(&format!(
@@ -4841,9 +4887,10 @@ impl LlvmEmitter {
                 value: tmp,
                 ty: LlType::I1,
             })
-        } else if op == BinaryOp::BitOr {
+        } else if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr) {
+            let op_name = if op == BinaryOp::BitAnd { "and" } else { "or" };
             self.body.push_str(&format!(
-                "  {tmp} = or {} {}, {}\n",
+                "  {tmp} = {op_name} {} {}, {}\n",
                 left.ty.as_ir(),
                 left.value,
                 right.value
@@ -4856,6 +4903,8 @@ impl LlvmEmitter {
             let op_name = match op {
                 BinaryOp::Sub => "fsub",
                 BinaryOp::Mul => "fmul",
+                BinaryOp::Div => "fdiv",
+                BinaryOp::Mod => "frem",
                 _ => "fadd",
             };
             self.body.push_str(&format!(
@@ -4870,6 +4919,8 @@ impl LlvmEmitter {
             let op_name = match op {
                 BinaryOp::Sub => "sub",
                 BinaryOp::Mul => "mul",
+                BinaryOp::Div => "sdiv",
+                BinaryOp::Mod => "srem",
                 _ => "add",
             };
             self.body.push_str(&format!(
@@ -4893,6 +4944,66 @@ impl LlvmEmitter {
         Ok(LlValue {
             value: tmp,
             ty: LlType::I1,
+        })
+    }
+
+    fn emit_neg_value(&mut self, value: LlValue) -> Result<LlValue, String> {
+        let tmp = self.tmp();
+        if value.ty == LlType::Double {
+            self.body
+                .push_str(&format!("  {tmp} = fsub double 0.0, {}\n", value.value));
+        } else {
+            self.body.push_str(&format!(
+                "  {tmp} = sub {} {}, {}\n",
+                value.ty.as_ir(),
+                value.ty.default_value(),
+                value.value
+            ));
+        }
+        Ok(LlValue {
+            value: tmp,
+            ty: value.ty,
+        })
+    }
+
+    fn emit_inc_dec_value(
+        &mut self,
+        name: &str,
+        delta: i32,
+        prefix: bool,
+    ) -> Result<LlValue, String> {
+        let var = self
+            .vars
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("LLVM TIR backend: unknown variable '{name}'"))?;
+        let old_value = self.tmp();
+        self.body.push_str(&format!(
+            "  {old_value} = load {}, ptr {}\n",
+            var.ty.as_ir(),
+            var.ptr
+        ));
+        let new_value = self.tmp();
+        if var.ty == LlType::Double {
+            let op = if delta >= 0 { "fadd" } else { "fsub" };
+            self.body.push_str(&format!(
+                "  {new_value} = {op} double {old_value}, 1.0\n"
+            ));
+        } else {
+            let op = if delta >= 0 { "add" } else { "sub" };
+            self.body.push_str(&format!(
+                "  {new_value} = {op} {} {old_value}, 1\n",
+                var.ty.as_ir()
+            ));
+        }
+        self.body.push_str(&format!(
+            "  store {} {new_value}, ptr {}\n",
+            var.ty.as_ir(),
+            var.ptr
+        ));
+        Ok(LlValue {
+            value: if prefix { new_value } else { old_value },
+            ty: var.ty,
         })
     }
 
@@ -5302,7 +5413,9 @@ fn collect_free_vars_expr(
     out: &mut Vec<(String, LlVar)>,
 ) {
     match &expr.kind {
-        TypedExprKind::Var(name) | TypedExprKind::Move(name) | TypedExprKind::Borrow { name, .. } => {
+        TypedExprKind::Var(name)
+        | TypedExprKind::Move(name)
+        | TypedExprKind::Borrow { name, .. } => {
             if !lambda_params.contains(name) {
                 if let Some(var) = scope.get(name) {
                     if seen.insert(name.clone()) {
@@ -5311,7 +5424,10 @@ fn collect_free_vars_expr(
                 }
             }
         }
-        TypedExprKind::Lambda { params: inner_params, body } => {
+        TypedExprKind::Lambda {
+            params: inner_params,
+            body,
+        } => {
             // Don't descend into nested lambdas — their parameters shadow the
             // outer scope but their free vars are resolved when they are lifted.
             let merged_params: Vec<String> = lambda_params
@@ -5334,7 +5450,11 @@ fn collect_free_vars_expr(
             collect_free_vars_expr(left, lambda_params, scope, seen, out);
             collect_free_vars_expr(right, lambda_params, scope, seen, out);
         }
-        TypedExprKind::Conditional { condition, when_true, when_false } => {
+        TypedExprKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
             collect_free_vars_expr(condition, lambda_params, scope, seen, out);
             collect_free_vars_expr(when_true, lambda_params, scope, seen, out);
             collect_free_vars_expr(when_false, lambda_params, scope, seen, out);

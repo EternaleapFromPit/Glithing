@@ -205,8 +205,14 @@ fn handle_connection(
     let body_ffi = ffi_string(body);
 
     // The handler returns a raw JSON string (or "404" / "401" sentinel).
-    let response =
-        unsafe { handler(app, method_ffi.as_ptr(), path_ffi.as_ptr(), body_ffi.as_ptr()) };
+    let response = unsafe {
+        handler(
+            app,
+            method_ffi.as_ptr(),
+            path_ffi.as_ptr(),
+            body_ffi.as_ptr(),
+        )
+    };
 
     let response_bytes = if response.is_null() {
         b"null".as_slice()

@@ -60,8 +60,13 @@ pub(crate) enum TokenKind {
     Semi,
     Colon,
     Plus,
+    PlusPlus,
     Minus,
+    MinusMinus,
     Star,
+    Slash,
+    Percent,
+    Amp,
     AmpAmp,
     Pipe,
     PipePipe,
@@ -129,12 +134,16 @@ impl<'a> Lexer<'a> {
                         self.advance();
                     }
                     if !terminated {
-                        return Err(format!("{start_line}:{start_col}: unterminated block comment"));
+                        return Err(format!(
+                            "{start_line}:{start_col}: unterminated block comment"
+                        ));
                     }
                 }
                 '#' => {
                     let next = self.peek_next();
-                    if next.is_none() || next.is_some_and(|c| c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                    if next.is_none()
+                        || next.is_some_and(|c| c == ' ' || c == '\t' || c == '\r' || c == '\n')
+                    {
                         while self.peek().is_some() && self.peek() != Some('\n') {
                             self.advance();
                         }
@@ -178,10 +187,19 @@ impl<'a> Lexer<'a> {
                 '!' => tokens.push(self.single(TokenKind::Bang)),
                 ';' => tokens.push(self.single(TokenKind::Semi)),
                 ':' => tokens.push(self.single(TokenKind::Colon)),
+                '+' if self.peek_next() == Some('+') => {
+                    tokens.push(self.double(TokenKind::PlusPlus))
+                }
                 '+' => tokens.push(self.single(TokenKind::Plus)),
+                '-' if self.peek_next() == Some('-') => {
+                    tokens.push(self.double(TokenKind::MinusMinus))
+                }
                 '-' => tokens.push(self.single(TokenKind::Minus)),
                 '*' => tokens.push(self.single(TokenKind::Star)),
+                '/' => tokens.push(self.single(TokenKind::Slash)),
+                '%' => tokens.push(self.single(TokenKind::Percent)),
                 '&' if self.peek_next() == Some('&') => tokens.push(self.double(TokenKind::AmpAmp)),
+                '&' => tokens.push(self.single(TokenKind::Amp)),
                 '|' if self.peek_next() == Some('|') => {
                     tokens.push(self.double(TokenKind::PipePipe))
                 }

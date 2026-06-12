@@ -339,6 +339,7 @@ impl BorrowChecker {
                 Self::check_expr(when_false, state)?;
             }
             Expr::Unary { expr, .. } => Self::check_expr(expr, state)?,
+            Expr::IncDec { name, .. } => state.ensure_available(name)?,
             Expr::Binary { left, right, .. } => {
                 Self::check_expr(left, state)?;
                 Self::check_expr(right, state)?;
