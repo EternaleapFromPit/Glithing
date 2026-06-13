@@ -80,6 +80,7 @@ pub(crate) struct TypedType {
 pub(crate) struct TypedFunction {
     pub(crate) name: String,
     pub(crate) symbol: String,
+    pub(crate) is_extern: bool,
     pub(crate) return_type: IrType,
     pub(crate) return_ownership: Ownership,
     pub(crate) params: Vec<TypedBinding>,
@@ -228,7 +229,7 @@ pub(crate) enum TypedExprKind {
         expr: Box<TypedExpr>,
     },
     IncDec {
-        name: String,
+        target: Box<TypedExpr>,
         delta: i32,
         prefix: bool,
     },
@@ -1613,6 +1614,14 @@ impl OwnershipChecker {
                 }
             }
             Expr::FunctionCall { name, args } => {
+                if name == "sizeof" {
+                    return Ok(CheckedExpr {
+                        ownership: Ownership::Copy,
+                        ty: IrType::Int,
+                        source_var: None,
+                        is_move: false,
+                    });
+                }
                 let checked_args = args
                     .iter()
                     .map(|arg| Self::check_expr(arg, env, state))
@@ -1721,10 +1730,22 @@ impl OwnershipChecker {
                 }
             }
             Expr::IncDec { name, .. } => {
-                let ty = state
-                    .get(name)
-                    .map(|var| var.ty.clone())
-                    .unwrap_or_else(|| IrType::Unknown(name.clone()));
+                let ty = if let Some(var) = state.get(name) {
+                    var.ty.clone()
+                } else if let Some(this_var) = state.get("this") {
+                    let owner = match &this_var.ty {
+                        IrType::Class(name) | IrType::Struct(name) => Some(name.as_str()),
+                        IrType::Ref(inner) => match inner.as_ref() {
+                            IrType::Struct(name) | IrType::Class(name) => Some(name.as_str()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let field_ty = owner.and_then(|o| env.resolve_field(o, name));
+                    field_ty.unwrap_or_else(|| IrType::Unknown(name.clone()))
+                } else {
+                    IrType::Unknown(name.clone())
+                };
                 CheckedExpr {
                     ty,
                     ownership: Ownership::Copy,
@@ -2624,6 +2645,7 @@ fn lower_type(ty: &TypeDef, env: &TypeEnv) -> Result<TypedType, String> {
                 namespace: constructor.namespace.clone(),
                 attributes: constructor.attributes.clone(),
                 is_async: false,
+                is_extern: false,
                 name: ty.name.clone(),
                 generic_params: Vec::new(),
                 params: constructor.params.clone(),
@@ -2728,6 +2750,7 @@ fn lower_function(
             .map(|signature| signature.symbol.clone())
             .unwrap_or_else(|| function.name.clone())
         }),
+        is_extern: function.is_extern,
         return_ownership: ownership_for_type(&return_type),
         return_type,
         params,
@@ -3468,6 +3491,26 @@ fn lower_typed_expr_with_expected(
             )
         }
         Expr::FunctionCall { name, args } => {
+            if name == "sizeof" {
+                let type_name = if let Some(Expr::Var(tn)) = args.first() {
+                    tn.clone()
+                } else {
+                    "int".to_string()
+                };
+                return Ok(typed_expr(
+                    TypedExprKind::Call(TypedCall {
+                        kind: TypedCallKind::Function {
+                            name: name.clone(),
+                            symbol: name.clone(),
+                        },
+                        args: vec![typed_expr(
+                            TypedExprKind::Var(type_name.clone()),
+                            IrType::Unknown(type_name),
+                        )],
+                    }),
+                    IrType::Int,
+                ));
+            }
             let mut candidates = Vec::new();
             if let Some(sigs) = env.functions.get(name) {
                 candidates = sigs.clone();
@@ -3611,12 +3654,36 @@ fn lower_typed_expr_with_expected(
             delta,
             prefix,
         } => {
-            let ty = lookup(scopes, name)
-                .map(|binding| binding.ty)
-                .unwrap_or_else(|| IrType::Unknown(name.clone()));
+            let target = if let Some((this_type, field_type)) = implicit_field(env, scopes, name) {
+                let this_expr = typed_expr_with_ownership(
+                    TypedExprKind::Var("this".to_string()),
+                    this_type,
+                    Ownership::Borrowed,
+                );
+                typed_expr_with_ownership(
+                    TypedExprKind::Field {
+                        target: Box::new(this_expr),
+                        name: name.clone(),
+                    },
+                    field_type.clone(),
+                    ownership_for_type(&field_type),
+                )
+            } else {
+                let ty = lookup(scopes, name)
+                    .map(|binding| binding.ty.clone())
+                    .unwrap_or_else(|| IrType::Unknown(name.clone()));
+                let binding = lookup(scopes, name);
+                let ownership = binding.map(|b| b.ownership).unwrap_or(Ownership::Shared);
+                typed_expr_with_ownership(
+                    TypedExprKind::Var(name.clone()),
+                    ty,
+                    ownership,
+                )
+            };
+            let ty = target.ty.clone();
             typed_expr(
                 TypedExprKind::IncDec {
-                    name: name.clone(),
+                    target: Box::new(target),
                     delta: *delta,
                     prefix: *prefix,
                 },
@@ -3872,6 +3939,13 @@ fn lower_expr(
             }
         }
         Expr::FunctionCall { name, args } => {
+            if name == "sizeof" {
+                return Ok(TypedBinding {
+                    name: "<expr>".to_string(),
+                    ownership: Ownership::Copy,
+                    ty: IrType::Int,
+                });
+            }
             let args = args
                 .iter()
                 .map(|arg| lower_expr(arg, env, scopes))
@@ -3980,6 +4054,16 @@ fn lower_expr(
             typed_temp(ty)
         }
         Expr::NamedArg { expr, .. } | Expr::RefArg { expr, .. } => lower_expr(expr, env, scopes)?,
+        Expr::IncDec { name, .. } => {
+            let ty = if let Some((_, field_ty)) = implicit_field(env, scopes, name) {
+                field_ty
+            } else {
+                lookup(scopes, name)
+                    .map(|binding| binding.ty)
+                    .unwrap_or_else(|| IrType::Unknown(name.clone()))
+            };
+            typed_temp(ty)
+        }
     };
     Ok(binding)
 }

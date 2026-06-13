@@ -41,7 +41,7 @@ fn link_package_sources_inner(
     Ok(())
 }
 
-fn source_using_packages(source: &str) -> Vec<String> {
+pub(crate) fn source_using_packages(source: &str) -> Vec<String> {
     let mut packages = Vec::<String>::new();
     for raw_line in source.lines() {
         let line = raw_line.trim();
@@ -74,7 +74,7 @@ fn canonical_package_id(package_id: &str) -> String {
     package_id.to_string()
 }
 
-fn package_source_path(package_id: &str) -> Option<PathBuf> {
+pub(crate) fn package_source_path(package_id: &str) -> Option<PathBuf> {
     let relative = package_id.replace('.', "/");
     let direct = Path::new("packages")
         .join(package_id)
@@ -89,4 +89,27 @@ fn package_source_path(package_id: &str) -> Option<PathBuf> {
         return Some(nested);
     }
     None
+}
+
+pub(crate) fn find_package_native_sources(linked_source: &str) -> Vec<PathBuf> {
+    let mut native_files = Vec::new();
+    let packages = source_using_packages(linked_source);
+    for package_id in packages {
+        if let Some(source_path) = package_source_path(&package_id) {
+            if let Some(parent) = source_path.parent() {
+                let native_dir = parent.join("native");
+                if native_dir.is_dir() {
+                    if let Ok(entries) = fs::read_dir(native_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("c") {
+                                native_files.push(path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    native_files
 }

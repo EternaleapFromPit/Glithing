@@ -75,3 +75,7 @@ public class MemoryLeakTests {
         Assert.True(!LeakDetector.HasLeaks, "Native malloc/free should be balanced");
     }
 };
+
+public static void main() {
+    RunAllTests();
+}

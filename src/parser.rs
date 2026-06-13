@@ -22,6 +22,7 @@ pub(crate) struct Parser {
 #[derive(Default, Clone, Copy)]
 struct Modifiers {
     is_async: bool,
+    is_extern: bool,
 }
 
 impl Parser {
@@ -57,6 +58,7 @@ impl Parser {
                     namespace: Vec::new(),
                     attributes: Vec::new(),
                     is_async: false,
+                    is_extern: false,
                     name: "main".to_string(),
                     generic_params: Vec::new(),
                     params: vec![Param {
@@ -126,6 +128,9 @@ impl Parser {
                 self.using_aliases.clear();
                 continue;
             }
+            if self.match_kind(&TokenKind::Semi) {
+                continue;
+            }
             if self.match_kind(&TokenKind::Package) {
                 program.package_id = Some(self.parse_qualified_name()?.join("."));
                 self.expect(TokenKind::Semi)?;
@@ -186,6 +191,7 @@ impl Parser {
                     current_namespace.clone(),
                     attributes.clone(),
                     modifiers.is_async,
+                    modifiers.is_extern,
                 ) {
                     Ok(function) => program.functions.push(function),
                     Err(_) => {
@@ -200,6 +206,7 @@ impl Parser {
                 namespace: base_namespace,
                 attributes: Vec::new(),
                 is_async: false,
+                is_extern: false,
                 name: "main".to_string(),
                 generic_params: Vec::new(),
                 params: vec![Param {
@@ -294,26 +301,24 @@ impl Parser {
                 || self.match_kind(&TokenKind::Const)
                 || self.match_kind(&TokenKind::Readonly)
             {
-            } else if self.match_contextual_modifier() {
             } else {
-                break;
+                let TokenKind::Ident(ref name) = self.current().kind else {
+                    break;
+                };
+                if name == "extern" {
+                    modifiers.is_extern = true;
+                    self.advance();
+                } else if matches!(
+                    name.as_str(),
+                    "partial" | "sealed" | "unsafe" | "required" | "volatile" | "async"
+                ) {
+                    self.advance();
+                } else {
+                    break;
+                }
             }
         }
         modifiers
-    }
-
-    fn match_contextual_modifier(&mut self) -> bool {
-        let TokenKind::Ident(name) = self.current().kind.clone() else {
-            return false;
-        };
-        if matches!(
-            name.as_str(),
-            "partial" | "sealed" | "extern" | "unsafe" | "required" | "volatile" | "async"
-        ) {
-            self.advance();
-            return true;
-        }
-        false
     }
 
     fn parse_enum_def(
@@ -506,6 +511,7 @@ impl Parser {
                     namespace.clone(),
                     member_attributes,
                     member_modifiers.is_async,
+                    member_modifiers.is_extern,
                 )?);
                 continue;
             }
@@ -522,7 +528,7 @@ impl Parser {
                     let expr = self.parse_expr()?;
                     self.expect(TokenKind::Semi)?;
                     vec![Stmt::Return(Some(expr))]
-                } else if kind == TypeKind::Interface && self.match_kind(&TokenKind::Semi) {
+                } else if (kind == TypeKind::Interface || member_modifiers.is_extern) && self.match_kind(&TokenKind::Semi) {
                     Vec::new()
                 } else {
                     self.parse_stmt_body()?
@@ -531,6 +537,7 @@ impl Parser {
                     namespace: namespace.clone(),
                     attributes: member_attributes,
                     is_async: member_modifiers.is_async,
+                    is_extern: member_modifiers.is_extern,
                     name,
                     generic_params,
                     params,
@@ -544,6 +551,7 @@ impl Parser {
                     namespace: namespace.clone(),
                     attributes: member_attributes,
                     is_async: false,
+                    is_extern: false,
                     name: property_getter_name(&name),
                     generic_params: Vec::new(),
                     params: Vec::new(),
@@ -608,6 +616,7 @@ impl Parser {
         namespace: Vec<String>,
         attributes: Vec<Attribute>,
         is_async: bool,
+        is_extern: bool,
     ) -> Result<Function, String> {
         let (return_type, name) = if self.match_kind(&TokenKind::Fn) {
             let checkpoint = self.pos;
@@ -643,6 +652,8 @@ impl Parser {
             let expr = self.parse_expr()?;
             self.expect(TokenKind::Semi)?;
             vec![Stmt::Return(Some(expr))]
+        } else if is_extern && self.match_kind(&TokenKind::Semi) {
+            Vec::new()
         } else {
             self.parse_stmt_body()?
         };
@@ -650,6 +661,7 @@ impl Parser {
             namespace,
             attributes,
             is_async,
+            is_extern,
             name,
             generic_params,
             params,
@@ -1916,14 +1928,19 @@ impl Parser {
                         .ok_or_else(|| self.error_here("expected type after ref"))?,
                 )))
             }
-            TokenKind::Ident(_) => self.parse_named_type_syntax()?,
+            TokenKind::Ident(_) | TokenKind::Borrow | TokenKind::Move => self.parse_named_type_syntax()?,
             _ => None,
         };
-        while ty.is_some() && self.at(&TokenKind::LBracket) && self.peek_is(1, &TokenKind::RBracket)
-        {
-            self.expect(TokenKind::LBracket)?;
-            self.expect(TokenKind::RBracket)?;
-            ty = Some(TypeSyntax::Array(Box::new(ty.expect("present"))));
+        loop {
+            if ty.is_some() && self.at(&TokenKind::LBracket) && self.peek_is(1, &TokenKind::RBracket) {
+                self.expect(TokenKind::LBracket)?;
+                self.expect(TokenKind::RBracket)?;
+                ty = Some(TypeSyntax::Array(Box::new(ty.expect("present"))));
+            } else if ty.is_some() && self.match_kind(&TokenKind::Star) {
+                ty = Some(TypeSyntax::Ref(Box::new(ty.expect("present"))));
+            } else {
+                break;
+            }
         }
         if ty.is_some() && self.match_kind(&TokenKind::Question) {
             ty = Some(TypeSyntax::Nullable(Box::new(ty.expect("present"))));
@@ -2229,8 +2246,11 @@ impl Parser {
     }
 
     fn expect_ident(&mut self) -> Result<String, String> {
-        let TokenKind::Ident(name) = self.current().kind.clone() else {
-            return Err(self.error_here("expected identifier"));
+        let name = match self.current().kind.clone() {
+            TokenKind::Ident(name) => name,
+            TokenKind::Borrow => "borrow".to_string(),
+            TokenKind::Move => "move".to_string(),
+            _ => return Err(self.error_here("expected identifier")),
         };
         self.advance();
         Ok(name)

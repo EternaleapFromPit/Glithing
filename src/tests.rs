@@ -1917,3 +1917,11 @@ fn ownership_checker_rejects_view_outliving_source() {
         "ownership checker: function main: 'view' would outlive borrowed/view source 'inner'"
     ));
 }
+
+#[test]
+fn compiles_memory_leak_tests() {
+    let source = std::fs::read_to_string("tests/xunit_memory/memory_leak_tests.gl")
+        .expect("should read memory_leak_tests.gl");
+    let llvm_ir = compile_llvm_ir(&source).expect("memory leak tests should compile to LLVM IR");
+    assert!(llvm_ir.contains("getelementptr"));
+}

@@ -203,7 +203,11 @@ impl LlvmEmitter {
             }
         }
         for function in &program.functions {
-            emitter.emit_typed_function(function)?;
+            if function.is_extern {
+                emitter.emit_external_declaration(function);
+            } else {
+                emitter.emit_typed_function(function)?;
+            }
         }
         emitter.emit_endpoint_dispatch()?;
         emitter.finish_module()
@@ -560,7 +564,26 @@ impl LlvmEmitter {
         Ok(out)
     }
 
+    fn emit_external_declaration(&mut self, function: &TypedFunction) {
+        let return_type = llvm_ir_type(&function.return_type).as_ir();
+        let params = function
+            .params
+            .iter()
+            .map(|param| llvm_ir_type(&param.ty).as_ir())
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.type_defs.push(format!(
+            "declare {} @{}({})\n",
+            return_type,
+            sanitize(&function.symbol),
+            params
+        ));
+    }
+
     fn emit_typed_function(&mut self, function: &TypedFunction) -> Result<(), String> {
+        if function.is_extern {
+            return Ok(());
+        }
         self.vars.clear();
         self.drop_order.clear();
         self.tmp = 0;
@@ -1312,7 +1335,7 @@ impl LlvmEmitter {
                 name,
                 delta,
                 prefix,
-            } => self.emit_inc_dec_value(name, *delta, *prefix),
+            } => self.emit_inc_dec_untyped(name, *delta, *prefix),
             Expr::IsPattern { expr, .. } => {
                 let _ = self.emit_expr(expr);
                 Ok(LlValue {
@@ -1413,6 +1436,12 @@ impl LlvmEmitter {
                 ty: LlType::Ptr,
             }),
             TypedExprKind::Var(name) => {
+                if self.object_types.contains_key(name) {
+                    return Ok(LlValue {
+                        value: "null".to_string(),
+                        ty: LlType::Ptr,
+                    });
+                }
                 let var = self
                     .vars
                     .get(name)
@@ -1691,10 +1720,10 @@ impl LlvmEmitter {
                 }
             }
             TypedExprKind::IncDec {
-                name,
+                target,
                 delta,
                 prefix,
-            } => self.emit_inc_dec_value(name, *delta, *prefix),
+            } => self.emit_inc_dec_value(target, *delta, *prefix),
             TypedExprKind::Lambda { params, body } => self.emit_lambda_function(params, body),
             TypedExprKind::Conditional {
                 condition,
@@ -1752,6 +1781,30 @@ impl LlvmEmitter {
                 }
                 match &call.kind {
                     TypedCallKind::Function { name, symbol } => {
+                        if name == "sizeof" {
+                            let size = if let Some(arg) = call.args.first() {
+                                if let TypedExprKind::Var(type_name) = &arg.kind {
+                                    match type_name.as_str() {
+                                        "bool" => 1,
+                                        "byte" | "sbyte" => 1,
+                                        "short" | "ushort" => 2,
+                                        "int" | "uint" => 4,
+                                        "long" | "ulong" => 8,
+                                        "float" => 4,
+                                        "double" => 8,
+                                        _ => 8,
+                                    }
+                                } else {
+                                    4
+                                }
+                            } else {
+                                4
+                            };
+                            return Ok(LlValue {
+                                value: size.to_string(),
+                                ty: LlType::I32,
+                            });
+                        }
                         if matches!(
                             name.as_str(),
                             "Ok" | "Created" | "CreatedAtAction" | "Accepted"
@@ -3248,6 +3301,18 @@ impl LlvmEmitter {
                     ty: LlType::I8,
                 })
             }
+            IrType::Ref(element) => {
+                let index = self.emit_typed_expr(index)?;
+                let index = self.cast_value(index, &LlType::I64)?;
+                let slot = self.tmp();
+                let value = self.tmp();
+                let ty = llvm_ir_type(element);
+                self.body.push_str(&format!(
+                    "  {} = getelementptr inbounds {}, ptr {}, i64 {}\n  {} = load {}, ptr {}\n",
+                    slot, ty.as_ir(), collection.value, index.value, value, ty.as_ir(), slot
+                ));
+                Ok(LlValue { value, ty })
+            }
             IrType::Unknown(_) => {
                 self.emit_typed_expr(index)?;
                 Ok(LlValue {
@@ -3378,6 +3443,23 @@ impl LlvmEmitter {
                 );
                 self.body
                     .push_str(&format!("  br label %{done_label}\n{done_label}:\n"));
+                Ok(())
+            }
+            IrType::Ref(element) => {
+                let index = self.emit_typed_expr(index)?;
+                let index = self.cast_value(index, &LlType::I64)?;
+                let slot = self.tmp();
+                let element_ty = llvm_ir_type(element);
+                self.body.push_str(&format!(
+                    "  {} = getelementptr inbounds {}, ptr {}, i64 {}\n",
+                    slot, element_ty.as_ir(), collection.value, index.value
+                ));
+                let value = self.emit_typed_expr(source)?;
+                let value = self.cast_value(value, &element_ty)?;
+                self.body.push_str(&format!(
+                    "  store {} {}, ptr {}\n",
+                    element_ty.as_ir(), value.value, slot
+                ));
                 Ok(())
             }
             other => Err(format!(
@@ -3770,6 +3852,9 @@ impl LlvmEmitter {
                 }
             }
         }
+        self.body.push_str(&format!("{}:\n", self.current_unwind_label));
+        self.terminated = false;
+        self.body.push_str("  ret ptr null\n");
         self.body.push_str("}\n\n");
 
         // Swap the emitted lambda function out and restore enclosing function's body
@@ -4968,6 +5053,34 @@ impl LlvmEmitter {
 
     fn emit_inc_dec_value(
         &mut self,
+        target: &TypedExpr,
+        delta: i32,
+        prefix: bool,
+    ) -> Result<LlValue, String> {
+        let field_ptr = if matches!(target.kind, TypedExprKind::Field { .. }) {
+            Some(self.emit_field_ptr(target)?)
+        } else {
+            None
+        };
+        let (ty, ptr) = if let Some(field_ptr) = &field_ptr {
+            (llvm_ir_type(&target.ty), field_ptr.value.clone())
+        } else {
+            let name = match &target.kind {
+                TypedExprKind::Var(n) => n.as_str(),
+                _ => return Err("LLVM TIR backend: unsupported IncDec target".to_string()),
+            };
+            let var = self
+                .vars
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("LLVM TIR backend: unknown variable '{name}'"))?;
+            (var.ty, var.ptr)
+        };
+        self.emit_inc_dec_raw(ty, &ptr, delta, prefix)
+    }
+
+    fn emit_inc_dec_untyped(
+        &mut self,
         name: &str,
         delta: i32,
         prefix: bool,
@@ -4976,15 +5089,25 @@ impl LlvmEmitter {
             .vars
             .get(name)
             .cloned()
-            .ok_or_else(|| format!("LLVM TIR backend: unknown variable '{name}'"))?;
+            .ok_or_else(|| format!("LLVM backend: unknown variable '{name}'"))?;
+        self.emit_inc_dec_raw(var.ty, &var.ptr, delta, prefix)
+    }
+
+    fn emit_inc_dec_raw(
+        &mut self,
+        ty: LlType,
+        ptr: &str,
+        delta: i32,
+        prefix: bool,
+    ) -> Result<LlValue, String> {
         let old_value = self.tmp();
         self.body.push_str(&format!(
             "  {old_value} = load {}, ptr {}\n",
-            var.ty.as_ir(),
-            var.ptr
+            ty.as_ir(),
+            ptr
         ));
         let new_value = self.tmp();
-        if var.ty == LlType::Double {
+        if ty == LlType::Double {
             let op = if delta >= 0 { "fadd" } else { "fsub" };
             self.body.push_str(&format!(
                 "  {new_value} = {op} double {old_value}, 1.0\n"
@@ -4993,17 +5116,17 @@ impl LlvmEmitter {
             let op = if delta >= 0 { "add" } else { "sub" };
             self.body.push_str(&format!(
                 "  {new_value} = {op} {} {old_value}, 1\n",
-                var.ty.as_ir()
+                ty.as_ir()
             ));
         }
         self.body.push_str(&format!(
             "  store {} {new_value}, ptr {}\n",
-            var.ty.as_ir(),
-            var.ptr
+            ty.as_ir(),
+            ptr
         ));
         Ok(LlValue {
             value: if prefix { new_value } else { old_value },
-            ty: var.ty,
+            ty,
         })
     }
 
@@ -5423,6 +5546,9 @@ fn collect_free_vars_expr(
                     }
                 }
             }
+        }
+        TypedExprKind::IncDec { target, .. } => {
+            collect_free_vars_expr(target, lambda_params, scope, seen, out);
         }
         TypedExprKind::Lambda {
             params: inner_params,

@@ -38,7 +38,11 @@ pub(crate) fn emit_llvm_bitcode(llvm_ir: &str, output_path: &str) -> Result<(), 
     }
 }
 
-pub(crate) fn emit_native_executable(llvm_ir: &str, output_path: &str) -> Result<(), String> {
+pub(crate) fn emit_native_executable(
+    llvm_ir: &str,
+    native_sources: &[PathBuf],
+    output_path: &str,
+) -> Result<(), String> {
     let ll_path = format!("{output_path}.ll.tmp");
     fs::write(&ll_path, llvm_ir).map_err(|e| format!("failed to write temporary LLVM IR: {e}"))?;
     let clang = require_llvm_tool("clang")?;
@@ -47,9 +51,14 @@ pub(crate) fn emit_native_executable(llvm_ir: &str, output_path: &str) -> Result
         .arg("-O3")
         .arg("-x")
         .arg("ir")
-        .arg(&ll_path)
-        .arg("-o")
-        .arg(output_path);
+        .arg(&ll_path);
+    if !native_sources.is_empty() {
+        command.arg("-x").arg("none");
+        for src in native_sources {
+            command.arg(src);
+        }
+    }
+    command.arg("-o").arg(output_path);
     let links_rust_runtime = llvm_ir.contains("call void @GlitchRestHost_Run(")
         || llvm_ir.contains("System_IO_File_ReadAllText")
         || llvm_ir.contains("System_IO_File_WriteAllText");
@@ -65,6 +74,7 @@ pub(crate) fn emit_native_executable(llvm_ir: &str, output_path: &str) -> Result
             command.arg("-Xlinker").arg("/defaultlib:msvcrt");
         }
         configure_windows_linker_environment(&mut command)?;
+        configure_windows_compiler_environment(&mut command)?;
     }
     let result = command
         .output()
@@ -205,4 +215,35 @@ fn find_latest_subdirectory(root: &Path) -> Option<PathBuf> {
         .collect::<Vec<_>>();
     directories.sort();
     directories.pop()
+}
+
+fn configure_windows_compiler_environment(command: &mut Command) -> Result<(), String> {
+    let mut include_paths = Vec::<PathBuf>::new();
+    if let Some(msvc_lib) = find_msvc_library_path() {
+        if let Some(msvc_tool_root) = msvc_lib.parent().and_then(|p| p.parent()) {
+            let msvc_include = msvc_tool_root.join("include");
+            if msvc_include.is_dir() {
+                include_paths.push(msvc_include);
+            }
+        }
+    }
+    if let Some(sdk_include_root) =
+        find_latest_subdirectory(Path::new(r"C:\Program Files (x86)\Windows Kits\10\Include"))
+    {
+        for component in ["ucrt", "shared", "um"] {
+            let path = sdk_include_root.join(component);
+            if path.is_dir() {
+                include_paths.push(path);
+            }
+        }
+    }
+    if let Some(existing) = env::var_os("INCLUDE") {
+        include_paths.extend(env::split_paths(&existing));
+    }
+    if !include_paths.is_empty() {
+        let joined = env::join_paths(include_paths)
+            .map_err(|e| format!("failed to construct Windows compiler INCLUDE path: {e}"))?;
+        command.env("INCLUDE", joined);
+    }
+    Ok(())
 }

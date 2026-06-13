@@ -64,6 +64,7 @@ pub(crate) struct Function {
     pub(crate) namespace: Vec<String>,
     pub(crate) attributes: Vec<Attribute>,
     pub(crate) is_async: bool,
+    pub(crate) is_extern: bool,
     pub(crate) name: String,
     pub(crate) generic_params: Vec<GenericParam>,
     pub(crate) params: Vec<Param>,

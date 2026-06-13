@@ -74,16 +74,16 @@ void XUnit_RunAllTests() {
            (g_malloc_count == g_free_count) ? "Clean." : "LEAKS DETECTED!");
 }
 // LeakDetector native API ----------------------------------------------------
-void LeakDetector_Reset() {
+void Native_LeakDetector_Reset() {
     g_malloc_count = 0;
     g_free_count = 0;
 }
-unsigned int LeakDetector_GetMallocCount() {
+unsigned int Native_LeakDetector_GetMallocCount() {
     return (unsigned int)g_malloc_count;
 }
-unsigned int LeakDetector_GetFreeCount() {
+unsigned int Native_LeakDetector_GetFreeCount() {
     return (unsigned int)g_free_count;
 }
-bool LeakDetector_HasLeaks() {
+bool Native_LeakDetector_HasLeaks() {
     return g_malloc_count != g_free_count;
 }

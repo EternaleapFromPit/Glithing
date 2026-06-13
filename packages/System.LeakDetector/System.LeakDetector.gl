@@ -3,23 +3,25 @@
 package System.LeakDetector;
 
 // Native functions implemented in C (see leak_detector.c)
-extern void LeakDetector_Reset();
-extern uint LeakDetector_GetMallocCount();
-extern uint LeakDetector_GetFreeCount();
-extern bool LeakDetector_HasLeaks();
+extern void Native_LeakDetector_Reset();
+extern uint Native_LeakDetector_GetMallocCount();
+extern uint Native_LeakDetector_GetFreeCount();
+extern bool Native_LeakDetector_HasLeaks();
+extern int* tracked_malloc(int size);
+extern void tracked_free(int* ptr);
 
 public static class LeakDetector {
     // Reset allocation counters before a test
     public static void Reset() {
-        LeakDetector_Reset();
+        Native_LeakDetector_Reset();
     }
 
     // Total number of allocations performed since last reset
-    public static uint AllocationCount => LeakDetector_GetMallocCount();
+    public static uint AllocationCount => Native_LeakDetector_GetMallocCount();
 
     // Total number of frees performed since last reset
-    public static uint FreeCount => LeakDetector_GetFreeCount();
+    public static uint FreeCount => Native_LeakDetector_GetFreeCount();
 
     // True if any allocation was not freed
-    public static bool HasLeaks => LeakDetector_HasLeaks();
+    public static bool HasLeaks => Native_LeakDetector_HasLeaks();
 }

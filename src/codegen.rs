@@ -472,8 +472,10 @@ impl Codegen {
         }
         for f in &program.functions {
             if f.name != "main" {
+                let linkage = if f.is_extern { "extern" } else { "static" };
                 out.push_str(&format!(
-                    "static {} {}({});\n",
+                    "{} {} {}({});\n",
+                    linkage,
                     self.function_return_type(f),
                     self.function_symbol_for(f),
                     self.function_params(f)?
@@ -709,6 +711,9 @@ impl Codegen {
     }
 
     fn emit_function(&mut self, f: &Function, out: &mut String) -> Result<(), String> {
+        if f.is_extern {
+            return Ok(());
+        }
         self.emit_metadata_comment(&f.namespace, &f.attributes, out);
         let ret = self.function_return_type(f);
         if f.name == "main" {
@@ -2062,6 +2067,42 @@ impl Codegen {
                         c_type: CType::GenericPtr("System_Type".to_string()),
                     });
                 }
+                if name == "sizeof" {
+                    let type_str = if let Some(Expr::Var(type_name)) = args.first() {
+                        match type_name.as_str() {
+                            "int" => "int".to_string(),
+                            "uint" => "unsigned int".to_string(),
+                            "long" => "long long".to_string(),
+                            "ulong" => "unsigned long long".to_string(),
+                            "short" => "short".to_string(),
+                            "ushort" => "unsigned short".to_string(),
+                            "byte" => "unsigned char".to_string(),
+                            "sbyte" => "signed char".to_string(),
+                            "float" => "float".to_string(),
+                            "double" => "double".to_string(),
+                            "bool" => "bool".to_string(),
+                            "char" => "char".to_string(),
+                            _ => {
+                                let sanitized = sanitize_ident(type_name);
+                                if let Some(kind) = self.types.get(type_name) {
+                                    match kind {
+                                        TypeKind::Class | TypeKind::Interface => format!("struct {}*", sanitized),
+                                        TypeKind::Struct | TypeKind::RefStruct => format!("struct {}", sanitized),
+                                        TypeKind::Enum => "int".to_string(),
+                                    }
+                                } else {
+                                    sanitized
+                                }
+                            }
+                        }
+                    } else {
+                        "int".to_string()
+                    };
+                    return Ok(EmittedExpr {
+                        code: format!("sizeof({})", type_str),
+                        c_type: CType::Scalar(ScalarType::I32),
+                    });
+                }
                 let resolved = self.resolve_function_call(name, args, vars)?;
                 let arg_codes = resolved
                     .args
@@ -2287,20 +2328,66 @@ impl Codegen {
                 delta,
                 prefix,
             } => {
-                let c_name = sanitize_ident(name);
                 let op = if *delta >= 0 { "++" } else { "--" };
-                let code = if *prefix {
-                    format!("({op}{c_name})")
+                let code = if let Some(this_type) = vars.get("this") {
+                    match this_type {
+                        CType::ClassPtr(type_name) => {
+                            if let Some(field) = self.field_access(type_name, "self", true, name) {
+                                if *prefix {
+                                    format!("({}{})", op, field.code)
+                                } else {
+                                    format!("({}{})", field.code, op)
+                                }
+                            } else {
+                                let c_name = sanitize_ident(name);
+                                if *prefix { format!("({op}{c_name})") } else { format!("({c_name}{op})") }
+                            }
+                        }
+                        CType::Struct(type_name) => {
+                            if let Some(field) = self.field_access(type_name, "self", false, name) {
+                                if *prefix {
+                                    format!("({}{})", op, field.code)
+                                } else {
+                                    format!("({}{})", field.code, op)
+                                }
+                            } else {
+                                let c_name = sanitize_ident(name);
+                                if *prefix { format!("({op}{c_name})") } else { format!("({c_name}{op})") }
+                            }
+                        }
+                        _ => {
+                            let c_name = sanitize_ident(name);
+                            if *prefix { format!("({op}{c_name})") } else { format!("({c_name}{op})") }
+                        }
+                    }
                 } else {
-                    format!("({c_name}{op})")
+                    let c_name = sanitize_ident(name);
+                    if *prefix { format!("({op}{c_name})") } else { format!("({c_name}{op})") }
                 };
-                Ok(EmittedExpr {
-                    code,
-                    c_type: vars
-                        .get(name)
-                        .cloned()
-                        .unwrap_or(CType::Scalar(ScalarType::I32)),
-                })
+                let c_type = if let Some(c_type) = vars.get(name).cloned() {
+                    c_type
+                } else if let Some(this_type) = vars.get("this") {
+                    match this_type {
+                        CType::ClassPtr(type_name) => {
+                            if let Some(field) = self.field_access(type_name, "self", true, name) {
+                                field.c_type
+                            } else {
+                                CType::Scalar(ScalarType::I32)
+                            }
+                        }
+                        CType::Struct(type_name) => {
+                            if let Some(field) = self.field_access(type_name, "self", false, name) {
+                                field.c_type
+                            } else {
+                                CType::Scalar(ScalarType::I32)
+                            }
+                        }
+                        _ => CType::Scalar(ScalarType::I32),
+                    }
+                } else {
+                    CType::Scalar(ScalarType::I32)
+                };
+                Ok(EmittedExpr { code, c_type })
             }
             Expr::Lambda { .. } => Ok(EmittedExpr {
                 code: "NULL".to_string(),
