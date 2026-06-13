@@ -1,0 +1,15 @@
+package System.WeakReference;
+
+public class WeakReference<T> {
+    public WeakReference(T value) {
+    }
+
+    public bool TryGetTarget(out T target) {
+        target = default(T);
+        return false;
+    }
+
+    public T Target {
+        get { return default(T); }
+    }
+}

@@ -35,7 +35,7 @@ pub(crate) fn check_reference_cycles(source: &str, program: &Program) -> Vec<Str
                     continue;
                 }
                 let needle = format!("{} {}", type_syntax_display(&field.ty), field.name);
-                let (line, col, snippet) = locate_source(source, &needle);
+                let (file, line, col, snippet) = locate_source(source, &needle);
                 let message = format!(
                     "reference cycle detected: class '{}' field '{}' participates in a potential ownership cycle {} -> {}",
                     ty.name, field.name, ty.name, target
@@ -55,7 +55,13 @@ pub(crate) fn check_reference_cycles(source: &str, program: &Program) -> Vec<Str
                     )
                 };
                 warnings.push(render_diagnostic(
-                    "GL3007", line, col, snippet, &message, &help,
+                    "GL3007",
+                    file.as_deref(),
+                    line,
+                    col,
+                    snippet,
+                    &message,
+                    &help,
                 ));
             }
         }
@@ -113,6 +119,10 @@ fn is_ownership_bearing_generic(name: &str) -> bool {
         name,
         "Rc"
             | "System.Ownership.Rc"
+            | "own"
+            | "System.Ownership.own"
+            | "shared"
+            | "System.Ownership.shared"
             | "List"
             | "System.Collections.Generic.List"
             | "Dictionary"

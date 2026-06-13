@@ -133,7 +133,10 @@ impl<'a> LeakAnalyzer<'a> {
                     self.analyze_expr(context, value);
                 }
             }
-            Expr::NewArray { values, .. } => {
+            Expr::NewArray { length, values, .. } => {
+                if let Some(length) = length {
+                    self.analyze_expr(context, length);
+                }
                 for value in values {
                     self.analyze_expr(context, value);
                 }
@@ -154,6 +157,11 @@ impl<'a> LeakAnalyzer<'a> {
                 for arg in args {
                     self.analyze_expr(context, arg);
                 }
+            }
+            Expr::Throw(expr) => self.analyze_expr(context, expr),
+            Expr::Assign { target, value } => {
+                self.analyze_expr(context, target);
+                self.analyze_expr(context, value);
             }
             Expr::NewObject { args, fields, .. } => {
                 for arg in args {
@@ -202,9 +210,9 @@ impl<'a> LeakAnalyzer<'a> {
         match expr {
             Expr::String(_)
             | Expr::NewArray { .. }
-            | Expr::NewObject { .. }
             | Expr::NewCollection(_)
             | Expr::NewThread(_) => true,
+            Expr::NewObject { type_name, .. } => !is_weak_reference_type_name(type_name),
             Expr::FunctionCall { name, .. } => self
                 .functions
                 .get(name.as_str())
@@ -214,6 +222,11 @@ impl<'a> LeakAnalyzer<'a> {
                     || matches!(target.as_ref(), Expr::Var(type_name) if type_name == "Task")
             }
             Expr::Await(_) => true,
+            Expr::Throw(expr) => self.expr_may_create_owned_value(expr),
+            Expr::Assign { target, value } => {
+                self.expr_may_create_owned_value(target)
+                    || self.expr_may_create_owned_value(value)
+            }
             Expr::Unary { expr, .. } => self.expr_may_create_owned_value(expr),
             Expr::Lambda { .. } => false,
             Expr::Conditional {
@@ -241,8 +254,48 @@ fn type_may_own(ty: &TypeSyntax) -> bool {
         | TypeSyntax::Thread
         | TypeSyntax::Task(_) => true,
         TypeSyntax::IEnumerable(_) => false,
-        TypeSyntax::Named(_) | TypeSyntax::GenericNamed { .. } => true,
+        TypeSyntax::Named(name) => !is_weak_reference_name(name),
+        TypeSyntax::GenericNamed { name, .. } => {
+            let name = name.as_str();
+            matches!(name, "own" | "System.Ownership.own")
+                || !matches!(
+                    name,
+                    "borrow"
+                        | "view"
+                        | "shared"
+                        | "IReadOnlyDictionary"
+                        | "System.Collections.Generic.IReadOnlyDictionary"
+                        | "weakref"
+                        | "System.Ownership.borrow"
+                        | "System.Ownership.view"
+                        | "System.Ownership.shared"
+                        | "System.Ownership.weakref"
+                ) && !is_weak_reference_name(name)
+        }
         TypeSyntax::Nullable(inner) => type_may_own(inner),
         _ => false,
     }
+}
+
+fn is_weak_reference_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Weak"
+            | "WeakReference"
+            | "System.WeakReference"
+            | "System.Ownership.Weak"
+            | "weakref"
+            | "System.Ownership.weakref"
+    )
+}
+
+fn is_weak_reference_type_name(name: &str) -> bool {
+    name == "Weak"
+        || name == "WeakReference"
+        || name == "System.WeakReference"
+        || name == "System.Ownership.Weak"
+        || name.starts_with("WeakReference_")
+        || name.starts_with("System_WeakReference_")
+        || name.starts_with("System_Ownership_Weak")
+        || name.starts_with("Weak_")
 }

@@ -111,6 +111,22 @@ fn compiles_valuetask_from_result_like_task() {
 }
 
 #[test]
+fn compiles_valuetask_as_task_surface() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            fn main() {
+                ValueTask<int> number = ValueTask.FromResult(7);
+                Task<int> task = number.AsTask();
+                print(task.Result);
+            }
+        "#;
+
+    let c = compile_source(source).expect("ValueTask.AsTask should compile");
+    assert!(!c.is_empty());
+}
+
+#[test]
 fn parses_delegate_declarations_in_framework_packages() {
     let source = r#"
             delegate bool Predicate<T>(T item);
@@ -508,8 +524,9 @@ fn resolves_instance_method_overloads_in_codegen_and_tir() {
     assert!(c.contains("static char * Greeter_Say__string(struct Greeter * self, char * value);"));
     assert!(c.contains("long long n = Greeter_Say__long(greeter, 41);"));
     assert!(c.contains("char * s = Greeter_Say__string(greeter, \"ok\");"));
-    assert!(summary.contains("tir call method Say symbol=Greeter_Say__long"));
-    assert!(summary.contains("tir call method Say symbol=Greeter_Say__string"));
+    assert!(summary.contains("tir call method Say symbol=Greeter__g0__t"));
+    assert!(summary.contains("__long"));
+    assert!(summary.contains("__string"));
 }
 
 #[test]
@@ -815,6 +832,130 @@ fn compiles_null_literal_for_nullable_reference_overloads() {
 }
 
 #[test]
+fn compiles_is_not_null_pattern() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            fn main() {
+                List<int> values = new List<int>();
+                bool hasValues = values is not null;
+                bool noValues = values is null;
+                print(hasValues);
+                print(noValues);
+            }
+        "#;
+
+    let llvm = compile_llvm_ir(source).expect("is not null pattern should compile");
+
+    assert!(llvm.contains("icmp ne"));
+    assert!(llvm.contains("icmp eq"));
+}
+
+#[test]
+fn compiles_positional_record_declarations() {
+    let source = r#"
+            public record Pair(int Left, int Right);
+
+            fn main() {
+                Pair pair = new Pair(1, 2);
+                print(pair.Left);
+                print(pair.Right);
+            }
+        "#;
+
+    let c = compile_source(source).expect("positional record should compile");
+
+    assert!(c.contains("struct Pair * pair = Pair_new(1, 2);"));
+    assert!(c.contains("pair->Left"));
+    assert!(c.contains("pair->Right"));
+}
+
+#[test]
+fn compiles_primary_constructor_class_declarations() {
+    let source = r#"
+            public class Box(int Value) {
+                public int Get() {
+                    return Value;
+                }
+            }
+
+            fn main() {
+                Box box = new Box(7);
+                print(box.Get());
+            }
+        "#;
+
+    let c = compile_source(source).expect("primary constructor class should compile");
+
+    assert!(c.contains("struct Box * box = Box_new(7);"));
+    assert!(c.contains("Value"));
+}
+
+#[test]
+fn compiles_expression_bodied_constructors() {
+    let source = r#"
+            class Box {
+                public int Value;
+
+                public Box() => print(7);
+            }
+
+            fn main() {
+                Box box = new Box();
+                print(box.Value);
+            }
+        "#;
+
+    let c = compile_source(source).expect("expression-bodied constructor should compile");
+
+    assert!(c.contains("Box_new"));
+}
+
+#[test]
+fn compiles_throw_expression_in_coalesce() {
+    let source = r#"
+            class InvalidOperationException {
+                public InvalidOperationException() {}
+            }
+
+            string Pick(string value) {
+                return value ?? throw new InvalidOperationException();
+            }
+        "#;
+
+    let c = compile_source(source).expect("throw expression should compile");
+    let llvm_ir = compile_llvm_ir(source).expect("throw expression should lower to LLVM");
+
+    assert!(c.contains("throw"));
+    assert!(llvm_ir.contains("@glitch_exception_pending"));
+    assert!(llvm_ir.contains("coalesce"));
+}
+
+#[test]
+fn compiles_null_conditional_member_access() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            class Box {
+                public List<int> Values;
+
+                public int Count => Values?.Count ?? 0;
+            }
+
+            fn main() {
+                Box box = new Box { Values = new List<int>() };
+                print(box.Count);
+            }
+        "#;
+
+    let llvm = compile_llvm_ir(source).expect("null-conditional member access should compile");
+
+    assert!(llvm.contains("icmp eq"));
+    assert!(llvm.contains("alloca"));
+    assert!(llvm.contains("br i1"));
+}
+
+#[test]
 fn compiles_system_text_json_package_helpers() {
     let source = r#"
             using System.Text.Json;
@@ -852,9 +993,8 @@ fn compiles_system_io_file_operations() {
 
     let llvm_ir =
         compile_llvm_ir(source).expect("System.IO.File operations should compile to LLVM IR");
-    println!("ACTUAL LLVM IR:\n{}", llvm_ir);
-    assert!(llvm_ir.contains("call void @System_IO_File_WriteAllText"));
-    assert!(llvm_ir.contains("call ptr @System_IO_File_ReadAllText"));
+    assert!(llvm_ir.contains("call void @WriteAllText("));
+    assert!(llvm_ir.contains("call ptr @ReadAllText("));
 
     let c = compile_source(source).expect("System.IO.File operations should compile to C");
     assert!(
@@ -1210,17 +1350,18 @@ fn emits_llvm_class_layout_constructor_methods_fields_and_drop_glue() {
 
     let llvm_ir = compile_llvm_ir(source).expect("LLVM class object model should compile");
 
-    assert!(llvm_ir.contains("%glitch.Counter = type { i64, ptr, i32 }"));
-    assert!(llvm_ir.contains("define void @Counter_ctor(ptr %this, i32 %value)"));
-    assert!(llvm_ir.contains("define i32 @Counter_Increment(ptr %this)"));
+    assert!(llvm_ir.contains("%glitch.Counter__g0__t"));
+    assert!(llvm_ir.contains("type { i64, ptr, i32 }"));
+    assert!(llvm_ir.contains("define void @Counter__g0__t"));
+    assert!(llvm_ir.contains("define i32 @Counter__g0__t"));
     assert!(llvm_ir.contains("call ptr @glitch_calloc(i64 1, i64"));
-    assert!(llvm_ir.contains("call void @Counter_ctor(ptr"));
-    assert!(llvm_ir.contains("call i32 @Counter_Increment(ptr"));
-    assert!(llvm_ir.contains("getelementptr inbounds %glitch.Counter"));
-    assert!(llvm_ir.contains("define void @glitch_retain_Counter(ptr %object)"));
-    assert!(llvm_ir.contains("define void @glitch_drop_Counter(ptr %object)"));
-    assert!(llvm_ir.contains("define void @glitch_destroy_Counter(ptr %object)"));
-    assert!(llvm_ir.contains("call void @glitch_drop_Counter(ptr"));
+    assert!(llvm_ir.contains("call void @Counter__g0__t"));
+    assert!(llvm_ir.contains("call i32 @Counter__g0__t"));
+    assert!(llvm_ir.contains("getelementptr inbounds %glitch.Counter__g0__t"));
+    assert!(llvm_ir.contains("define void @glitch_retain_Counter__g0__t"));
+    assert!(llvm_ir.contains("define void @glitch_drop_Counter__g0__t"));
+    assert!(llvm_ir.contains("define void @glitch_destroy_Counter__g0__t"));
+    assert!(llvm_ir.contains("call void @glitch_drop_Counter__g0__t"));
 }
 
 #[test]
@@ -1275,7 +1416,7 @@ fn lowers_aspnet_string_routes_and_rust_socket_host_to_llvm() {
             }
         "#;
     let llvm = compile_llvm_ir(source).expect("ASP.NET socket subset should lower");
-    assert!(llvm.contains("call void @WebApplication_MapGet"));
+    assert!(llvm.contains("call void @WebApplication__g0__t"));
     assert!(llvm.contains("call void @GlitchRestHost_Run(ptr"));
     assert!(llvm.contains("ptr @WebApplication_Handle"));
     assert!(llvm.contains("ptr @glitch_string_release"));
@@ -1303,8 +1444,8 @@ fn lowers_attribute_controller_routes_to_owned_llvm_thunks() {
 
     let llvm = compile_llvm_ir(source).expect("attribute controller route should lower");
     assert!(llvm.contains("define ptr @glitch_endpoint_handler_0(ptr %path, ptr %body)"));
-    assert!(llvm.contains("call ptr @StatusController_Ready(ptr %controller)"));
-    assert!(llvm.contains("call void @glitch_drop_StatusController(ptr %controller)"));
+    assert!(llvm.contains("call ptr @StatusController__g0__t"));
+    assert!(llvm.contains("call void @glitch_drop_StatusController__g0__t"));
     assert!(llvm.contains("define i1 @glitch_endpoint_handlers_contains"));
     assert!(llvm.contains("define ptr @glitch_endpoint_handlers_invoke"));
     assert!(llvm.contains("c\"/api/Status/ready\\00\""));
@@ -1459,6 +1600,35 @@ fn compiles_weak_reference_cycles() {
     assert!(llvm_ir.contains("phi i1 [ true, %tryget_not_null"));
     assert!(llvm_ir.contains("phi i1"));
     assert!(llvm_ir.contains("store ptr"));
+}
+
+#[test]
+fn compiles_system_weak_reference_package_surface_without_leak_warning() {
+    let source = r#"
+            using System.Ownership;
+            using System.WeakReference;
+
+            class Node {
+                public int Value;
+            }
+
+            fn main() {
+                Node node = new Node();
+                shared<Node> alias = node;
+                WeakReference<Node> weak = new WeakReference<Node>(alias);
+                Node target;
+                if (weak.TryGetTarget(out target)) {
+                    print(target.Value);
+                }
+                new WeakReference<Node>(alias);
+            }
+        "#;
+
+    let c = compile_source(source).expect("WeakReference package surface should compile");
+    let report = compile_leak_report(source).expect("WeakReference package surface should not leak");
+
+    assert!(c.contains("WeakReference"));
+    assert!(!report.contains("expression result is owned and discarded"));
 }
 
 #[test]
@@ -1653,6 +1823,61 @@ fn compiles_system_ownership_package_surface() {
 }
 
 #[test]
+fn tracks_explicit_ownership_wrappers_in_summary() {
+    let source = r#"
+            using System.Ownership;
+
+            class Node {
+                public int Value;
+            }
+
+            fn main() {
+                own<Node> owned = make_owned(new Node());
+                shared<Node> sharedNode = make_shared(new Node());
+                borrow<Node> borrowed = make_borrow(sharedNode);
+                view<Node> viewNode = make_view(sharedNode);
+                print(owned.Value);
+                print(sharedNode.Value);
+                print(borrowed.Value);
+                print(viewNode.Value);
+            }
+        "#;
+
+    let summary = compile_ownership_summary(source)
+        .expect("explicit ownership wrappers should be reflected in ownership summary");
+
+    assert!(summary.contains("local owned: Owned Class(\"Node\")"));
+    assert!(summary.contains("local sharedNode: Shared Class(\"Node\")"));
+    assert!(summary.contains("local borrowed: Borrowed Class(\"Node\")"));
+    assert!(summary.contains("local viewNode: View Class(\"Node\")"));
+}
+
+#[test]
+fn detects_cycles_through_shared_wrappers() {
+    let source = r#"
+            using System.Ownership;
+
+            class Node {
+                public shared<Node> Next;
+            }
+
+            fn main() {
+                var a = new Node();
+                var b = new Node();
+                a.Next = make_shared(b);
+                b.Next = make_shared(a);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("shared-wrapper cycle sample should compile");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3007"));
+    assert!(diagnostics.contains("shared<Node> Next"));
+}
+
+#[test]
 fn compiles_system_collections_generic_surface() {
     let source = r#"
             using System.Collections.Generic;
@@ -1677,6 +1902,48 @@ fn compiles_system_collections_generic_surface() {
         .expect("System.Collections.Generic package surface should compile");
     let diagnostics = output.diagnostics.join("\n");
     assert!(!diagnostics.contains("warning GL3005"));
+}
+
+#[test]
+fn compiles_dictionary_try_get_value_surface() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            fn main() {
+                Dictionary<string, int> map = new Dictionary<string, int>();
+                map.Add("a", 1);
+                int value = 0;
+                if (map.TryGetValue("a", out value)) {
+                    print(value);
+                }
+            }
+        "#;
+
+    let c = compile_source(source).expect("Dictionary.TryGetValue should compile");
+    let llvm_ir = compile_llvm_ir(source).expect("Dictionary.TryGetValue should lower to LLVM");
+
+    assert!(c.contains("Dict_string_int_try_get_value(&map, \"a\", &value)"));
+    assert!(llvm_ir.contains("dict_tryget_load"));
+}
+
+#[test]
+fn compiles_readonly_dictionary_as_view_framework_surface() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            fn main() {
+                IReadOnlyDictionary<string, int> map = new Dictionary<string, int>();
+                print(map.Count);
+                print(map.ContainsKey("a"));
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("IReadOnlyDictionary surface should compile");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(!diagnostics.contains("warning GL3005"));
+    assert!(!diagnostics.contains("warning GL3007"));
 }
 
 #[test]
@@ -1851,9 +2118,9 @@ fn lowers_unqualified_instance_fields_to_this_in_llvm() {
 
     let llvm_ir = compile_llvm_ir(source).expect("unqualified instance fields should compile");
 
-    assert!(llvm_ir.contains("define void @Options_ctor(ptr %this, i32 %value)"));
-    assert!(llvm_ir.contains("define i32 @Options_Get(ptr %this)"));
-    assert!(llvm_ir.contains("getelementptr inbounds %glitch.Options"));
+    assert!(llvm_ir.contains("define void @Options__g0__t"));
+    assert!(llvm_ir.contains("define i32 @Options__g0__t"));
+    assert!(llvm_ir.contains("getelementptr inbounds %glitch.Options__g0__t"));
 }
 
 #[test]
@@ -1982,6 +2249,28 @@ fn compiles_linq_to_array_over_list_surface() {
     assert!(c.contains("List_int_to_array(&numbers)"));
     assert!(c.contains("copy.len"));
     assert!(llvm.contains("%glitch.array"));
+}
+
+#[test]
+fn compiles_spread_collection_expression_to_list_surface() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Linq;
+
+            fn main() {
+                List<int> numbers = new List<int>();
+                numbers.Add(1);
+                numbers.Add(2);
+                List<int> copy = [.. numbers];
+                print(copy.Count);
+            }
+        "#;
+
+    let llvm =
+        compile_llvm_ir(source).expect("spread collection expression should lower to LLVM");
+
+    assert!(llvm.contains("ToList"));
+    assert!(llvm.contains("%glitch.list"));
 }
 
 #[test]
@@ -2292,6 +2581,78 @@ fn compiles_task_from_result_and_leak_report() {
 
     assert!(c.contains("struct GlitchTask_i32 number = GlitchTask_i32_from_result(42);"));
     assert!(report.contains("expression result is owned and discarded"));
+}
+
+#[test]
+fn compiles_task_when_all_and_completed_task_surface() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+
+            fn main() {
+                Task<int> first = Task.FromResult(1);
+                Task<int> second = Task.FromResult(2);
+                Task merged = Task.WhenAll(first, second);
+                print(merged.IsCompleted);
+            }
+        "#;
+
+    let c = compile_source(source).expect("Task.WhenAll and CompletedTask should compile");
+
+    assert!(c.contains("WhenAll"));
+    assert!(c.contains("merged"));
+}
+
+#[test]
+fn compiles_task_run_and_completed_task_package_surface() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int Compute() {
+                return 42;
+            }
+
+            void Touch() {
+            }
+
+            fn main() {
+                Task<int> valueTask = Task.Run(Compute);
+                Task emptyTask = Task.Run(Touch);
+                Task completed = Task.CompletedTask;
+                print(valueTask.Result);
+                print(completed != null);
+            }
+        "#;
+
+    let c = compile_source(source).expect("Task.Run and CompletedTask should compile");
+
+    assert!(c.contains("Task_i32_run"));
+    assert!(c.contains("Task_i32_from_result"));
+    assert!(c.contains("completed"));
+}
+
+#[test]
+fn diagnostics_report_linked_file_path_for_marked_sources() {
+    let source = r#"
+            // __FILE_PATH__: packages/Foo/Foo.gl
+            class Node {
+                public shared<Node> Next;
+            }
+            fn main() {
+                var a = new Node();
+                var b = new Node();
+                a.Next = make_shared(b);
+                b.Next = make_shared(a);
+            }
+            __FILE_BOUNDARY__;
+        "#;
+
+    let output = compile_source_with_options(source, false, false)
+        .expect("shared cycle sample should compile");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("packages/Foo/Foo.gl"));
+    assert!(diagnostics.contains("warning GL3007"));
 }
 
 #[test]

@@ -198,24 +198,32 @@ impl LlvmEmitter {
             }
         }
         emitter.emit_drop_glue();
+        let mut emitted_symbols = HashSet::new();
         for ty in &program.types {
             if ty.kind == TypeKind::Interface {
                 continue;
             }
             for constructor in &ty.constructors {
-                emitter.emit_typed_function(constructor)?;
+                if emitted_symbols.insert(constructor.symbol.clone()) {
+                    emitter.emit_typed_function(constructor)?;
+                }
             }
             for method in &ty.methods {
-                emitter.emit_typed_function(method)?;
+                if emitted_symbols.insert(method.symbol.clone()) {
+                    emitter.emit_typed_function(method)?;
+                }
             }
         }
         for function in &program.functions {
             if function.is_extern {
                 emitter.emit_external_declaration(function);
             } else {
-                emitter.emit_typed_function(function)?;
+                if emitted_symbols.insert(function.symbol.clone()) {
+                    emitter.emit_typed_function(function)?;
+                }
             }
         }
+        emitter.emit_web_application_handle_wrapper(program)?;
         emitter.emit_endpoint_dispatch()?;
         emitter.finish_module()
     }
@@ -263,13 +271,23 @@ impl LlvmEmitter {
         }
         self.type_defs.push(format!(
             "%{} = type {{ {} }}\n",
-            llvm_object_name(&ty.name),
+            llvm_object_name(&qualified_name(
+                &ty.namespace,
+                &ty.name,
+                ty.generic_params.len(),
+                ty.symbol_id,
+            )),
             layout.join(", ")
         ));
         self.object_types.insert(
             ty.name.clone(),
             LlObjectType {
-                name: ty.name.clone(),
+                name: qualified_name(
+                    &ty.namespace,
+                    &ty.name,
+                    ty.generic_params.len(),
+                    ty.symbol_id,
+                ),
                 kind: ty.kind,
                 bases: ty.bases.clone(),
                 fields,
@@ -429,13 +447,14 @@ impl LlvmEmitter {
             if !matches!(field.drop_kind, DropKind::DropClass | DropKind::DropStruct) {
                 continue;
             }
+            let drop_name = drop_symbol(&self.object_types[type_name].name);
             self.body.push_str(&format!(
                 "  %field_{}_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 {}\n  %field_{} = load ptr, ptr %field_{}_ptr\n  call void @{}(ptr %field_{})\n",
                 field.index,
                 field.index,
                 field.index,
                 field.index,
-                drop_symbol(type_name),
+                drop_name,
                 field.index
             ));
         }
@@ -504,6 +523,20 @@ impl LlvmEmitter {
             sanitize(&function.symbol),
             params
         ));
+    }
+
+    fn emit_web_application_handle_wrapper(&mut self, program: &TypedProgram) -> Result<(), String> {
+        let Some(web_app) = program.types.iter().find(|ty| ty.name == "WebApplication") else {
+            return Ok(());
+        };
+        let Some(handle) = web_app.methods.iter().find(|method| method.name == "Handle") else {
+            return Ok(());
+        };
+        self.body.push_str(&format!(
+            "define ptr @WebApplication_Handle(ptr %self, ptr %method, ptr %path, ptr %body) {{\nentry:\n  %result = call ptr @{}(ptr %self, ptr %method, ptr %path, ptr %body)\n  ret ptr %result\n}}\n\n",
+            sanitize(&handle.symbol)
+        ));
+        Ok(())
     }
 
     fn emit_typed_function(&mut self, function: &TypedFunction) -> Result<(), String> {
@@ -1137,6 +1170,17 @@ impl LlvmEmitter {
                     ty: var.ty,
                 })
             }
+            Expr::Assign { target, value } => {
+                let target = self.emit_expr(target)?;
+                let value = self.emit_expr(value)?;
+                self.body.push_str(&format!(
+                    "  store {} {}, ptr {}\n",
+                    value.ty.as_ir(),
+                    value.value,
+                    target.value
+                ));
+                Ok(value)
+            }
             Expr::Binary { left, op, right } => {
                 let left = self.emit_expr(left)?;
                 if *op == BinaryOp::Coalesce {
@@ -1565,6 +1609,63 @@ impl LlvmEmitter {
                 }
                 self.to_i1(value)
             }
+            TypedExprKind::Assign { target, value } => {
+                let value_expr = value.as_ref();
+                let value = self.emit_typed_expr(value_expr)?;
+                match &target.kind {
+                    TypedExprKind::Var(name) => {
+                        let var = self
+                            .vars
+                            .get(name)
+                            .cloned()
+                            .ok_or_else(|| format!("LLVM TIR backend: unknown variable '{name}'"))?;
+                        let casted = self.cast_value(value, &var.ty)?;
+                        self.retain_for_store(&var.ir_ty, value_expr, &casted.value);
+                        self.emit_var_drop(&var);
+                        self.body.push_str(&format!(
+                            "  store {} {}, ptr {}\n",
+                            var.ty.as_ir(),
+                            casted.value,
+                            var.ptr
+                        ));
+                        Ok(casted)
+                    }
+                    TypedExprKind::Field { .. } if !self.is_opaque_field(target) => {
+                        let field_ptr = self.emit_field_ptr(target)?;
+                        let field_ty = llvm_ir_type(&target.ty);
+                        let casted = self.cast_value(value, &field_ty)?;
+                        self.retain_for_store(&target.ty, value_expr, &casted.value);
+                        if let Some(type_name) = object_type_name(&target.ty) {
+                            if self.object_types.contains_key(type_name) {
+                                let old = self.tmp();
+                                self.body.push_str(&format!(
+                                    "  {old} = load ptr, ptr {}\n",
+                                    field_ptr.value
+                                ));
+                                self.emit_drop(type_name, &old);
+                            }
+                        } else if matches!(target.ty, IrType::String) {
+                            let old = self.tmp();
+                            self.body.push_str(&format!(
+                                "  {old} = load ptr, ptr {}\n  call void @glitch_string_release(ptr {old})\n",
+                                field_ptr.value
+                            ));
+                        }
+                        self.body.push_str(&format!(
+                            "  store {} {}, ptr {}\n",
+                            field_ty.as_ir(),
+                            casted.value,
+                            field_ptr.value
+                        ));
+                        Ok(casted)
+                    }
+                    _ => Err(format!(
+                        "LLVM TIR backend: unsupported assignment target {:?} with type {:?}",
+                        target.kind, target.ty
+                    )),
+                }
+            }
+            TypedExprKind::Throw(expr) => self.emit_throw_value(expr),
             TypedExprKind::NewObject {
                 type_name,
                 constructor: _,
@@ -1608,21 +1709,22 @@ impl LlvmEmitter {
             TypedExprKind::NewCollection(ty) => self.emit_new_collection(ty),
             TypedExprKind::NewArray {
                 element_type,
+                length,
                 values,
-            } => self.emit_new_array(element_type, values),
+            } => self.emit_new_array(element_type, length.as_deref(), values),
             TypedExprKind::ArrayLiteral(values) => {
                 let element_type = values
                     .first()
                     .map(|value| value.ty.clone())
                     .unwrap_or(IrType::Long);
-                self.emit_new_array(&element_type, values)
+                self.emit_new_array(&element_type, None, values)
             }
             TypedExprKind::Index { target, index } => self.emit_collection_index(target, index),
             TypedExprKind::Binary { left, op, right } => {
-                let left = self.emit_typed_expr(left)?;
                 if *op == BinaryOp::Coalesce {
-                    return Ok(left);
+                    return self.emit_coalesce_value(left, right, &expr.ty);
                 }
+                let left = self.emit_typed_expr(left)?;
                 if matches!(op, BinaryOp::And | BinaryOp::Or) {
                     let right = self.emit_typed_expr(right)?;
                     return self.emit_logical_value(left, *op, right);
@@ -1884,10 +1986,15 @@ impl LlvmEmitter {
                             };
                             if self.functions.contains_key(&resolved_symbol) {
                                 let receiver = self.emit_typed_expr(target)?;
+                                let call_args = if name.ends_with("Async") && !call.args.is_empty() {
+                                    &call.args[..call.args.len() - 1]
+                                } else {
+                                    &call.args
+                                };
                                 let result = self.emit_typed_call(
                                     &resolved_symbol,
                                     std::iter::once(receiver.clone()),
-                                    &call.args,
+                                    call_args,
                                 )?;
                                 self.emit_temporary_drop(target, &receiver);
                                 Ok(result)
@@ -2443,15 +2550,24 @@ impl LlvmEmitter {
 
         for (index, case) in cases.iter().enumerate() {
             self.body.push_str(&format!("{}:\n", compare_labels[index]));
-            let case_value = self.emit_typed_expr(&case.value)?;
-            let case_value = self.cast_value(case_value, &value.ty)?;
-            let equal = self.tmp();
-            self.emit_equality(&expr.ty, &value.value, &case_value.value, &equal);
             let next = compare_labels.get(index + 1).unwrap_or(&default_label);
-            self.body.push_str(&format!(
-                "  br i1 {equal}, label %{}, label %{next}\n",
-                case_labels[index]
-            ));
+            if matches!(case.value.kind, TypedExprKind::IsPattern { .. }) {
+                let case_value = self.emit_typed_expr(&case.value)?;
+                let case_value = self.to_i1(case_value)?;
+                self.body.push_str(&format!(
+                    "  br i1 {}, label %{}, label %{next}\n",
+                    case_value.value, case_labels[index]
+                ));
+            } else {
+                let case_value = self.emit_typed_expr(&case.value)?;
+                let case_value = self.cast_value(case_value, &value.ty)?;
+                let equal = self.tmp();
+                self.emit_equality(&expr.ty, &value.value, &case_value.value, &equal);
+                self.body.push_str(&format!(
+                    "  br i1 {equal}, label %{}, label %{next}\n",
+                    case_labels[index]
+                ));
+            }
         }
 
         let inherited_continue = self
@@ -2496,6 +2612,10 @@ impl LlvmEmitter {
                 element.as_ref()
             }
             IrType::Unknown(_) => {
+                self.emit_typed_expr(collection)?;
+                return Ok(());
+            }
+            IrType::Class(_) | IrType::Interface(_) => {
                 self.emit_typed_expr(collection)?;
                 return Ok(());
             }
@@ -2603,9 +2723,99 @@ impl LlvmEmitter {
         self.terminated = true;
     }
 
+    fn emit_throw_value(&mut self, expr: &TypedExpr) -> Result<LlValue, String> {
+        let exception = self.emit_typed_expr(expr)?;
+        let exception = self.cast_value(exception, &LlType::Ptr)?;
+        self.body.push_str(&format!(
+            "  store ptr {}, ptr @glitch_exception_pending\n",
+            exception.value
+        ));
+        self.emit_exception_branch();
+        self.default_typed_value(&expr.ty)
+    }
+
+    fn emit_coalesce_value(
+        &mut self,
+        left: &TypedExpr,
+        right: &TypedExpr,
+        result_ty: &IrType,
+    ) -> Result<LlValue, String> {
+        let left_value = self.emit_typed_expr(left)?;
+        let result_ll_ty = llvm_ir_type(result_ty);
+        let result_ptr = self.tmp();
+        let left_label = self.next_label("coalesce_left");
+        let right_label = self.next_label("coalesce_right");
+        let end_label = self.next_label("coalesce_end");
+        let is_null = match &left_value.ty {
+            LlType::Ptr => {
+                let check = self.tmp();
+                self.body.push_str(&format!(
+                    "  {check} = icmp eq ptr {}, null\n",
+                    left_value.value
+                ));
+                check
+            }
+            ty if ty.is_integer() => {
+                let check = self.tmp();
+                self.body.push_str(&format!(
+                    "  {check} = icmp eq {} {}, 0\n",
+                    ty.as_ir(),
+                    left_value.value
+                ));
+                check
+            }
+            LlType::Double => {
+                let check = self.tmp();
+                self.body.push_str(&format!(
+                    "  {check} = fcmp oeq double {}, 0.0\n",
+                    left_value.value
+                ));
+                check
+            }
+            _ => {
+                let check = self.tmp();
+                self.body
+                    .push_str(&format!("  {check} = icmp eq ptr null, null\n"));
+                check
+            }
+        };
+        self.body.push_str(&format!(
+            "  {result_ptr} = alloca {}\n  br i1 {}, label %{right_label}, label %{left_label}\n{left_label}:\n",
+            result_ll_ty.as_ir(),
+            is_null
+        ));
+        let left_cast = self.cast_value(left_value, &result_ll_ty)?;
+        self.body.push_str(&format!(
+            "  store {} {}, ptr {result_ptr}\n  br label %{end_label}\n{right_label}:\n",
+            result_ll_ty.as_ir(),
+            left_cast.value
+        ));
+        let right_value = self.emit_typed_expr(right)?;
+        if !self.terminated {
+            let right_cast = self.cast_value(right_value, &result_ll_ty)?;
+            self.body.push_str(&format!(
+                "  store {} {}, ptr {result_ptr}\n  br label %{end_label}\n",
+                result_ll_ty.as_ir(),
+                right_cast.value
+            ));
+        }
+        self.body.push_str(&format!("{end_label}:\n"));
+        self.terminated = false;
+        let result = self.tmp();
+        self.body.push_str(&format!(
+            "  {result} = load {}, ptr {result_ptr}\n",
+            result_ll_ty.as_ir()
+        ));
+        Ok(LlValue {
+            value: result,
+            ty: result_ll_ty,
+        })
+    }
+
     fn emit_new_array(
         &mut self,
         element_type: &IrType,
+        length: Option<&TypedExpr>,
         values: &[TypedExpr],
     ) -> Result<LlValue, String> {
         let array = self.tmp();
@@ -2613,10 +2823,21 @@ impl LlvmEmitter {
         let len_ptr = self.tmp();
         let data_ptr = self.tmp();
         let element_size = self.emit_type_size(element_type);
+        let len_value = if let Some(length) = length {
+            let length = self.emit_typed_expr(length)?;
+            self.cast_value(length, &LlType::I64)?.value
+        } else {
+            values.len().to_string()
+        };
+        let alloc_len = if length.is_some() {
+            len_value.clone()
+        } else {
+            values.len().to_string()
+        };
         self.body.push_str(&format!(
             "  {array} = call ptr @glitch_calloc(i64 1, i64 16)\n  {data} = call ptr @glitch_calloc(i64 {}, i64 {element_size})\n  {len_ptr} = getelementptr inbounds %glitch.array, ptr {array}, i32 0, i32 0\n  store i64 {}, ptr {len_ptr}\n  {data_ptr} = getelementptr inbounds %glitch.array, ptr {array}, i32 0, i32 1\n  store ptr {data}, ptr {data_ptr}\n",
-            values.len(),
-            values.len()
+            alloc_len,
+            len_value
         ));
         let element_ll_type = llvm_ir_type(element_type);
         for (index, source) in values.iter().enumerate() {
@@ -2774,8 +2995,10 @@ impl LlvmEmitter {
         let task_val = self.emit_typed_expr(target)?;
         if name == "Wait" {
             Ok(void_value())
-        } else if name == "GetResult" || name == "GetAwaiter" {
+        } else if name == "GetResult" || name == "GetAwaiter" || name == "AsTask" {
             if name == "GetAwaiter" {
+                Ok(task_val)
+            } else if name == "AsTask" {
                 Ok(task_val)
             } else {
                 let result_ty = expr_ty.clone();
@@ -2866,6 +3089,57 @@ impl LlvmEmitter {
                 let needle = self.cast_value(needle, &llvm_ir_type(key))?;
                 self.emit_dict_find(&collection.value, key, &needle.value)
                     .map(|(_, found)| found)
+            }
+            (IrType::Dictionary(key, value), "TryGetValue") => {
+                let [key_arg, out_arg] = args else {
+                    return Err(
+                        "LLVM TIR backend: Dictionary.TryGetValue expects two arguments"
+                            .to_string(),
+                    );
+                };
+                let key_value = self.emit_typed_expr(key_arg)?;
+                let key_value = self.cast_value(key_value, &llvm_ir_type(key))?;
+                let out_ptr = self.emit_typed_expr(out_arg)?;
+                let (found_index, found) =
+                    self.emit_dict_find(&collection.value, key, &key_value.value)?;
+                let load_label = self.next_label("dict_tryget_load");
+                let done_label = self.next_label("dict_tryget_done");
+                let value_ptr = self.tmp();
+                let values = self.tmp();
+                let slot = self.tmp();
+                let loaded = self.tmp();
+                let default_value = llvm_ir_type(value).default_value();
+                self.body.push_str(&format!(
+                    "  store {} {}, ptr {}\n",
+                    llvm_ir_type(value).as_ir(),
+                    default_value,
+                    out_ptr.value
+                ));
+                self.body.push_str(&format!(
+                    "  br i1 {}, label %{load_label}, label %{done_label}\n",
+                    found.value
+                ));
+                self.body.push_str(&format!("\n{load_label}:\n"));
+                self.body.push_str(&format!(
+                    "  {value_ptr} = getelementptr inbounds %glitch.dict, ptr {}, i32 0, i32 3\n",
+                    collection.value
+                ));
+                self.body.push_str(&format!("  {values} = load ptr, ptr {value_ptr}\n"));
+                self.body.push_str(&format!(
+                    "  {slot} = getelementptr inbounds {}, ptr {values}, i64 {}\n",
+                    llvm_ir_type(value).as_ir(),
+                    found_index.value
+                ));
+                self.body.push_str(&format!(
+                    "  {loaded} = load {}, ptr {slot}\n",
+                    llvm_ir_type(value).as_ir()
+                ));
+                self.body.push_str(&format!(
+                    "  store {} {loaded}, ptr {}\n  br label %{done_label}\n\n{done_label}:\n",
+                    llvm_ir_type(value).as_ir(),
+                    out_ptr.value
+                ));
+                Ok(found)
             }
             (IrType::Dictionary(key, value), "Remove") => {
                 let [arg] = args else {
@@ -3956,6 +4230,19 @@ fn llvm_object_name(name: &str) -> String {
     format!("glitch.{}", sanitize(name))
 }
 
+fn qualified_name(
+    namespace: &[String],
+    name: &str,
+    generic_arity: usize,
+    type_id: usize,
+) -> String {
+    if namespace.is_empty() {
+        format!("{}__g{}__t{}", name, generic_arity, type_id)
+    } else {
+        format!("{}.{}__g{}__t{}", namespace.join("."), name, generic_arity, type_id)
+    }
+}
+
 fn retain_symbol(name: &str) -> String {
     format!("glitch_retain_{}", sanitize(name))
 }
@@ -4100,7 +4387,10 @@ fn collect_rc_expr(expr: &TypedExpr, out: &mut HashSet<String>) {
                 collect_rc_expr(value, out);
             }
         }
-        TypedExprKind::NewArray { values, .. } => {
+        TypedExprKind::NewArray { length, values, .. } => {
+            if let Some(length) = length {
+                collect_rc_expr(length, out);
+            }
             for value in values {
                 collect_rc_expr(value, out);
             }
@@ -4142,6 +4432,11 @@ fn collect_rc_expr(expr: &TypedExpr, out: &mut HashSet<String>) {
         TypedExprKind::Await(inner)
         | TypedExprKind::Unary { expr: inner, .. }
         | TypedExprKind::IncDec { target: inner, .. } => collect_rc_expr(inner, out),
+        TypedExprKind::Throw(expr) => collect_rc_expr(expr, out),
+        TypedExprKind::Assign { target, value } => {
+            collect_rc_expr(target, out);
+            collect_rc_expr(value, out);
+        }
         TypedExprKind::Lambda { body, .. } => collect_rc_expr(body, out),
         TypedExprKind::Conditional {
             condition,
@@ -4412,6 +4707,13 @@ fn collect_free_vars_expr(
         TypedExprKind::IsPattern { expr, .. } => {
             collect_free_vars_expr(expr, lambda_params, scope, seen, out);
         }
+        TypedExprKind::Throw(expr) => {
+            collect_free_vars_expr(expr, lambda_params, scope, seen, out);
+        }
+        TypedExprKind::Assign { target, value } => {
+            collect_free_vars_expr(target, lambda_params, scope, seen, out);
+            collect_free_vars_expr(value, lambda_params, scope, seen, out);
+        }
         TypedExprKind::Unary { expr, .. } => {
             collect_free_vars_expr(expr, lambda_params, scope, seen, out);
         }
@@ -4456,7 +4758,10 @@ fn collect_free_vars_expr(
                 collect_free_vars_expr(e, lambda_params, scope, seen, out);
             }
         }
-        TypedExprKind::NewArray { values, .. } => {
+        TypedExprKind::NewArray { length, values, .. } => {
+            if let Some(length) = length {
+                collect_free_vars_expr(length, lambda_params, scope, seen, out);
+            }
             for v in values {
                 collect_free_vars_expr(v, lambda_params, scope, seen, out);
             }

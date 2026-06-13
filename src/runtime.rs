@@ -119,6 +119,7 @@ fn run_host(
 /// Layout must match the LLVM struct emitted by the compiler:
 ///   %glitch.response = type { i32, ptr, ptr }
 ///   fields: status_code, body (owned ptr), content_type (static ptr)
+#[allow(dead_code)]
 #[repr(C)]
 pub struct GlitchResponse {
     pub status_code: i32,

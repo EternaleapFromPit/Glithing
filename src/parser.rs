@@ -132,6 +132,10 @@ impl Parser {
                 self.using_aliases.clear();
                 continue;
             }
+            if self.at(&TokenKind::Hash) {
+                self.skip_preprocessor_directive();
+                continue;
+            }
             if self.match_kind(&TokenKind::Semi) {
                 continue;
             }
@@ -174,6 +178,7 @@ impl Parser {
             } else if self.at(&TokenKind::Ref)
                 || self.at(&TokenKind::Struct)
                 || self.at(&TokenKind::Class)
+                || self.at(&TokenKind::Record)
                 || self.at(&TokenKind::Interface)
             {
                 let mut nested = Vec::new();
@@ -394,11 +399,14 @@ impl Parser {
         native_c: &mut Vec<String>,
         delegates: &mut Vec<DelegateDef>,
     ) -> Result<TypeDef, String> {
+        let is_record = self.match_kind(&TokenKind::Record);
         let kind = if self.match_kind(&TokenKind::Ref) {
             self.expect(TokenKind::Struct)?;
             TypeKind::RefStruct
         } else if self.match_kind(&TokenKind::Struct) {
             TypeKind::Struct
+        } else if is_record {
+            TypeKind::Class
         } else if self.match_kind(&TokenKind::Interface) {
             TypeKind::Interface
         } else {
@@ -407,12 +415,24 @@ impl Parser {
         };
         let name = self.expect_ident()?;
         let generic_params = self.parse_generic_params()?;
+        let primary_params = if matches!(kind, TypeKind::Class) && self.match_kind(&TokenKind::LParen)
+        {
+            let params = self.parse_params()?;
+            self.expect(TokenKind::RParen)?;
+            Some(params)
+        } else {
+            None
+        };
         let bases = if self.match_kind(&TokenKind::Colon) {
             let mut bases = Vec::new();
             loop {
                 let base_ty = self
                     .parse_type_syntax()?
                     .ok_or_else(|| self.error_here("expected base type"))?;
+                if self.at(&TokenKind::LParen) {
+                    self.expect(TokenKind::LParen)?;
+                    let _ = self.parse_expr_list_until(TokenKind::RParen)?;
+                }
                 bases.push(type_syntax_name(&base_ty));
                 if !self.match_kind(&TokenKind::Comma) {
                     break;
@@ -423,13 +443,52 @@ impl Parser {
             Vec::new()
         };
         let generic_params = self.parse_generic_constraints(generic_params)?;
-        self.expect(TokenKind::LBrace)?;
         let mut fields = Vec::new();
         let mut constructors = Vec::new();
+        if let Some(params) = &primary_params {
+            for param in params {
+                fields.push(FieldDef {
+                    name: param.name.clone(),
+                    ty: param.ty.clone(),
+                });
+            }
+            constructors.push(Constructor {
+                namespace: namespace.clone(),
+                attributes: attributes.clone(),
+                params: params.clone(),
+                body: params
+                    .iter()
+                    .map(|param| Stmt::AssignTarget {
+                        target: Expr::Field {
+                            target: Box::new(Expr::Var("this".to_string())),
+                            name: param.name.clone(),
+                        },
+                        expr: Expr::Var(param.name.clone()),
+                    })
+                    .collect(),
+            });
+        }
+        if is_record && self.match_kind(&TokenKind::Semi) {
+            return Ok(TypeDef {
+                kind,
+                namespace,
+                attributes,
+                name,
+                generic_params,
+                bases,
+                fields,
+                constructors,
+                methods: Vec::new(),
+            });
+        }
+        self.expect(TokenKind::LBrace)?;
         let mut methods = Vec::new();
         while !self.at(&TokenKind::RBrace) {
+            if self.at(&TokenKind::Hash) {
+                self.skip_preprocessor_directive();
+                continue;
+            }
             if let TokenKind::Ident(ref name) = self.current().kind {
-                println!("CHECK MEMBER: {}", name);
                 if self.macros.contains_key(name) {
                     let macro_name = name.clone();
                     self.advance();
@@ -475,6 +534,7 @@ impl Parser {
             if self.at(&TokenKind::Ref)
                 || self.at(&TokenKind::Struct)
                 || self.at(&TokenKind::Class)
+                || self.at(&TokenKind::Record)
                 || self.at(&TokenKind::Interface)
             {
                 let nested = self.parse_type_def(
@@ -510,7 +570,11 @@ impl Parser {
                     self.expect(TokenKind::LParen)?;
                     let _args = self.parse_call_args_after_lparen()?;
                 }
-                let body = self.parse_stmt_body()?;
+                let body = if self.match_kind(&TokenKind::Arrow) {
+                    vec![self.parse_stmt()?]
+                } else {
+                    self.parse_stmt_body()?
+                };
                 constructors.push(Constructor {
                     namespace: namespace.clone(),
                     attributes: member_attributes,
@@ -541,7 +605,7 @@ impl Parser {
                     let expr = self.parse_expr()?;
                     self.expect(TokenKind::Semi)?;
                     vec![Stmt::Return(Some(expr))]
-                } else if (kind == TypeKind::Interface || member_modifiers.is_extern) && self.match_kind(&TokenKind::Semi) {
+                } else if self.match_kind(&TokenKind::Semi) {
                     Vec::new()
                 } else {
                     self.parse_stmt_body()?
@@ -888,8 +952,35 @@ impl Parser {
             let mut default = Vec::new();
             while !self.at(&TokenKind::RBrace) {
                 if self.match_kind(&TokenKind::Case) {
-                    let value = self.parse_expr()?;
-                    self.expect(TokenKind::Colon)?;
+                    let case_expr = expr.clone();
+                    let checkpoint = self.pos;
+                    let value = if let Some(ty) = self.parse_type_syntax()? {
+                        if let TokenKind::Ident(name) = self.current().kind.clone() {
+                            if self.peek_is(1, &TokenKind::Colon) {
+                                self.advance();
+                                self.expect(TokenKind::Colon)?;
+                                Expr::IsPattern {
+                                    expr: Box::new(case_expr),
+                                    ty,
+                                    name: Some(name),
+                                }
+                            } else {
+                                self.pos = checkpoint;
+                                let value = self.parse_expr()?;
+                                self.expect(TokenKind::Colon)?;
+                                value
+                            }
+                        } else {
+                            self.pos = checkpoint;
+                            let value = self.parse_expr()?;
+                            self.expect(TokenKind::Colon)?;
+                            value
+                        }
+                    } else {
+                        let value = self.parse_expr()?;
+                        self.expect(TokenKind::Colon)?;
+                        value
+                    };
                     let body = self.parse_switch_section_body()?;
                     cases.push(SwitchCase { value, body });
                 } else if self.match_kind(&TokenKind::Default) {
@@ -1069,12 +1160,6 @@ impl Parser {
         }
         if matches!(self.current().kind, TokenKind::Ident(_)) {
             if let TokenKind::Ident(name) = self.current().kind.clone() {
-                println!(
-                    "STMT IDENT: {}, peek1: {:?}, peek2: {:?}",
-                    name,
-                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
-                    self.tokens.get(self.pos + 2).map(|t| &t.kind)
-                );
                 if self.peek_is(1, &TokenKind::PlusPlus) {
                     self.advance();
                     self.advance();
@@ -1319,12 +1404,26 @@ impl Parser {
                 });
             }
         }
-        self.parse_conditional()
+        self.parse_assignment_expr()
+    }
+
+    fn parse_assignment_expr(&mut self) -> Result<Expr, String> {
+        let left = self.parse_conditional()?;
+        if self.at(&TokenKind::Eq) && !self.peek_is(1, &TokenKind::Eq) {
+            self.advance();
+            let right = self.parse_assignment_expr()?;
+            return Ok(Expr::Assign {
+                target: Box::new(left),
+                value: Box::new(right),
+            });
+        }
+        Ok(left)
     }
 
     fn parse_conditional(&mut self) -> Result<Expr, String> {
         let condition = self.parse_or()?;
-        if self.match_kind(&TokenKind::Question) {
+        if self.at(&TokenKind::Question) && !self.peek_is(1, &TokenKind::Question) {
+            self.advance();
             let when_true = self.parse_expr()?;
             self.expect(TokenKind::Colon)?;
             let when_false = self.parse_expr()?;
@@ -1418,6 +1517,27 @@ impl Parser {
             } else {
                 if self.current_ident_is("is") {
                     self.advance();
+                    if self.current_ident_is("not") {
+                        self.advance();
+                        if self.at(&TokenKind::Null) {
+                            self.advance();
+                            expr = Expr::Binary {
+                                left: Box::new(expr),
+                                op: BinaryOp::NotEq,
+                                right: Box::new(Expr::Null),
+                            };
+                            continue;
+                        }
+                    }
+                    if self.at(&TokenKind::Null) {
+                        self.advance();
+                        expr = Expr::Binary {
+                            left: Box::new(expr),
+                            op: BinaryOp::Eq,
+                            right: Box::new(Expr::Null),
+                        };
+                        continue;
+                    }
                     let ty = self
                         .parse_type_syntax()?
                         .ok_or_else(|| self.error_here("expected type after 'is'"))?;
@@ -1526,13 +1646,50 @@ impl Parser {
         let mut expr = self.parse_primary()?;
         loop {
             if self.match_kind(&TokenKind::LBracket) {
-                let index = self.parse_expr()?;
-                self.expect(TokenKind::RBracket)?;
-                expr = Expr::Index {
-                    target: Box::new(expr),
-                    index: Box::new(index),
-                };
+                if self.at(&TokenKind::Dot) && self.peek_is(1, &TokenKind::Dot) {
+                    self.advance();
+                    self.advance();
+                    let end = self.parse_expr()?;
+                    self.expect(TokenKind::RBracket)?;
+                    expr = Expr::MethodCall {
+                        target: Box::new(expr),
+                        name: "Substring".to_string(),
+                        args: vec![Expr::Int(0), end],
+                    };
+                } else {
+                    let start = self.parse_expr()?;
+                    if self.at(&TokenKind::Dot) && self.peek_is(1, &TokenKind::Dot) {
+                        self.advance();
+                        self.advance();
+                        let end = if self.at(&TokenKind::RBracket) {
+                            None
+                        } else {
+                            Some(self.parse_expr()?)
+                        };
+                        self.expect(TokenKind::RBracket)?;
+                        let args = if let Some(end) = end {
+                            vec![start, end]
+                        } else {
+                            vec![start]
+                        };
+                        expr = Expr::MethodCall {
+                            target: Box::new(expr),
+                            name: "Substring".to_string(),
+                            args,
+                        };
+                    } else {
+                        self.expect(TokenKind::RBracket)?;
+                        expr = Expr::Index {
+                            target: Box::new(expr),
+                            index: Box::new(start),
+                        };
+                    }
+                }
             } else if self.match_kind(&TokenKind::Dot) {
+                if self.at(&TokenKind::Dot) {
+                    self.pos -= 1;
+                    break;
+                }
                 let name = self.expect_ident()?;
                 let generic_checkpoint = self.pos;
                 if self.at(&TokenKind::Less) {
@@ -1554,6 +1711,53 @@ impl Parser {
                         name,
                     };
                 }
+            } else if self.at(&TokenKind::Question) && self.peek_is(1, &TokenKind::Dot) {
+                self.advance();
+                self.advance();
+                let base = expr.clone();
+                let name = self.expect_ident()?;
+                let generic_checkpoint = self.pos;
+                let access = if self.at(&TokenKind::Less) {
+                    if self.parse_generic_type_args(&name).is_err() || !self.at(&TokenKind::LParen)
+                    {
+                        self.pos = generic_checkpoint;
+                        Expr::Field {
+                            target: Box::new(base.clone()),
+                            name,
+                        }
+                    } else {
+                        self.expect(TokenKind::LParen)?;
+                        let args = self.parse_call_args_after_lparen()?;
+                        Expr::MethodCall {
+                            target: Box::new(base.clone()),
+                            name,
+                            args,
+                        }
+                    }
+                } else if self.match_kind(&TokenKind::LParen) {
+                    let args = self.parse_call_args_after_lparen()?;
+                    Expr::MethodCall {
+                        target: Box::new(base.clone()),
+                        name,
+                        args,
+                    }
+                } else {
+                    Expr::Field {
+                        target: Box::new(base.clone()),
+                        name,
+                    }
+                };
+                expr = Expr::Conditional {
+                    condition: Box::new(Expr::Binary {
+                        left: Box::new(base),
+                        op: BinaryOp::Eq,
+                        right: Box::new(Expr::Null),
+                    }),
+                    when_true: Box::new(Expr::Null),
+                    when_false: Box::new(access),
+                };
+            } else if self.at(&TokenKind::Question) {
+                break;
             } else if self.match_kind(&TokenKind::Bang) {
                 // C# null-forgiving operator is compile-time only.
             } else if self.match_kind(&TokenKind::PlusPlus)
@@ -1609,6 +1813,25 @@ impl Parser {
             }
             TokenKind::String(value) => {
                 self.advance();
+                if self.current_ident_is("u8") {
+                    self.advance();
+                    if self.match_kind(&TokenKind::Dot) {
+                        let method = self.expect_ident()?;
+                        if method == "ToArray" && self.at(&TokenKind::LParen) {
+                            let _ = self.parse_opaque_parenthesized()?;
+                        }
+                    }
+                    let values = value
+                        .as_bytes()
+                        .iter()
+                        .map(|byte| Expr::Int(*byte as i64))
+                        .collect();
+                    return Ok(Expr::NewArray {
+                        element_type: TypeSyntax::Scalar(ScalarType::Byte),
+                        length: None,
+                        values,
+                    });
+                }
                 Ok(Expr::String(value))
             }
             TokenKind::Ident(name) => {
@@ -1651,6 +1874,10 @@ impl Parser {
                     mutable,
                     name: self.expect_ident()?,
                 })
+            }
+            TokenKind::Throw => {
+                self.advance();
+                Ok(Expr::Throw(Box::new(self.parse_expr()?)))
             }
             TokenKind::Await => {
                 self.advance();
@@ -1695,6 +1922,7 @@ impl Parser {
                     let values = self.parse_array_initializer()?;
                     return Ok(Expr::NewArray {
                         element_type: TypeSyntax::Named("var".to_string()),
+                        length: None,
                         values,
                     });
                 }
@@ -1703,6 +1931,25 @@ impl Parser {
                     .ok_or_else(|| self.error_here("expected type after new"))?;
                 match ty {
                     TypeSyntax::Scalar(scalar) => {
+                        if self.at(&TokenKind::LBracket) {
+                            self.expect(TokenKind::LBracket)?;
+                            let length = if self.at(&TokenKind::RBracket) {
+                                None
+                            } else {
+                                Some(Box::new(self.parse_expr()?))
+                            };
+                            self.expect(TokenKind::RBracket)?;
+                            let values = if self.at(&TokenKind::LBrace) {
+                                self.parse_array_initializer()?
+                            } else {
+                                Vec::new()
+                            };
+                            return Ok(Expr::NewArray {
+                                element_type: TypeSyntax::Scalar(scalar),
+                                length,
+                                values,
+                            });
+                        }
                         if self.match_kind(&TokenKind::LParen) {
                             let _ = self.parse_call_args_after_lparen()?;
                         }
@@ -1719,11 +1966,32 @@ impl Parser {
                         Ok(Expr::String(String::new()))
                     }
                     TypeSyntax::Array(element) => {
-                        let values = self.parse_array_initializer()?;
-                        Ok(Expr::NewArray {
-                            element_type: *element,
-                            values,
-                        })
+                        if self.at(&TokenKind::LBracket) {
+                            self.expect(TokenKind::LBracket)?;
+                            let length = if self.at(&TokenKind::RBracket) {
+                                None
+                            } else {
+                                Some(Box::new(self.parse_expr()?))
+                            };
+                            self.expect(TokenKind::RBracket)?;
+                            let values = if self.at(&TokenKind::LBrace) {
+                                self.parse_array_initializer()?
+                            } else {
+                                Vec::new()
+                            };
+                            Ok(Expr::NewArray {
+                                element_type: *element,
+                                length,
+                                values,
+                            })
+                        } else {
+                            let values = self.parse_array_initializer()?;
+                            Ok(Expr::NewArray {
+                                element_type: *element,
+                                length: None,
+                                values,
+                            })
+                        }
                     }
                     TypeSyntax::List(_) | TypeSyntax::Dictionary(_, _) => {
                         if self.match_kind(&TokenKind::LParen) {
@@ -1845,9 +2113,21 @@ impl Parser {
             }
             TokenKind::LBracket => {
                 self.advance();
-                Ok(Expr::ArrayLiteral(
-                    self.parse_expr_list_until(TokenKind::RBracket)?,
-                ))
+                if self.at(&TokenKind::Dot) && self.peek_is(1, &TokenKind::Dot) {
+                    self.advance();
+                    self.advance();
+                    let source = self.parse_expr()?;
+                    self.expect(TokenKind::RBracket)?;
+                    Ok(Expr::MethodCall {
+                        target: Box::new(Expr::Var("Enumerable".to_string())),
+                        name: "ToList".to_string(),
+                        args: vec![source],
+                    })
+                } else {
+                    Ok(Expr::ArrayLiteral(
+                        self.parse_expr_list_until(TokenKind::RBracket)?,
+                    ))
+                }
             }
             TokenKind::LBrace => Ok(Expr::ArrayLiteral(self.parse_array_initializer()?)),
             _ => Err(self.error_here("expected expression")),
@@ -2066,6 +2346,18 @@ impl Parser {
             let key = args.remove(0);
             let value = args.remove(0);
             return Ok(Some(TypeSyntax::Dictionary(Box::new(key), Box::new(value))));
+        }
+        if is_type_path(&parts, &["IReadOnlyDictionary"])
+            || is_type_path(&parts, &["System", "Collections", "Generic", "IReadOnlyDictionary"])
+        {
+            let args = self.parse_generic_type_args("IReadOnlyDictionary")?;
+            if args.len() != 2 {
+                return Err(self.error_here("IReadOnlyDictionary expects key and value types"));
+            }
+            return Ok(Some(TypeSyntax::GenericNamed {
+                name: parts.join("."),
+                args,
+            }));
         }
         if is_type_path(&parts, &["IEnumerable"])
             || is_type_path(&parts, &["System", "Collections", "Generic", "IEnumerable"])
@@ -2326,6 +2618,7 @@ impl Parser {
                 | TokenKind::Float(_)
                 | TokenKind::Bool(_)
                 | TokenKind::Null
+                | TokenKind::Throw
                 | TokenKind::Default
                 | TokenKind::String(_)
                 | TokenKind::Ident(_)
@@ -2369,7 +2662,6 @@ impl Parser {
     fn parse_macro_def(&mut self) -> Result<(), String> {
         self.expect_ident()?; // consume "macro"
         let name = self.expect_ident()?;
-        println!("PARSED MACRO: {}", name);
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::new();
         if !self.at(&TokenKind::RParen) {
@@ -2561,6 +2853,13 @@ impl Parser {
         let token = self.current();
         format!("{}:{}: {message}", token.line, token.col)
     }
+
+    fn skip_preprocessor_directive(&mut self) {
+        let line = self.current().line;
+        while !self.at(&TokenKind::Eof) && self.current().line == line {
+            self.advance();
+        }
+    }
 }
 
 fn token_to_string(tok: &Token) -> String {
@@ -2581,6 +2880,7 @@ fn token_to_string(tok: &Token) -> String {
         TokenKind::Ref => "ref".to_string(),
         TokenKind::Struct => "struct".to_string(),
         TokenKind::Class => "class".to_string(),
+        TokenKind::Record => "record".to_string(),
         TokenKind::Interface => "interface".to_string(),
         TokenKind::Delegate => "delegate".to_string(),
         TokenKind::Enum => "enum".to_string(),

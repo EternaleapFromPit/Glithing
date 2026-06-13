@@ -52,13 +52,13 @@ impl LlvmEmitter {
                 "LLVM TIR backend: interface '{type_name}' cannot be allocated"
             ));
         }
+        let llvm_name = llvm_object_name(&object.name);
         if type_name.starts_with("Rc_") {
             let [value_expr] = args else {
                 return Err(format!(
                     "LLVM TIR backend: {type_name} constructor expects exactly one argument"
                 ));
             };
-            let llvm_name = llvm_object_name(type_name);
             let size_ptr = self.tmp();
             let size = self.tmp();
             let value = self.tmp();
@@ -69,7 +69,7 @@ impl LlvmEmitter {
             let drop_ptr = self.tmp();
             self.body.push_str(&format!(
                 "  {rc_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 0\n  store i64 1, ptr {rc_ptr}\n  {drop_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 1\n  store ptr @{}, ptr {drop_ptr}\n",
-                destroy_symbol(type_name)
+                destroy_symbol(&object.name)
             ));
             let field_value = self.emit_typed_expr(value_expr)?;
             let inner_field = object.fields.get("value").cloned().ok_or_else(|| {
@@ -91,7 +91,6 @@ impl LlvmEmitter {
             ));
             return Ok(LlValue { value, ty: LlType::Ptr });
         }
-        let llvm_name = llvm_object_name(type_name);
         let size_ptr = self.tmp();
         let size = self.tmp();
         let value = self.tmp();
@@ -103,7 +102,7 @@ impl LlvmEmitter {
             let drop_ptr = self.tmp();
             self.body.push_str(&format!(
                 "  {rc_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 0\n  store i64 1, ptr {rc_ptr}\n  {drop_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 1\n  store ptr @{}, ptr {drop_ptr}\n",
-                destroy_symbol(type_name)
+                destroy_symbol(&object.name)
             ));
         }
         if let Some(constructor) = constructor {
@@ -170,7 +169,7 @@ impl LlvmEmitter {
         let ptr = self.tmp();
         self.body.push_str(&format!(
             "  {ptr} = getelementptr inbounds %{}, ptr {}, i32 0, i32 {}\n",
-            llvm_object_name(type_name),
+            llvm_object_name(&object.name),
             target.value,
             field.index
         ));
@@ -271,14 +270,13 @@ impl LlvmEmitter {
     }
 
     pub(super) fn emit_retain(&mut self, type_name: &str, value: &str) {
-        if self
-            .object_types
-            .get(type_name)
-            .is_some_and(|object| matches!(object.kind, TypeKind::Class | TypeKind::Interface))
-        {
+        if let Some(object) = self.object_types.get(type_name) {
+            if !matches!(object.kind, TypeKind::Class | TypeKind::Interface) {
+                return;
+            }
             self.body.push_str(&format!(
                 "  call void @{}(ptr {value})\n",
-                retain_symbol(type_name)
+                retain_symbol(&object.name)
             ));
         }
     }
@@ -346,10 +344,10 @@ impl LlvmEmitter {
     }
 
     pub(super) fn emit_drop(&mut self, type_name: &str, value: &str) {
-        if self.object_types.contains_key(type_name) {
+        if let Some(object) = self.object_types.get(type_name) {
             self.body.push_str(&format!(
                 "  call void @{}(ptr {value})\n",
-                drop_symbol(type_name)
+                drop_symbol(&object.name)
             ));
         }
     }

@@ -41,13 +41,18 @@ The following items from the analysis are now implemented or superseded by later
 - ownership-cycle diagnostics now look through owned wrappers like `List<T>` and `Task<T>` in addition to direct class fields
 - task result access now retains string/object results and task drop paths release stored results for pointer-backed values
 - `System.Ownership` now has a real source package surface with `Rc<T>`, `Weak<T>`, and ownership helper aliases instead of a placeholder stub
+- `System.Ownership` now also exposes `shared<T>`, `borrow<T>`, `view<T>`, and `weakref<T>` aliases, and the compiler tracks those wrappers in ownership summaries, borrow checking, and cycle diagnostics
+- `System.WeakReference` is available as a package surface for weak-reference-based framework code
 - `List<T>.ToArray()` is lowered in both the C and LLVM paths for the supported scalar list types, which makes the current LINQ `ToArray` package path usable for the existing subset
 - `System.Linq` now has a stable non-delegate surface for `Count`, `Any`, `First`, `FirstOrDefault`, `ToList`, and `ToArray`; the delegate-based sequence operators remain outside the current compiler boundary
+- `System.Collections.Generic` now also recognizes `IReadOnlyDictionary<K,V>` as a view-style framework surface, and the compiler lowers it through the existing dictionary runtime path without treating it as owned
+- `System.Threading.Tasks` now has a slightly richer surface with `ValueTask<T>.AsTask()` and a fixed-arity `Task.WhenAll` helper for the supported subset, in addition to `FromResult`
 - `delegate` declarations are now first-class in the parser, typed IR, and C emitter, including generic instantiations such as `Predicate<int>` and namespace-qualified forms, and `ValueTask<T>.FromResult` lowers through the task runtime path
 - borrow-check control-flow joins now preserve moved/borrowed state across `if`, `switch`, `try/finally`, and early-return paths
 - xUnit test execution now runs through the Rust runtime path instead of the old native C runner
 - the current README has been updated to describe the implemented subset, the LLVM path, and the remaining safety boundaries
 - the stale `fixing_plan.md` has been removed
+- linked package and workspace sources now carry file markers that let diagnostics report the originating file path for warnings and compatibility messages instead of only the concatenated buffer location
 
 ## Current implementation boundary
 
@@ -62,12 +67,20 @@ The current boundary is:
 
 ## Next work items
 
-1. Expand ownership support beyond generic `Rc<T>` into other shared graphs and framework types.
-2. Improve framework compatibility for collections, tasks, delegates, and async lowering.
-3. Add stronger borrow-check analysis across the remaining control-flow joins and loop exit edges.
-4. Replace any remaining compatibility stubs with real lowering or real diagnostics.
-5. Tighten package/source linking and improve error reporting.
-6. Keep the README and implementation notes synchronized with actual compiler behavior.
+1. Remove the public C emission path and make the default CLI output a native binary instead.
+2. Redesign NuGet/package output so it no longer depends on generated C source.
+3. Migrate C-oriented tests to assert LLVM IR, bytecode, diagnostics, or native output instead.
+4. Improve framework compatibility for collections, tasks, delegates, and async lowering.
+5. Add stronger borrow-check analysis across the remaining control-flow joins and loop exit edges.
+6. Replace any remaining compatibility stubs with real lowering or real diagnostics.
+7. Tighten package/source linking and improve error reporting.
+8. Keep the README and implementation notes synchronized with actual compiler behavior.
+9. Bridge the remaining native host/runtime entrypoints into LLVM so package-provided ASP.NET-style helpers such as `WebApplication_Handle` and delegate refcount helpers resolve without the legacy C emission path.
+10. Fill out the ASP.NET Core sample surface used by the RealWorld app.
+   - Implement the package-backed or lowered surfaces still warned about in the sample: `AddDbContext`, `AddLocalization`, `AddCors`, `AddMvc`, `AddJsonOptions`, `UseCors`, `UseMvc`, `UseSwagger`, `UseSwaggerUI`, Serilog/JWT helper chains, and the JSON/file helpers that still emit compatibility defaults.
+   - Prefer real lowering where the runtime model is already present; otherwise keep unsupported members as diagnostics with explicit rewrite guidance instead of opaque nulls.
+
+   **Tests:** compile the RealWorld sample without GL3001/GL3003/GL3004 warnings for these specific paths, and add focused smoke tests for DI registration, MVC pipeline wiring, CORS, Swagger, JSON serialization, and logging setup.
 
 ## Notes
 

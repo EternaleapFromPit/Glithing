@@ -52,8 +52,8 @@ Current implemented subset:
 - Rust static runtime linkage for the LLVM HTTP socket host
 - reference-counted dynamic LLVM strings with deterministic release
 - typed `try` / `catch` / `finally` exception propagation in LLVM
-- legacy C code generation with `--emit-c` for compatibility
-- NuGet package generation containing emitted native C source for compatibility; it is not a managed `.dll` yet
+- default CLI output builds a native executable when no explicit output is requested
+- NuGet package emission is temporarily disabled until the package format is redesigned around the LLVM-native pipeline
 - source-level packages with `package Name;` and `native "C source";`
 
 `var x = value;` is accepted as a conversion-friendly spelling for `let mut x = value;`.
@@ -187,7 +187,7 @@ cargo run -- examples\llvm_simple.gl --emit-exe out.exe
 .\out.exe
 ```
 
-LLVM-only commands do not invoke the legacy C backend. On Windows, the compiler searches
+LLVM-only commands do not use the C emitter. On Windows, the compiler searches
 `PATH`, `GLITCH_LLVM_BIN`, and `C:\Program Files\LLVM\bin`. It also discovers installed
 Visual Studio 2022 MSVC and Windows SDK libraries for native linking.
 
@@ -212,12 +212,6 @@ cargo run -- examples\aspnet_socket_smoke.gl --emit-exe target\aspnet-socket-smo
 It serves `GET /health` on port `5099`, returns `{"status":"ok"}`, then exits. Set
 `GLITCH_REPORT_LEAKS=1` to print the remaining tracked allocation count at process exit.
 
-Emit legacy C explicitly:
-
-```powershell
-cargo run -- examples\ok.gl --emit-c out.c
-```
-
 Emit a NuGet package:
 
 ```powershell
@@ -236,7 +230,7 @@ Build the standalone `System.Threading.Tasks` package from Glitching-lang source
 cargo run -- stdlib\System.Threading.Tasks.gl --emit-nuget System.Threading.Tasks.0.1.0.nupkg --package-version 0.1.0
 ```
 
-The generated `.nupkg` contains the emitted C source under `contentFiles/any/any/` plus `buildTransitive` MSBuild files that copy the C source into referencing projects. It is not a managed `.dll` yet; producing a directly callable .NET assembly requires an IL backend or a native-library build/link step.
+Package emission is currently disabled pending a redesign that packages LLVM-native assets or a build-time compiler hook instead of generated C source.
 
 Expected rejected examples:
 

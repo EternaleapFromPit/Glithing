@@ -271,10 +271,10 @@ pub(super) fn emit_lambda_function(
                         .push_str(&format!("  call void @glitch_delegate_retain(ptr {cap_val})\n")),
                     DropKind::DropClass | DropKind::DropStruct => {
                         if let Some(type_name) = object_type_name(&lv.ir_ty) {
-                            if emitter.object_types.contains_key(type_name) {
+                            if let Some(object) = emitter.object_types.get(type_name) {
                                 emitter.body.push_str(&format!(
                                     "  call void @{}(ptr {cap_val})\n",
-                                    retain_symbol(type_name)
+                                    retain_symbol(&object.name)
                                 ));
                             }
                         }
@@ -329,10 +329,10 @@ pub(super) fn emit_lambda_function(
             }
             DropKind::DropClass | DropKind::DropStruct => {
                 if let Some(type_name) = object_type_name(&lv.ir_ty) {
-                    if emitter.object_types.contains_key(type_name) {
+                    if let Some(object) = emitter.object_types.get(type_name) {
                         destroy_func.push_str(&format!(
                             "  call void @{}(ptr {loaded_val})\n",
-                            drop_symbol(type_name)
+                            drop_symbol(&object.name)
                         ));
                     }
                 }

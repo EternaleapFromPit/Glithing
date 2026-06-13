@@ -250,7 +250,10 @@ impl BytecodeEmitter {
                 self.out
                     .push_str(&format!("  new_array {}\n", values.len()));
             }
-            Expr::NewArray { values, .. } => {
+            Expr::NewArray { length, values, .. } => {
+                if let Some(length) = length {
+                    self.emit_expr(length);
+                }
                 for value in values {
                     self.emit_expr(value);
                 }
@@ -315,6 +318,15 @@ impl BytecodeEmitter {
             Expr::Await(inner) => {
                 self.emit_expr(inner);
                 self.out.push_str("  await\n");
+            }
+            Expr::Throw(inner) => {
+                self.emit_expr(inner);
+                self.out.push_str("  throw\n");
+            }
+            Expr::Assign { target, value } => {
+                self.emit_expr(target);
+                self.emit_expr(value);
+                self.out.push_str("  assign\n");
             }
             Expr::Lambda { params, body } => {
                 self.emit_expr(body);

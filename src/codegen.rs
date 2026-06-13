@@ -1230,7 +1230,12 @@ impl Codegen {
             | Expr::RefArg { expr, .. }
             | Expr::Await(expr)
             | Expr::Unary { expr, .. }
-            | Expr::IsPattern { expr, .. } => self.declare_out_vars(expr, state, out),
+            | Expr::IsPattern { expr, .. }
+            | Expr::Throw(expr) => self.declare_out_vars(expr, state, out),
+            Expr::Assign { target, value } => {
+                self.declare_out_vars(target, state, out);
+                self.declare_out_vars(value, state, out);
+            }
             Expr::Binary { left, right, .. } => {
                 self.declare_out_vars(left, state, out);
                 self.declare_out_vars(right, state, out);
@@ -1249,7 +1254,7 @@ impl Codegen {
                 self.declare_out_vars(index, state, out);
             }
             Expr::Field { target, .. } => self.declare_out_vars(target, state, out),
-            Expr::ArrayLiteral(values) | Expr::NewArray { values, .. } => {
+            Expr::ArrayLiteral(values) | Expr::NewArray { length: _, values, .. } => {
                 for value in values {
                     self.declare_out_vars(value, state, out);
                 }
@@ -1338,8 +1343,12 @@ impl Codegen {
             }
             Expr::NewArray {
                 element_type,
+                length,
                 values,
             } => {
+                if let Some(length) = length {
+                    let _ = self.emit_expr(length, vars)?;
+                }
                 let values = values
                     .iter()
                     .map(|v| self.emit_expr(v, vars).map(|e| e.code))
@@ -1885,6 +1894,58 @@ impl Codegen {
                         ),
                         c_type: CType::Scalar(ScalarType::Bool),
                     }),
+                    (CType::DictStringInt, "TryGetValue") => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_int_try_get_value(&{}, {}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?,
+                            self.emit_ref_arg_for_param(
+                                &args[1],
+                                &CType::Ptr(ScalarType::I32),
+                                vars
+                            )?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::DictStringI64, "TryGetValue") => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_i64_try_get_value(&{}, {}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?,
+                            self.emit_ref_arg_for_param(
+                                &args[1],
+                                &CType::Ptr(ScalarType::I64),
+                                vars
+                            )?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::DictStringBool, "TryGetValue") => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_bool_try_get_value(&{}, {}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?,
+                            self.emit_ref_arg_for_param(
+                                &args[1],
+                                &CType::Ptr(ScalarType::Bool),
+                                vars
+                            )?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
+                    (CType::DictStringF64, "TryGetValue") => Ok(EmittedExpr {
+                        code: format!(
+                            "Dict_string_f64_try_get_value(&{}, {}, {})",
+                            t.code,
+                            self.emit_string_borrow_arg(&args[0], vars)?,
+                            self.emit_ref_arg_for_param(
+                                &args[1],
+                                &CType::Ptr(ScalarType::F64),
+                                vars
+                            )?
+                        ),
+                        c_type: CType::Scalar(ScalarType::Bool),
+                    }),
                     (CType::DictStringInt, "ContainsKey") => Ok(EmittedExpr {
                         code: format!(
                             "Dict_string_int_contains_key(&{}, {})",
@@ -2007,6 +2068,10 @@ impl Codegen {
                         c_type: *result,
                     }),
                     (CType::Task(result), "GetAwaiter") => Ok(EmittedExpr {
+                        code: t.code,
+                        c_type: CType::Task(result),
+                    }),
+                    (CType::Task(result), "AsTask") => Ok(EmittedExpr {
                         code: t.code,
                         c_type: CType::Task(result),
                     }),
@@ -2346,6 +2411,37 @@ impl Codegen {
                     Err("await expects Task or Task<T>".to_string())
                 }
             }
+            Expr::Throw(expr) => {
+                let emitted = self.emit_expr(expr, vars)?;
+                let code = match emitted.c_type {
+                    CType::Exception => format!("glitch_throw({})", emitted.code),
+                    CType::ExceptionPtr => {
+                        format!("glitch_throw(glitch_exception_clone({}))", emitted.code)
+                    }
+                    CType::String => {
+                        format!("glitch_throw(glitch_exception_from_owned({}))", emitted.code)
+                    }
+                    CType::BorrowedString => {
+                        format!("glitch_throw(glitch_exception_new({}))", emitted.code)
+                    }
+                    CType::ClassPtr(_) | CType::GenericPtr(_) => {
+                        "glitch_throw(glitch_exception_new(\"\"))".to_string()
+                    }
+                    other => return Err(format!("throw expects Exception or string, got {other}")),
+                };
+                Ok(EmittedExpr {
+                    code,
+                    c_type: CType::Void,
+                })
+            }
+            Expr::Assign { target, value } => {
+                let emitted_value = self.emit_expr(value, vars)?;
+                let emitted_target = self.emit_expr(target, vars)?;
+                Ok(EmittedExpr {
+                    code: format!("(({}) = {}, {})", emitted_target.code, emitted_value.code, emitted_value.code),
+                    c_type: emitted_value.c_type,
+                })
+            }
             Expr::Unary { op, expr } => {
                 let emitted = self.emit_expr(expr, vars)?;
                 let (code, c_type) = match op {
@@ -2448,6 +2544,29 @@ impl Codegen {
             Expr::Binary { left, op, right } => {
                 if *op == BinaryOp::Coalesce {
                     let l = self.emit_expr(left, vars)?;
+                    if let Expr::Throw(inner) = right.as_ref() {
+                        let thrown = self.emit_expr(inner, vars)?;
+                        let default_code = default_c_value(&l.c_type);
+                        if matches!(
+                            l.c_type,
+                            CType::String
+                                | CType::BorrowedString
+                                | CType::ClassPtr(_)
+                                | CType::GenericPtr(_)
+                        ) {
+                            return Ok(EmittedExpr {
+                                code: format!(
+                                    "({0} ? {0} : ({1}, {2}))",
+                                    l.code, thrown.code, default_code
+                                ),
+                                c_type: l.c_type,
+                            });
+                        }
+                        return Ok(EmittedExpr {
+                            code: format!("({0} ? {0} : ({1}, {2}))", l.code, thrown.code, default_code),
+                            c_type: l.c_type,
+                        });
+                    }
                     let r = self.emit_expr(right, vars)?;
                     if l.c_type == CType::Null {
                         return Ok(r);
@@ -2520,7 +2639,8 @@ impl Codegen {
             | Expr::Field { .. }
             | Expr::MethodCall { .. }
             | Expr::FunctionCall { .. }
-            | Expr::Await(_) => self
+            | Expr::Await(_)
+            | Expr::Throw(_) => self
                 .emit_expr(expr, vars)
                 .map(|emitted| matches!(emitted.c_type, CType::String | CType::BorrowedString))
                 .unwrap_or(false),
@@ -2533,6 +2653,7 @@ impl Codegen {
             Expr::NamedArg { expr, .. } | Expr::RefArg { expr, .. } => {
                 self.expr_is_string_like(expr, vars)
             }
+            Expr::Assign { value, .. } => self.expr_is_string_like(value, vars),
             _ => false,
         }
     }
@@ -3111,7 +3232,10 @@ impl Codegen {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(array_literal_code(*element, &values))
             }
-            Expr::NewArray { values, .. } => {
+            Expr::NewArray { length, values, .. } => {
+                if let Some(length) = length {
+                    let _ = self.emit_expr(length, vars)?;
+                }
                 let values = values
                     .iter()
                     .map(|value| self.emit_expr(value, vars).map(|emitted| emitted.code))
@@ -3780,7 +3904,10 @@ impl Codegen {
                     self.remember_moves(value, state);
                 }
             }
-            Expr::NewArray { values, .. } => {
+            Expr::NewArray { length, values, .. } => {
+                if let Some(length) = length {
+                    self.remember_moves(length, state);
+                }
                 for value in values {
                     self.remember_moves(value, state);
                 }
@@ -3806,6 +3933,10 @@ impl Codegen {
             } => {
                 self.remember_moves(target, state);
                 self.remember_moves(index, state);
+            }
+            Expr::Assign { target, value } => {
+                self.remember_moves(target, state);
+                self.remember_moves(value, state);
             }
             Expr::Field { target, .. } | Expr::Await(target) => {
                 self.remember_moves(target, state);
@@ -4627,6 +4758,7 @@ static struct Dict_string_int Dict_string_int_new(void) { struct Dict_string_int
 static void Dict_string_int_add(struct Dict_string_int *dict, const char *key, int value) { if (dict->len >= dict->cap) { dict->cap *= 2; dict->entries = realloc(dict->entries, sizeof(struct Dict_string_int_entry) * (size_t)dict->cap); if (!dict->entries) { abort(); } } dict->entries[dict->len].key = glitch_strdup(key); dict->entries[dict->len].value = value; dict->len++; }
 static int Dict_string_int_contains_key(struct Dict_string_int *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return 1; } } return 0; }
 static int Dict_string_int_get(struct Dict_string_int *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return dict->entries[i].value; } } abort(); }
+static int Dict_string_int_try_get_value(struct Dict_string_int *dict, const char *key, int *value) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { *value = dict->entries[i].value; return 1; } } *value = 0; return 0; }
 static int Dict_string_int_remove(struct Dict_string_int *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { free(dict->entries[i].key); for (int j = i + 1; j < dict->len; j++) { dict->entries[j - 1] = dict->entries[j]; } dict->len--; return 1; } } return 0; }
 static void Dict_string_int_clear(struct Dict_string_int *dict) { for (int i = 0; i < dict->len; i++) { free(dict->entries[i].key); } dict->len = 0; }
 static void Dict_string_int_free(struct Dict_string_int *dict) { Dict_string_int_clear(dict); free(dict->entries); dict->entries = NULL; dict->cap = 0; }
@@ -4637,6 +4769,7 @@ static struct Dict_string_i64 Dict_string_i64_new(void) { struct Dict_string_i64
 static void Dict_string_i64_add(struct Dict_string_i64 *dict, const char *key, long long value) { if (dict->len >= dict->cap) { dict->cap *= 2; dict->entries = realloc(dict->entries, sizeof(struct Dict_string_i64_entry) * (size_t)dict->cap); if (!dict->entries) { abort(); } } dict->entries[dict->len].key = glitch_strdup(key); dict->entries[dict->len].value = value; dict->len++; }
 static int Dict_string_i64_contains_key(struct Dict_string_i64 *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return 1; } } return 0; }
 static long long Dict_string_i64_get(struct Dict_string_i64 *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return dict->entries[i].value; } } abort(); }
+static int Dict_string_i64_try_get_value(struct Dict_string_i64 *dict, const char *key, long long *value) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { *value = dict->entries[i].value; return 1; } } *value = 0; return 0; }
 static int Dict_string_i64_remove(struct Dict_string_i64 *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { free(dict->entries[i].key); for (int j = i + 1; j < dict->len; j++) { dict->entries[j - 1] = dict->entries[j]; } dict->len--; return 1; } } return 0; }
 static void Dict_string_i64_clear(struct Dict_string_i64 *dict) { for (int i = 0; i < dict->len; i++) { free(dict->entries[i].key); } dict->len = 0; }
 static void Dict_string_i64_free(struct Dict_string_i64 *dict) { Dict_string_i64_clear(dict); free(dict->entries); dict->entries = NULL; dict->cap = 0; }
@@ -4647,6 +4780,7 @@ static struct Dict_string_bool Dict_string_bool_new(void) { struct Dict_string_b
 static void Dict_string_bool_add(struct Dict_string_bool *dict, const char *key, int value) { if (dict->len >= dict->cap) { dict->cap *= 2; dict->entries = realloc(dict->entries, sizeof(struct Dict_string_bool_entry) * (size_t)dict->cap); if (!dict->entries) { abort(); } } dict->entries[dict->len].key = glitch_strdup(key); dict->entries[dict->len].value = value; dict->len++; }
 static int Dict_string_bool_contains_key(struct Dict_string_bool *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return 1; } } return 0; }
 static int Dict_string_bool_get(struct Dict_string_bool *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return dict->entries[i].value; } } abort(); }
+static int Dict_string_bool_try_get_value(struct Dict_string_bool *dict, const char *key, int *value) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { *value = dict->entries[i].value; return 1; } } *value = 0; return 0; }
 static int Dict_string_bool_remove(struct Dict_string_bool *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { free(dict->entries[i].key); for (int j = i + 1; j < dict->len; j++) { dict->entries[j - 1] = dict->entries[j]; } dict->len--; return 1; } } return 0; }
 static void Dict_string_bool_clear(struct Dict_string_bool *dict) { for (int i = 0; i < dict->len; i++) { free(dict->entries[i].key); } dict->len = 0; }
 static void Dict_string_bool_free(struct Dict_string_bool *dict) { Dict_string_bool_clear(dict); free(dict->entries); dict->entries = NULL; dict->cap = 0; }
@@ -4657,6 +4791,7 @@ static struct Dict_string_f64 Dict_string_f64_new(void) { struct Dict_string_f64
 static void Dict_string_f64_add(struct Dict_string_f64 *dict, const char *key, double value) { if (dict->len >= dict->cap) { dict->cap *= 2; dict->entries = realloc(dict->entries, sizeof(struct Dict_string_f64_entry) * (size_t)dict->cap); if (!dict->entries) { abort(); } } dict->entries[dict->len].key = glitch_strdup(key); dict->entries[dict->len].value = value; dict->len++; }
 static int Dict_string_f64_contains_key(struct Dict_string_f64 *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return 1; } } return 0; }
 static double Dict_string_f64_get(struct Dict_string_f64 *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { return dict->entries[i].value; } } abort(); }
+static int Dict_string_f64_try_get_value(struct Dict_string_f64 *dict, const char *key, double *value) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { *value = dict->entries[i].value; return 1; } } *value = 0; return 0; }
 static int Dict_string_f64_remove(struct Dict_string_f64 *dict, const char *key) { for (int i = 0; i < dict->len; i++) { if (strcmp(dict->entries[i].key, key) == 0) { free(dict->entries[i].key); for (int j = i + 1; j < dict->len; j++) { dict->entries[j - 1] = dict->entries[j]; } dict->len--; return 1; } } return 0; }
 static void Dict_string_f64_clear(struct Dict_string_f64 *dict) { for (int i = 0; i < dict->len; i++) { free(dict->entries[i].key); } dict->len = 0; }
 static void Dict_string_f64_free(struct Dict_string_f64 *dict) { Dict_string_f64_clear(dict); free(dict->entries); dict->entries = NULL; dict->cap = 0; }

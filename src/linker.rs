@@ -5,6 +5,7 @@ pub(crate) fn link_package_sources(source: &str) -> Result<String, String> {
     let mut visited = Vec::new();
     let mut linked = String::new();
     link_package_sources_inner(source, &mut visited, &mut linked)?;
+    linked.push_str(&source_file_marker("linked input"));
     linked.push_str(source);
     linked.push_str("\n__FILE_BOUNDARY__;\n");
     Ok(linked)
@@ -35,10 +36,15 @@ fn link_package_sources_inner(
             )
         })?;
         link_package_sources_inner(strip_utf8_bom(&package_source), visited, linked)?;
+        linked.push_str(&source_file_marker(&path.display().to_string()));
         linked.push_str(&package_source);
         linked.push_str("\n__FILE_BOUNDARY__;\n");
     }
     Ok(())
+}
+
+fn source_file_marker(path: &str) -> String {
+    format!("// __FILE_PATH__: {path}\n")
 }
 
 pub(crate) fn source_using_packages(source: &str) -> Vec<String> {

@@ -70,6 +70,9 @@ pub(crate) struct TypedProgram {
 #[derive(Debug, Clone)]
 pub(crate) struct TypedType {
     pub(crate) name: String,
+    pub(crate) namespace: Vec<String>,
+    pub(crate) generic_params: Vec<String>,
+    pub(crate) symbol_id: usize,
     pub(crate) kind: TypeKind,
     pub(crate) bases: Vec<String>,
     pub(crate) fields: Vec<TypedBinding>,
@@ -188,6 +191,7 @@ pub(crate) enum TypedExprKind {
     ArrayLiteral(Vec<TypedExpr>),
     NewArray {
         element_type: IrType,
+        length: Option<Box<TypedExpr>>,
         values: Vec<TypedExpr>,
     },
     Index {
@@ -201,6 +205,11 @@ pub(crate) enum TypedExprKind {
     IsPattern {
         expr: Box<TypedExpr>,
         binding: Option<TypedBinding>,
+    },
+    Throw(Box<TypedExpr>),
+    Assign {
+        target: Box<TypedExpr>,
+        value: Box<TypedExpr>,
     },
     Call(TypedCall),
     NewObject {
@@ -322,8 +331,16 @@ pub(crate) struct EndpointParameterBinding {
 #[derive(Debug, Clone)]
 struct FunctionSignature {
     params: Vec<IrType>,
+    param_ownerships: Vec<Ownership>,
     return_type: IrType,
+    return_ownership: Ownership,
     symbol: String,
+}
+
+#[derive(Debug, Clone)]
+struct FieldSignature {
+    ty: IrType,
+    ownership: Ownership,
 }
 
 #[derive(Debug, Clone)]
@@ -338,12 +355,13 @@ struct DelegateSignature {
 struct TypeEnv {
     kinds: HashMap<String, TypeKind>,
     bases: HashMap<String, Vec<String>>,
+    enum_values: HashMap<(String, String), i64>,
     delegates: HashMap<String, DelegateSignature>,
     functions: HashMap<String, Vec<FunctionSignature>>,
     methods: HashMap<(String, String), Vec<FunctionSignature>>,
     constructors: HashMap<String, Vec<FunctionSignature>>,
-    fields: HashMap<(String, String), IrType>,
-    field_order: HashMap<String, Vec<(String, IrType)>>,
+    fields: HashMap<(String, String), FieldSignature>,
+    field_order: HashMap<String, Vec<(String, FieldSignature)>>,
 }
 
 impl TypedProgram {
@@ -351,6 +369,12 @@ impl TypedProgram {
         let mut env = TypeEnv::default();
         for enum_def in &program.enums {
             env.kinds.insert(enum_def.name.clone(), TypeKind::Enum);
+            for (index, variant) in enum_def.variants.iter().enumerate() {
+                env.enum_values.insert(
+                    (enum_def.name.clone(), variant.name.clone()),
+                    variant.value.unwrap_or(index as i64),
+                );
+            }
         }
         for ty in &program.types {
             env.kinds.insert(ty.name.clone(), ty.kind);
@@ -363,19 +387,24 @@ impl TypedProgram {
         for ty in &program.types {
             for field in &ty.fields {
                 let field_type = type_syntax_to_ir(&field.ty, &env);
+                let field_signature = FieldSignature {
+                    ty: field_type.clone(),
+                    ownership: ownership_for_declared_type_syntax(&field.ty, &env),
+                };
                 env.fields
-                    .insert((ty.name.clone(), field.name.clone()), field_type.clone());
+                    .insert((ty.name.clone(), field.name.clone()), field_signature.clone());
                 env.field_order
                     .entry(ty.name.clone())
                     .or_default()
-                    .push((field.name.clone(), field_type));
+                    .push((field.name.clone(), field_signature));
             }
         }
 
         let types = program
             .types
             .iter()
-            .map(|ty| lower_type(ty, &env))
+            .enumerate()
+            .map(|(index, ty)| lower_type(ty, index, &env))
             .collect::<Result<Vec<_>, _>>()?;
         let functions = program
             .functions
@@ -427,16 +456,26 @@ impl TypedProgram {
                     TypeKind::Class | TypeKind::Interface => IrType::Class(ty.name.clone()),
                     _ => IrType::Ref(Box::new(IrType::Struct(ty.name.clone()))),
                 };
+                let mut params = vec![TypedBinding {
+                    name: "this".to_string(),
+                    ty: this_type,
+                    ownership: Ownership::Borrowed,
+                }];
+                for param in &constructor.params {
+                    let ty = type_syntax_to_ir(&param.ty, &env);
+                    params.push(TypedBinding {
+                        name: param.name.clone(),
+                        ty,
+                        ownership: ownership_for_declared_type_syntax(&param.ty, &env),
+                    });
+                }
                 OwnershipChecker::check_body(
                     &format!("constructor {}", ty.name),
                     &constructor.body,
                     &env,
-                    vec![TypedBinding {
-                        name: "this".to_string(),
-                        ty: this_type,
-                        ownership: Ownership::Borrowed,
-                    }],
+                    params,
                     &IrType::Void,
+                    Ownership::Copy,
                 )?;
             }
             for method in &ty.methods {
@@ -568,7 +607,7 @@ fn populate_delegate_signatures(program: &Program, env: &mut TypeEnv) {
 }
 
 fn populate_method_signatures(program: &Program, env: &mut TypeEnv) {
-    for ty in &program.types {
+    for (type_index, ty) in program.types.iter().enumerate() {
         for method in &ty.methods {
             let overloaded = ty
                 .methods
@@ -581,15 +620,26 @@ fn populate_method_signatures(program: &Program, env: &mut TypeEnv) {
                 .iter()
                 .map(|param| type_syntax_to_ir(&param.ty, env))
                 .collect::<Vec<_>>();
+            let param_ownerships = method
+                .params
+                .iter()
+                .map(|param| ownership_for_declared_type_syntax(&param.ty, env))
+                .collect::<Vec<_>>();
             let suffix = params
                 .iter()
                 .map(ir_symbol_suffix)
                 .collect::<Vec<_>>()
                 .join("_");
             let base = format!(
-                "{}_{}",
-                sanitize_ir_symbol(&ty.name),
-                sanitize_ir_symbol(&method.name)
+                "{}_{}__g{}",
+                qualified_type_symbol_name(
+                    &ty.namespace,
+                    &ty.name,
+                    ty.generic_params.len(),
+                    type_index,
+                ),
+                sanitize_ir_symbol(&method.name),
+                method.generic_params.len()
             );
             // Preserve the C# source method name for lookup, but give each overload
             // a stable lowered symbol that later IR/codegen stages can call directly.
@@ -603,12 +653,15 @@ fn populate_method_signatures(program: &Program, env: &mut TypeEnv) {
                 base
             };
             let return_type = type_syntax_to_ir(&method.return_type, env);
+            let return_ownership = ownership_for_declared_type_syntax(&method.return_type, env);
             env.methods
                 .entry((ty.name.clone(), method.name.clone()))
                 .or_default()
                 .push(FunctionSignature {
                     params,
+                    param_ownerships,
                     return_type,
+                    return_ownership,
                     symbol,
                 });
         }
@@ -616,7 +669,7 @@ fn populate_method_signatures(program: &Program, env: &mut TypeEnv) {
 }
 
 fn populate_constructor_signatures(program: &Program, env: &mut TypeEnv) {
-    for ty in &program.types {
+    for (type_index, ty) in program.types.iter().enumerate() {
         let overloaded = ty.constructors.len() > 1;
         for constructor in &ty.constructors {
             let params = constructor
@@ -624,12 +677,25 @@ fn populate_constructor_signatures(program: &Program, env: &mut TypeEnv) {
                 .iter()
                 .map(|param| type_syntax_to_ir(&param.ty, env))
                 .collect::<Vec<_>>();
+            let param_ownerships = constructor
+                .params
+                .iter()
+                .map(|param| ownership_for_declared_type_syntax(&param.ty, env))
+                .collect::<Vec<_>>();
             let suffix = params
                 .iter()
                 .map(ir_symbol_suffix)
                 .collect::<Vec<_>>()
                 .join("_");
-            let base = format!("{}_ctor", sanitize_ir_symbol(&ty.name));
+            let base = format!(
+                "{}_ctor",
+                qualified_type_symbol_name(
+                    &ty.namespace,
+                    &ty.name,
+                    ty.generic_params.len(),
+                    type_index,
+                )
+            );
             let symbol = if overloaded {
                 if suffix.is_empty() {
                     format!("{base}__empty")
@@ -644,7 +710,9 @@ fn populate_constructor_signatures(program: &Program, env: &mut TypeEnv) {
                 .or_default()
                 .push(FunctionSignature {
                     params,
+                    param_ownerships,
                     return_type: IrType::Void,
+                    return_ownership: Ownership::Copy,
                     symbol,
                 });
         }
@@ -668,12 +736,16 @@ impl TypeEnv {
         for ty in &program.types {
             for field in &ty.fields {
                 let field_type = type_syntax_to_ir(&field.ty, &env);
+                let field_signature = FieldSignature {
+                    ty: field_type.clone(),
+                    ownership: ownership_for_declared_type_syntax(&field.ty, &env),
+                };
                 env.fields
-                    .insert((ty.name.clone(), field.name.clone()), field_type.clone());
+                    .insert((ty.name.clone(), field.name.clone()), field_signature.clone());
                 env.field_order
                     .entry(ty.name.clone())
                     .or_default()
-                    .push((field.name.clone(), field_type));
+                    .push((field.name.clone(), field_signature));
             }
         }
         env
@@ -735,16 +807,27 @@ impl TypeEnv {
         method_name: &str,
         args: &[TypedExpr],
     ) -> Result<Option<&FunctionSignature>, String> {
-        if let Some(signatures) = self
-            .methods
-            .get(&(type_name.to_string(), method_name.to_string()))
-        {
-            if let Some(sig) = resolve_call_signature(
-                signatures,
-                args,
-                |expected, arg| ir_conversion_rank(expected, arg, self),
-                || format!("call to '{}.{}'", type_name, method_name),
-            )? {
+        let resolve = |args: &[TypedExpr]| -> Result<Option<&FunctionSignature>, String> {
+            if let Some(signatures) = self
+                .methods
+                .get(&(type_name.to_string(), method_name.to_string()))
+            {
+                if let Some(sig) = resolve_call_signature(
+                    signatures,
+                    args,
+                    |expected, arg| ir_conversion_rank(expected, arg, self),
+                    || format!("call to '{}.{}'", type_name, method_name),
+                )? {
+                    return Ok(Some(sig));
+                }
+            }
+            Ok(None)
+        };
+        if let Some(sig) = resolve(args)? {
+            return Ok(Some(sig));
+        }
+        if method_name.ends_with("Async") && args.len() > 1 {
+            if let Some(sig) = resolve(&args[..args.len() - 1])? {
                 return Ok(Some(sig));
             }
         }
@@ -784,7 +867,7 @@ impl TypeEnv {
         )
     }
 
-    fn resolve_field(&self, type_name: &str, field_name: &str) -> Option<IrType> {
+    fn resolve_field(&self, type_name: &str, field_name: &str) -> Option<FieldSignature> {
         if let Some(ty) = self
             .fields
             .get(&(type_name.to_string(), field_name.to_string()))
@@ -798,19 +881,26 @@ impl TypeEnv {
     }
 
     fn all_fields(&self, type_name: &str) -> Vec<(String, IrType)> {
+        self.all_field_infos(type_name)
+            .into_iter()
+            .map(|(name, field)| (name, field.ty))
+            .collect()
+    }
+
+    fn all_field_infos(&self, type_name: &str) -> Vec<(String, FieldSignature)> {
         let mut fields = Vec::new();
         if let Some(bases) = self.bases.get(type_name) {
             for base in bases {
                 let simple = base.rsplit('.').next().unwrap_or(base);
-                fields.extend(self.all_fields(simple));
+                fields.extend(self.all_field_infos(simple));
             }
         }
         if let Some(own_fields) = self.field_order.get(type_name) {
-            for (name, ty) in own_fields {
+            for (name, field) in own_fields {
                 if let Some(existing) = fields.iter_mut().find(|(field, _)| field == name) {
-                    *existing = (name.clone(), ty.clone());
+                    *existing = (name.clone(), field.clone());
                 } else {
-                    fields.push((name.clone(), ty.clone()));
+                    fields.push((name.clone(), field.clone()));
                 }
             }
         }
@@ -1118,7 +1208,10 @@ fn summarize_typed_expr(expr: &TypedExpr, indent: &str, out: &mut String) {
                 summarize_typed_expr(value, indent, out);
             }
         }
-        TypedExprKind::NewArray { values, .. } => {
+        TypedExprKind::NewArray { length, values, .. } => {
+            if let Some(length) = length {
+                summarize_typed_expr(length, indent, out);
+            }
             for value in values {
                 summarize_typed_expr(value, indent, out);
             }
@@ -1131,6 +1224,13 @@ fn summarize_typed_expr(expr: &TypedExpr, indent: &str, out: &mut String) {
         | TypedExprKind::IsPattern { expr: target, .. }
         | TypedExprKind::Await(target) => {
             summarize_typed_expr(target, indent, out);
+        }
+        TypedExprKind::Throw(expr) => {
+            summarize_typed_expr(expr, indent, out);
+        }
+        TypedExprKind::Assign { target, value } => {
+            summarize_typed_expr(target, indent, out);
+            summarize_typed_expr(value, indent, out);
         }
         TypedExprKind::Lambda { body, .. } => {
             summarize_typed_expr(body, indent, out);
@@ -1182,6 +1282,7 @@ struct CheckedVar {
     view_source: Option<String>,
 }
 
+#[derive(Debug, Clone)]
 struct OwnershipState {
     scopes: Vec<Vec<String>>,
     vars: HashMap<String, CheckedVar>,
@@ -1255,6 +1356,52 @@ impl OwnershipState {
     }
 }
 
+fn merge_checked_vars(left: &CheckedVar, right: &CheckedVar) -> CheckedVar {
+    CheckedVar {
+        ty: if left.ty == right.ty {
+            left.ty.clone()
+        } else if matches!(left.ty, IrType::Unknown(_)) {
+            right.ty.clone()
+        } else {
+            left.ty.clone()
+        },
+        ownership: merge_ownership(&left.ownership, &right.ownership),
+        scope_depth: left.scope_depth.min(right.scope_depth),
+        view_source: if left.view_source == right.view_source {
+            left.view_source.clone()
+        } else if matches!(
+            (&left.view_source, &right.view_source),
+            (Some(_), Some(_))
+        ) {
+            left.view_source.clone().or(right.view_source.clone())
+        } else {
+            None
+        },
+    }
+}
+
+fn merge_ownership(left: &Ownership, right: &Ownership) -> Ownership {
+    fn rank(value: &Ownership) -> u8 {
+        match value {
+            Ownership::Copy => 0,
+            Ownership::Owned => 1,
+            Ownership::Shared => 2,
+            Ownership::View => 3,
+            Ownership::Borrowed => 4,
+            Ownership::Moved => 5,
+        }
+    }
+
+    match rank(left).max(rank(right)) {
+        0 => Ownership::Copy,
+        1 => Ownership::Owned,
+        2 => Ownership::Shared,
+        3 => Ownership::View,
+        4 => Ownership::Borrowed,
+        _ => Ownership::Moved,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CheckedExpr {
     ty: IrType,
@@ -1276,7 +1423,7 @@ impl OwnershipChecker {
             let ty = type_syntax_to_ir(&param.ty, env);
             params.push(TypedBinding {
                 name: param.name.clone(),
-                ownership: ownership_for_type(&ty),
+                ownership: ownership_for_declared_type_syntax(&param.ty, env),
                 ty,
             });
         }
@@ -1286,6 +1433,7 @@ impl OwnershipChecker {
             env,
             params,
             &type_syntax_to_ir(&function.return_type, env),
+            ownership_for_declared_type_syntax(&function.return_type, env),
         )
     }
 
@@ -1295,9 +1443,10 @@ impl OwnershipChecker {
         env: &TypeEnv,
         params: Vec<TypedBinding>,
         return_type: &IrType,
+        return_ownership: Ownership,
     ) -> Result<(), String> {
         let mut state = OwnershipState::new(params);
-        Self::check_stmts(context, body, env, &mut state, return_type)
+        Self::check_stmts(context, body, env, &mut state, return_type, return_ownership)
     }
 
     fn check_stmts(
@@ -1306,11 +1455,46 @@ impl OwnershipChecker {
         env: &TypeEnv,
         state: &mut OwnershipState,
         return_type: &IrType,
+        return_ownership: Ownership,
     ) -> Result<(), String> {
         for stmt in stmts {
-            Self::check_stmt(context, stmt, env, state, return_type)?;
+            Self::check_stmt(context, stmt, env, state, return_type, return_ownership.clone())?;
         }
         Ok(())
+    }
+
+    fn check_block_snapshot(
+        context: &str,
+        stmts: &[Stmt],
+        env: &TypeEnv,
+        state: &OwnershipState,
+        return_type: &IrType,
+        return_ownership: Ownership,
+    ) -> Result<OwnershipState, String> {
+        let mut branch_state = state.clone();
+        Self::check_stmts(
+            context,
+            stmts,
+            env,
+            &mut branch_state,
+            return_type,
+            return_ownership,
+        )?;
+        Ok(branch_state)
+    }
+
+    fn merge_branch_states(base: &OwnershipState, branches: &[OwnershipState]) -> OwnershipState {
+        let mut merged = base.clone();
+        for (name, base_var) in base.vars.iter() {
+            let mut current = base_var.clone();
+            for branch in branches {
+                if let Some(branch_var) = branch.vars.get(name) {
+                    current = merge_checked_vars(&current, branch_var);
+                }
+            }
+            merged.vars.insert(name.clone(), current);
+        }
+        merged
     }
 
     fn check_stmt(
@@ -1319,6 +1503,7 @@ impl OwnershipChecker {
         env: &TypeEnv,
         state: &mut OwnershipState,
         return_type: &IrType,
+        return_ownership: Ownership,
     ) -> Result<(), String> {
         match stmt {
             Stmt::Let {
@@ -1333,11 +1518,15 @@ impl OwnershipChecker {
                     .map(|ty| type_syntax_to_ir(ty, env))
                     .unwrap_or_else(|| expr.ty.clone());
                 let expr = Self::coerce_for_target(&ty, expr);
-                Self::check_assignment_safety(context, env, &ty, &expr)?;
+                let target_ownership = declared_type
+                    .as_ref()
+                    .map(|declared| ownership_for_declared_type_syntax(declared, env))
+                    .unwrap_or_else(|| ownership_for_type(&ty));
+                Self::check_assignment_safety(context, env, &ty, target_ownership, &expr)?;
                 Self::check_view_source_lifetime(context, state, name, &expr)?;
                 let ownership = declared_type
                     .as_ref()
-                    .map(|_| ownership_for_type(&ty))
+                    .map(|declared| ownership_for_declared_type_syntax(declared, env))
                     .unwrap_or_else(|| expr.ownership.clone());
                 state.declare(name.clone(), ty, ownership, expr.source_var);
             }
@@ -1347,21 +1536,25 @@ impl OwnershipChecker {
                     .get(name)
                     .map(|var| var.ty.clone())
                     .unwrap_or_else(|| expr.ty.clone());
+                let target_ownership = state
+                    .get(name)
+                    .map(|var| var.ownership.clone())
+                    .unwrap_or_else(|| ownership_for_type(&target_ty));
                 let expr = Self::coerce_for_target(&target_ty, expr);
-                Self::check_assignment_safety(context, env, &target_ty, &expr)?;
+                Self::check_assignment_safety(context, env, &target_ty, target_ownership, &expr)?;
                 Self::check_view_source_lifetime(context, state, name, &expr)?;
                 state.assign(name, target_ty, expr.ownership, expr.source_var)?;
             }
             Stmt::AssignTarget { target, expr } => {
-                let target_ty = Self::target_type(target, env, state)
-                    .unwrap_or_else(|| IrType::Unknown("target".to_string()));
+                let (target_ty, target_ownership) = Self::target_type(target, env, state)
+                    .unwrap_or_else(|| (IrType::Unknown("target".to_string()), Ownership::Shared));
                 let expr = Self::check_expr(expr, env, state)?;
                 let expr = Self::coerce_for_target(&target_ty, expr);
-                Self::check_assignment_safety(context, env, &target_ty, &expr)?;
+                Self::check_assignment_safety(context, env, &target_ty, target_ownership, &expr)?;
             }
             Stmt::Block(body) => {
                 state.push_scope();
-                Self::check_stmts(context, body, env, state, return_type)?;
+                Self::check_stmts(context, body, env, state, return_type, return_ownership.clone())?;
                 state.pop_scope();
             }
             Stmt::If {
@@ -1370,32 +1563,74 @@ impl OwnershipChecker {
                 else_body,
             } => {
                 Self::check_expr(condition, env, state)?;
-                state.push_scope();
-                Self::check_stmts(context, then_body, env, state, return_type)?;
-                state.pop_scope();
-                state.push_scope();
-                Self::check_stmts(context, else_body, env, state, return_type)?;
-                state.pop_scope();
+                let base = state.clone();
+                let then_state = Self::check_block_snapshot(
+                    context,
+                    then_body,
+                    env,
+                    &base,
+                    return_type,
+                    return_ownership.clone(),
+                )?;
+                let else_state = Self::check_block_snapshot(
+                    context,
+                    else_body,
+                    env,
+                    &base,
+                    return_type,
+                    return_ownership.clone(),
+                )?;
+                *state = Self::merge_branch_states(&base, &[then_state, else_state]);
             }
             Stmt::Try {
                 try_body,
                 catch,
                 finally_body,
             } => {
-                state.push_scope();
-                Self::check_stmts(context, try_body, env, state, return_type)?;
-                state.pop_scope();
+                let base = state.clone();
+                let try_state = Self::check_block_snapshot(
+                    context,
+                    try_body,
+                    env,
+                    &base,
+                    return_type,
+                    return_ownership.clone(),
+                )?;
+                let mut branches = vec![try_state];
                 if let Some(catch) = catch {
-                    state.push_scope();
+                    let mut catch_state = base.clone();
+                    catch_state.push_scope();
                     if let Some(name) = &catch.name {
-                        state.declare(name.clone(), IrType::Exception, Ownership::Borrowed, None);
+                        catch_state.declare(
+                            name.clone(),
+                            IrType::Exception,
+                            Ownership::Borrowed,
+                            None,
+                        );
                     }
-                    Self::check_stmts(context, &catch.body, env, state, return_type)?;
-                    state.pop_scope();
+                    Self::check_stmts(
+                        context,
+                        &catch.body,
+                        env,
+                        &mut catch_state,
+                        return_type,
+                        return_ownership.clone(),
+                    )?;
+                    catch_state.pop_scope();
+                    branches.push(catch_state);
                 }
-                state.push_scope();
-                Self::check_stmts(context, finally_body, env, state, return_type)?;
-                state.pop_scope();
+                let mut joined = Self::merge_branch_states(&base, &branches);
+                joined.push_scope();
+                Self::check_stmts(
+                    context,
+                    finally_body,
+                    env,
+                    &mut joined,
+                    return_type,
+                    return_ownership.clone(),
+                )?;
+                joined.pop_scope();
+                *state = joined;
             }
             Stmt::Switch {
                 expr,
@@ -1403,21 +1638,41 @@ impl OwnershipChecker {
                 default,
             } => {
                 Self::check_expr(expr, env, state)?;
+                let base = state.clone();
+                let mut branches = Vec::new();
                 for case in cases {
                     Self::check_expr(&case.value, env, state)?;
-                    state.push_scope();
-                    Self::check_stmts(context, &case.body, env, state, return_type)?;
-                    state.pop_scope();
+                    branches.push(Self::check_block_snapshot(
+                        context,
+                        &case.body,
+                        env,
+                        &base,
+                        return_type,
+                        return_ownership.clone(),
+                    )?);
                 }
-                state.push_scope();
-                Self::check_stmts(context, default, env, state, return_type)?;
-                state.pop_scope();
+                branches.push(Self::check_block_snapshot(
+                    context,
+                    default,
+                    env,
+                    &base,
+                    return_type,
+                    return_ownership.clone(),
+                )?);
+                *state = Self::merge_branch_states(&base, &branches);
             }
             Stmt::While { condition, body } => {
                 Self::check_expr(condition, env, state)?;
-                state.push_scope();
-                Self::check_stmts(context, body, env, state, return_type)?;
-                state.pop_scope();
+                let base = state.clone();
+                let body_state = Self::check_block_snapshot(
+                    context,
+                    body,
+                    env,
+                    &base,
+                    return_type,
+                    return_ownership.clone(),
+                )?;
+                *state = Self::merge_branch_states(&base, &[body_state]);
             }
             Stmt::For {
                 init,
@@ -1427,15 +1682,31 @@ impl OwnershipChecker {
             } => {
                 state.push_scope();
                 if let Some(init) = init {
-                    Self::check_stmt(context, init, env, state, return_type)?;
+                    Self::check_stmt(context, init, env, state, return_type, return_ownership.clone())?;
                 }
                 if let Some(condition) = condition {
                     Self::check_expr(condition, env, state)?;
                 }
-                Self::check_stmts(context, body, env, state, return_type)?;
+                let base = state.clone();
+                let mut body_state = Self::check_block_snapshot(
+                    context,
+                    body,
+                    env,
+                    &base,
+                    return_type,
+                    return_ownership.clone(),
+                )?;
                 if let Some(increment) = increment {
-                    Self::check_stmt(context, increment, env, state, return_type)?;
+                    Self::check_stmt(
+                        context,
+                        increment,
+                        env,
+                        &mut body_state,
+                        return_type,
+                        return_ownership.clone(),
+                    )?;
                 }
+                *state = Self::merge_branch_states(&base, &[body_state]);
                 state.pop_scope();
             }
             Stmt::ForEach {
@@ -1450,10 +1721,19 @@ impl OwnershipChecker {
                 state.declare(
                     item_name.clone(),
                     item_ty.clone(),
-                    ownership_for_type(&item_ty),
+                    ownership_for_declared_type_syntax(item_type, env),
                     None,
                 );
-                Self::check_stmts(context, body, env, state, return_type)?;
+                let base = state.clone();
+                let body_state = Self::check_block_snapshot(
+                    context,
+                    body,
+                    env,
+                    &base,
+                    return_type,
+                    return_ownership.clone(),
+                )?;
+                *state = Self::merge_branch_states(&base, &[body_state]);
                 state.pop_scope();
             }
             Stmt::Print(expr) | Stmt::Expr(expr) | Stmt::Throw(expr) => {
@@ -1461,15 +1741,30 @@ impl OwnershipChecker {
             }
             Stmt::Return(Some(expr)) => {
                 let expr = Self::check_expr(expr, env, state)?;
-                Self::check_assignment_safety(context, env, return_type, &expr)?;
-                if matches!(expr.ownership, Ownership::View)
-                    || (matches!(expr.ownership, Ownership::Borrowed)
-                        && !matches!(return_type, IrType::String))
+                Self::check_assignment_safety(context, env, return_type, return_ownership.clone(), &expr)?;
+                if matches!(expr.ownership, Ownership::View | Ownership::Borrowed)
+                    && !matches!(return_ownership, Ownership::Borrowed | Ownership::View)
                 {
+                    if matches!(return_type, IrType::String) && expr.source_var.as_deref() == Some("this")
+                    {
+                        return Ok(());
+                    }
                     return Err(format!(
-                        "ownership checker: {context}: cannot return {:?} value without owning clone",
-                        expr.ownership
+                        "ownership checker: {context}: cannot return {:?} value into {:?} result without owning clone",
+                        expr.ownership, return_ownership
                     ));
+                }
+                if matches!(expr.ownership, Ownership::View | Ownership::Borrowed) {
+                    if let Some(source) = &expr.source_var {
+                        let Some(source_var) = state.get(source) else {
+                            return Ok(());
+                        };
+                        if source_var.scope_depth > 0 {
+                            return Err(format!(
+                                "ownership checker: {context}: returned value from '{source}' would outlive its source"
+                            ));
+                        }
+                    }
                 }
             }
             Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
@@ -1549,8 +1844,12 @@ impl OwnershipChecker {
             }
             Expr::NewArray {
                 element_type,
+                length,
                 values,
             } => {
+                if let Some(length) = length {
+                    Self::check_expr(length, env, state)?;
+                }
                 for value in values {
                     Self::check_expr(value, env, state)?;
                 }
@@ -1585,24 +1884,37 @@ impl OwnershipChecker {
             }
             Expr::Field { target, name } => {
                 let target = Self::check_expr(target, env, state)?;
-                let ty = match (&target.ty, name.as_str()) {
-                    (IrType::Class(type_name), field) | (IrType::Struct(type_name), field) => env
-                        .resolve_field(type_name, field)
-                        .unwrap_or_else(|| IrType::Unknown(field.to_string())),
+                let field_info = match (&target.ty, name.as_str()) {
+                    (IrType::Class(type_name), field) | (IrType::Struct(type_name), field) => {
+                        env.resolve_field(type_name, field)
+                    }
                     (IrType::List(_), "Count")
                     | (IrType::Dictionary(_, _), "Count")
-                    | (IrType::Array(_), "Length" | "Count") => IrType::Int,
-                    (IrType::Task(inner), "Result") => inner.as_ref().clone(),
-                    (IrType::Task(_), "IsCompleted") => IrType::Bool,
-                    (IrType::Exception, "Message") => IrType::String,
-                    _ => IrType::Unknown(name.clone()),
+                    | (IrType::Array(_), "Length" | "Count") => Some(FieldSignature {
+                        ty: IrType::Int,
+                        ownership: Ownership::Copy,
+                    }),
+                    (IrType::Task(inner), "Result") => Some(FieldSignature {
+                        ty: inner.as_ref().clone(),
+                        ownership: ownership_for_type(inner),
+                    }),
+                    (IrType::Task(_), "IsCompleted") => Some(FieldSignature {
+                        ty: IrType::Bool,
+                        ownership: Ownership::Copy,
+                    }),
+                    (IrType::Exception, "Message") => Some(FieldSignature {
+                        ty: IrType::String,
+                        ownership: Ownership::Borrowed,
+                    }),
+                    _ => None,
                 };
-                let ownership =
-                    if target.ty == IrType::Exception && matches!(name.as_str(), "Message") {
-                        Ownership::Borrowed
-                    } else {
-                        ownership_for_type(&ty)
-                    };
+                let (ty, ownership) = field_info
+                    .map(|field| (field.ty, field.ownership))
+                    .unwrap_or_else(|| {
+                        let ty = IrType::Unknown(name.clone());
+                        let ownership = ownership_for_type(&ty);
+                        (ty, ownership)
+                    });
                 CheckedExpr {
                     ty,
                     ownership,
@@ -1613,6 +1925,25 @@ impl OwnershipChecker {
             Expr::IsPattern { expr, .. } => {
                 Self::check_expr(expr, env, state)?;
                 checked_temp(IrType::Bool)
+            }
+            Expr::Throw(expr) => {
+                let inner = Self::check_expr(expr, env, state)?;
+                CheckedExpr {
+                    ty: inner.ty,
+                    ownership: inner.ownership,
+                    source_var: inner.source_var,
+                    is_move: false,
+                }
+            }
+            Expr::Assign { target, value } => {
+                let target = Self::check_expr(target, env, state)?;
+                let value = Self::check_expr(value, env, state)?;
+                CheckedExpr {
+                    ty: value.ty,
+                    ownership: value.ownership,
+                    source_var: target.source_var,
+                    is_move: false,
+                }
             }
             Expr::MethodCall { target, name, args } => {
                 let target = Self::check_expr(target, env, state)?;
@@ -1628,7 +1959,7 @@ impl OwnershipChecker {
                     }
                     (IrType::Task(inner), "GetResult") => inner.as_ref().clone(),
                     (IrType::Task(inner), "GetAwaiter") => IrType::Task(inner.clone()),
-                    (_, "Contains") | (_, "ContainsKey") | (_, "Remove") => IrType::Bool,
+                    (_, "Contains") | (_, "ContainsKey") | (_, "Remove") | (_, "TryGetValue") => IrType::Bool,
                     (_, "Add") | (_, "Clear") | (_, "Wait") => IrType::Void,
                     (IrType::Unknown(target) | IrType::Class(target), "Run")
                         if target == "Task" =>
@@ -1639,8 +1970,21 @@ impl OwnershipChecker {
                     }
                     _ => IrType::Unknown(name.clone()),
                 };
+                let ownership = if target.ty == IrType::Exception && matches!(name.as_str(), "Message")
+                {
+                    Ownership::Borrowed
+                } else if let IrType::Class(type_name)
+                | IrType::Struct(type_name)
+                | IrType::Interface(type_name) = &target.ty
+                {
+                    env.resolve_method(type_name, name, &args.iter().map(|arg| arg.ty.clone()).collect::<Vec<_>>())
+                        .map(|signature| signature.return_ownership.clone())
+                        .unwrap_or_else(|| ownership_for_type(&ty))
+                } else {
+                    ownership_for_type(&ty)
+                };
                 CheckedExpr {
-                    ownership: ownership_for_type(&ty),
+                    ownership,
                     ty,
                     source_var: None,
                     is_move: false,
@@ -1659,19 +2003,24 @@ impl OwnershipChecker {
                     .iter()
                     .map(|arg| Self::check_expr(arg, env, state))
                     .collect::<Result<Vec<_>, _>>()?;
-                let ty = env
-                    .resolve_function(
-                        name,
-                        checked_args
-                            .iter()
-                            .map(|arg| arg.ty.clone())
-                            .collect::<Vec<_>>()
-                            .as_slice(),
-                    )
-                    .map(|signature| signature.return_type.clone())
-                    .unwrap_or_else(|| IrType::Unknown(name.clone()));
+                let signature = env.resolve_function(
+                    name,
+                    checked_args
+                        .iter()
+                        .map(|arg| arg.ty.clone())
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                );
+                let (ty, ownership) = signature
+                    .map(|signature| {
+                        (
+                            signature.return_type.clone(),
+                            signature.return_ownership.clone(),
+                        )
+                    })
+                    .unwrap_or_else(|| (IrType::Unknown(name.clone()), Ownership::Shared));
                 CheckedExpr {
-                    ownership: ownership_for_type(&ty),
+                    ownership,
                     ty,
                     source_var: None,
                     is_move: false,
@@ -1687,14 +2036,18 @@ impl OwnershipChecker {
                 }
                 for field in fields {
                     let expr = Self::check_expr(&field.expr, env, state)?;
-                    let target_ty = env
+                    let target_info = env
                         .resolve_field(type_name, &field.name)
-                        .unwrap_or_else(|| expr.ty.clone());
-                    let expr = Self::coerce_for_target(&target_ty, expr);
+                        .unwrap_or_else(|| FieldSignature {
+                            ty: expr.ty.clone(),
+                            ownership: ownership_for_type(&expr.ty),
+                        });
+                    let expr = Self::coerce_for_target(&target_info.ty, expr);
                     Self::check_assignment_safety(
                         &format!("object initializer {type_name}.{}", field.name),
                         env,
-                        &target_ty,
+                        &target_info.ty,
+                        target_info.ownership,
                         &expr,
                     )?;
                 }
@@ -1775,7 +2128,9 @@ impl OwnershipChecker {
                         _ => None,
                     };
                     let field_ty = owner.and_then(|o| env.resolve_field(o, name));
-                    field_ty.unwrap_or_else(|| IrType::Unknown(name.clone()))
+                    field_ty
+                        .map(|field| field.ty)
+                        .unwrap_or_else(|| IrType::Unknown(name.clone()))
                 } else {
                     IrType::Unknown(name.clone())
                 };
@@ -1832,15 +2187,19 @@ impl OwnershipChecker {
         Ok(checked)
     }
 
-    fn target_type(target: &Expr, env: &TypeEnv, state: &OwnershipState) -> Option<IrType> {
+    fn target_type(
+        target: &Expr,
+        env: &TypeEnv,
+        state: &OwnershipState,
+    ) -> Option<(IrType, Ownership)> {
         match target {
-            Expr::Var(name) => state.get(name).map(|var| var.ty.clone()),
+            Expr::Var(name) => state.get(name).map(|var| (var.ty.clone(), var.ownership.clone())),
             Expr::Field { target, name } => {
                 let target = Self::check_expr(target, env, state).ok()?;
                 match target.ty {
-                    IrType::Class(type_name) | IrType::Struct(type_name) => {
-                        env.resolve_field(&type_name, name)
-                    }
+                    IrType::Class(type_name) | IrType::Struct(type_name) => env
+                        .resolve_field(&type_name, name)
+                        .map(|field| (field.ty, field.ownership)),
                     _ => None,
                 }
             }
@@ -1852,9 +2211,11 @@ impl OwnershipChecker {
         context: &str,
         env: &TypeEnv,
         target_ty: &IrType,
+        target_ownership: Ownership,
         expr: &CheckedExpr,
     ) -> Result<(), String> {
         if matches!(expr.ownership, Ownership::View | Ownership::Borrowed)
+            && !matches!(target_ownership, Ownership::Borrowed | Ownership::View)
             && !matches!(
                 target_ty,
                 IrType::Enumerable(_) | IrType::Ref(_) | IrType::String
@@ -1938,14 +2299,24 @@ fn function_signature(function: &Function, env: &TypeEnv, overloaded: bool) -> F
         .iter()
         .map(|param| type_syntax_to_ir(&param.ty, env))
         .collect::<Vec<_>>();
+    let param_ownerships = function
+        .params
+        .iter()
+        .map(|param| ownership_for_declared_type_syntax(&param.ty, env))
+        .collect::<Vec<_>>();
     FunctionSignature {
         symbol: if overloaded {
-            overloaded_function_symbol(&function.name, &params)
+            overloaded_function_symbol(&qualified_function_symbol_name(
+                &function.namespace,
+                &function.name,
+            ), &params)
         } else {
-            function.name.clone()
+            qualified_function_symbol_name(&function.namespace, &function.name)
         },
         params,
+        param_ownerships,
         return_type: type_syntax_to_ir(&function.return_type, env),
+        return_ownership: ownership_for_declared_type_syntax(&function.return_type, env),
     }
 }
 
@@ -1959,6 +2330,113 @@ fn overloaded_function_symbol(name: &str, params: &[IrType]) -> String {
         format!("{name}__overload")
     } else {
         format!("{name}__{suffix}")
+    }
+}
+
+fn qualified_function_symbol_name(namespace: &[String], name: &str) -> String {
+    if namespace.is_empty() {
+        sanitize_ir_symbol(name)
+    } else {
+        format!(
+            "{}_{}",
+            sanitize_ir_symbol(&namespace.join("_")),
+            sanitize_ir_symbol(name)
+        )
+    }
+}
+
+fn qualified_type_symbol_name(
+    namespace: &[String],
+    name: &str,
+    generic_arity: usize,
+    type_id: usize,
+) -> String {
+    if namespace.is_empty() {
+        format!("{}__g{}__t{}", sanitize_ir_symbol(name), generic_arity, type_id)
+    } else {
+        format!(
+            "{}_{}__g{}__t{}",
+            sanitize_ir_symbol(&namespace.join("_")),
+            sanitize_ir_symbol(name),
+            generic_arity,
+            type_id
+        )
+    }
+}
+
+fn type_method_symbol(ty: &TypeDef, type_id: usize, method: &Function, env: &TypeEnv) -> String {
+    let overloaded = ty
+        .methods
+        .iter()
+        .filter(|candidate| candidate.name == method.name)
+        .count()
+        > 1;
+    let params = method
+        .params
+        .iter()
+        .map(|param| type_syntax_to_ir(&param.ty, env))
+        .collect::<Vec<_>>();
+    let suffix = params
+        .iter()
+        .map(ir_symbol_suffix)
+        .collect::<Vec<_>>()
+        .join("_");
+    let base = format!(
+        "{}_{}__g{}",
+        qualified_type_symbol_name(
+            &ty.namespace,
+            &ty.name,
+            ty.generic_params.len(),
+            type_id,
+        ),
+        sanitize_ir_symbol(&method.name),
+        method.generic_params.len()
+    );
+    if overloaded {
+        if suffix.is_empty() {
+            format!("{base}__overload")
+        } else {
+            format!("{base}__{suffix}")
+        }
+    } else {
+        base
+    }
+}
+
+fn type_constructor_symbol(
+    ty: &TypeDef,
+    type_id: usize,
+    constructor: &Constructor,
+    env: &TypeEnv,
+) -> String {
+    let overloaded = ty.constructors.len() > 1;
+    let params = constructor
+        .params
+        .iter()
+        .map(|param| type_syntax_to_ir(&param.ty, env))
+        .collect::<Vec<_>>();
+    let suffix = params
+        .iter()
+        .map(ir_symbol_suffix)
+        .collect::<Vec<_>>()
+        .join("_");
+    let base = format!(
+        "{}_ctor",
+        qualified_type_symbol_name(
+            &ty.namespace,
+            &ty.name,
+            ty.generic_params.len(),
+            type_id,
+        )
+    );
+    if overloaded {
+        if suffix.is_empty() {
+            format!("{base}__empty")
+        } else {
+            format!("{base}__{suffix}")
+        }
+    } else {
+        base
     }
 }
 
@@ -2260,7 +2738,10 @@ impl<'a> EndpointHandlerCollector<'a> {
                     self.collect_expr(value)?;
                 }
             }
-            Expr::NewArray { values, .. } => {
+            Expr::NewArray { length, values, .. } => {
+                if let Some(length) = length {
+                    self.collect_expr(length)?;
+                }
                 for value in values {
                     self.collect_expr(value)?;
                 }
@@ -2289,6 +2770,11 @@ impl<'a> EndpointHandlerCollector<'a> {
             Expr::Field { target, .. }
             | Expr::IsPattern { expr: target, .. }
             | Expr::Await(target) => self.collect_expr(target)?,
+            Expr::Throw(expr) => self.collect_expr(expr)?,
+            Expr::Assign { target, value } => {
+                self.collect_expr(target)?;
+                self.collect_expr(value)?;
+            }
             Expr::FunctionCall { args, .. } => {
                 for arg in args {
                     self.collect_expr(arg)?;
@@ -2660,14 +3146,14 @@ fn join_route_path(prefix: &str, path: &str) -> String {
     }
 }
 
-fn lower_type(ty: &TypeDef, env: &TypeEnv) -> Result<TypedType, String> {
+fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Result<TypedType, String> {
     let fields = env
-        .all_fields(&ty.name)
+        .all_field_infos(&ty.name)
         .into_iter()
-        .map(|(name, ty)| TypedBinding {
+        .map(|(name, field)| TypedBinding {
             name,
-            ownership: ownership_for_type(&ty),
-            ty,
+            ownership: field.ownership,
+            ty: field.ty,
         })
         .collect::<Vec<_>>();
     let this_binding = TypedBinding {
@@ -2693,17 +3179,11 @@ fn lower_type(ty: &TypeDef, env: &TypeEnv) -> Result<TypedType, String> {
                 return_type: TypeSyntax::Void,
                 body: constructor.body.clone(),
             };
-            let parameter_types = constructor
-                .params
-                .iter()
-                .map(|param| type_syntax_to_ir(&param.ty, env))
-                .collect::<Vec<_>>();
             lower_function(
                 &function,
                 env,
                 std::slice::from_ref(&this_binding),
-                env.resolve_constructor(&ty.name, &parameter_types)
-                    .map(|signature| signature.symbol.clone()),
+                Some(type_constructor_symbol(ty, symbol_id, constructor, env)),
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2715,21 +3195,19 @@ fn lower_type(ty: &TypeDef, env: &TypeEnv) -> Result<TypedType, String> {
                 method,
                 env,
                 std::slice::from_ref(&this_binding),
-                env.resolve_method(
-                    &ty.name,
-                    &method.name,
-                    &method
-                        .params
-                        .iter()
-                        .map(|param| type_syntax_to_ir(&param.ty, env))
-                        .collect::<Vec<_>>(),
-                )
-                .map(|signature| signature.symbol.clone()),
+                Some(type_method_symbol(ty, symbol_id, method, env)),
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(TypedType {
         name: ty.name.clone(),
+        namespace: ty.namespace.clone(),
+        generic_params: ty
+            .generic_params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect(),
+        symbol_id,
         kind: ty.kind,
         bases: ty.bases.clone(),
         fields,
@@ -2758,7 +3236,7 @@ fn lower_function(
         let ty = type_syntax_to_ir(&param.ty, env);
         let binding = TypedBinding {
             name: param.name.clone(),
-            ownership: ownership_for_type(&ty),
+            ownership: ownership_for_declared_type_syntax(&param.ty, env),
             ty,
         };
         scopes
@@ -2792,7 +3270,7 @@ fn lower_function(
             .unwrap_or_else(|| function.name.clone())
         }),
         is_extern: function.is_extern,
-        return_ownership: ownership_for_type(&return_type),
+        return_ownership: ownership_for_declared_type_syntax(&function.return_type, env),
         return_type,
         params,
         locals,
@@ -2843,7 +3321,7 @@ fn lower_typed_stmt(
                 .unwrap_or_else(|| expr.ty.clone());
             let ownership = declared_type
                 .as_ref()
-                .map(|_| ownership_for_type(&ty))
+                .map(|declared| ownership_for_declared_type_syntax(declared, env))
                 .unwrap_or_else(|| expr.ownership.clone());
             let binding = TypedBinding {
                 name: name.clone(),
@@ -2860,7 +3338,9 @@ fn lower_typed_stmt(
             let expected_ty = lookup(scopes, name).map(|binding| binding.ty.clone());
             let expr = lower_typed_expr_with_expected(expr, env, scopes, expected_ty.as_ref())?;
             if lookup(scopes, name).is_none() {
-                if let Some((this_type, field_type)) = implicit_field(env, scopes, name) {
+                if let Some((this_type, field_type, field_ownership)) =
+                    implicit_field(env, scopes, name)
+                {
                     let this_expr = typed_expr_with_ownership(
                         TypedExprKind::Var("this".to_string()),
                         this_type,
@@ -2873,7 +3353,7 @@ fn lower_typed_stmt(
                                 name: name.clone(),
                             },
                             field_type,
-                            Ownership::Borrowed,
+                            field_ownership,
                         ),
                         expr,
                     }
@@ -2971,6 +3451,21 @@ fn lower_typed_stmt(
             for case in cases {
                 let value = lower_typed_expr(&case.value, env, scopes)?;
                 scopes.push(HashMap::new());
+                if let Expr::IsPattern {
+                    ty,
+                    name: Some(name),
+                    ..
+                } = &case.value
+                {
+                    scopes.last_mut().unwrap().insert(
+                        name.clone(),
+                        TypedBinding {
+                            name: name.clone(),
+                            ty: type_syntax_to_ir(ty, env),
+                            ownership: Ownership::Borrowed,
+                        },
+                    );
+                }
                 let body = lower_typed_stmts(&case.body, env, scopes)?;
                 scopes.pop();
                 typed_cases.push(TypedSwitchCase { value, body });
@@ -3027,11 +3522,11 @@ fn lower_typed_stmt(
         } => {
             let collection = lower_typed_expr(collection, env, scopes)?;
             let ty = type_syntax_to_ir(item_type, env);
-            let item = TypedBinding {
-                name: item_name.clone(),
-                ty,
-                ownership: ownership_for_type(&type_syntax_to_ir(item_type, env)),
-            };
+                let item = TypedBinding {
+                    name: item_name.clone(),
+                    ty,
+                    ownership: ownership_for_declared_type_syntax(item_type, env),
+                };
             scopes.push(HashMap::new());
             scopes
                 .last_mut()
@@ -3078,7 +3573,7 @@ fn lower_stmt(
                 .unwrap_or(inferred.ty);
             let ownership = declared_type
                 .as_ref()
-                .map(|_| ownership_for_type(&ty))
+                .map(|declared| ownership_for_declared_type_syntax(declared, env))
                 .unwrap_or(inferred.ownership);
             let binding = TypedBinding {
                 name: name.clone(),
@@ -3190,7 +3685,7 @@ fn lower_stmt(
             let ty = type_syntax_to_ir(item_type, env);
             let binding = TypedBinding {
                 name: item_name.clone(),
-                ownership: ownership_for_type(&ty),
+                ownership: ownership_for_declared_type_syntax(item_type, env),
                 ty,
             };
             scopes.push(HashMap::new());
@@ -3240,13 +3735,6 @@ fn lower_lambda(
             if matches!(binding.ownership, Ownership::Borrowed | Ownership::View) {
                 return Err(format!(
                     "ownership checker: lambda capture '{capture}' may outlive borrowed/view source; move the value into the closure or use an owned copy"
-                ));
-            }
-            if matches!(binding.ownership, Ownership::Owned) && !matches!(binding.ty, IrType::String)
-            {
-                return Err(format!(
-                    "ownership checker: lambda capture '{capture}' uses owned value {:?}; move it into the closure or capture a shared reference instead",
-                    binding.ty
                 ));
             }
         }
@@ -3301,7 +3789,10 @@ fn collect_lambda_captures(expr: &Expr, params: &[String], out: &mut Vec<String>
                 collect_lambda_captures(value, params, out);
             }
         }
-        Expr::NewArray { values, .. } => {
+        Expr::NewArray { length, values, .. } => {
+            if let Some(length) = length {
+                collect_lambda_captures(length, params, out);
+            }
             for value in values {
                 collect_lambda_captures(value, params, out);
             }
@@ -3313,6 +3804,11 @@ fn collect_lambda_captures(expr: &Expr, params: &[String], out: &mut Vec<String>
         Expr::Field { target, .. } => collect_lambda_captures(target, params, out),
         Expr::IsPattern { expr, .. } | Expr::Await(expr) | Expr::Unary { expr, .. } => {
             collect_lambda_captures(expr, params, out)
+        }
+        Expr::Throw(expr) => collect_lambda_captures(expr, params, out),
+        Expr::Assign { target, value } => {
+            collect_lambda_captures(target, params, out);
+            collect_lambda_captures(value, params, out);
         }
         Expr::Conditional {
             condition,
@@ -3428,7 +3924,9 @@ fn lower_typed_expr_with_expected(
                     binding.ty,
                     binding.ownership,
                 )
-            } else if let Some((this_type, field_type)) = implicit_field(env, scopes, name) {
+            } else if let Some((this_type, field_type, field_ownership)) =
+                implicit_field(env, scopes, name)
+            {
                 let this_expr = typed_expr_with_ownership(
                     TypedExprKind::Var("this".to_string()),
                     this_type,
@@ -3440,7 +3938,7 @@ fn lower_typed_expr_with_expected(
                         name: name.clone(),
                     },
                     field_type.clone(),
-                    ownership_for_type(&field_type),
+                    field_ownership,
                 )
             } else if let Some(kind) = env.kinds.get(name) {
                 let ty = match kind {
@@ -3492,9 +3990,15 @@ fn lower_typed_expr_with_expected(
         }
         Expr::NewArray {
             element_type,
+            length,
             values,
         } => {
             let element_type = type_syntax_to_ir(element_type, env);
+            let length = length
+                .as_ref()
+                .map(|length| lower_typed_expr(length, env, scopes))
+                .transpose()?
+                .map(Box::new);
             let values = values
                 .iter()
                 .map(|value| lower_typed_expr(value, env, scopes))
@@ -3502,6 +4006,7 @@ fn lower_typed_expr_with_expected(
             typed_expr_with_ownership(
                 TypedExprKind::NewArray {
                     element_type: element_type.clone(),
+                    length,
                     values,
                 },
                 IrType::Array(Box::new(element_type)),
@@ -3535,13 +4040,22 @@ fn lower_typed_expr_with_expected(
         }
         Expr::Field { target, name } => {
             let target = lower_typed_expr(target, env, scopes)?;
+            if let TypedExprKind::Var(enum_name) = &target.kind {
+                if let Some(value) = env.enum_values.get(&(enum_name.clone(), name.clone())) {
+                    return Ok(typed_expr_with_ownership(
+                        TypedExprKind::Int(*value),
+                        IrType::Int,
+                        Ownership::Copy,
+                    ));
+                }
+            }
             if let IrType::Class(type_name)
             | IrType::Struct(type_name)
             | IrType::Interface(type_name) = &target.ty
             {
                 let getter_name = format!("get_{name}");
                 if let Some(signature) = env.resolve_method(type_name, &getter_name, &[]) {
-                    return Ok(typed_expr(
+                    return Ok(typed_expr_with_ownership(
                         TypedExprKind::Call(TypedCall {
                             kind: TypedCallKind::Method {
                                 target: Box::new(target),
@@ -3552,29 +4066,49 @@ fn lower_typed_expr_with_expected(
                             args: Vec::new(),
                         }),
                         signature.return_type.clone(),
+                        signature.return_ownership.clone(),
                     ));
                 }
             }
-            let ty = match (&target.ty, name.as_str()) {
-                (IrType::Class(type_name), field) | (IrType::Struct(type_name), field) => env
-                    .resolve_field(type_name, field)
-                    .unwrap_or_else(|| IrType::Unknown(field.to_string())),
+            let field_info = match (&target.ty, name.as_str()) {
+                (IrType::Class(type_name), field) | (IrType::Struct(type_name), field) => {
+                    env.resolve_field(type_name, field)
+                }
                 (IrType::List(_), "Count")
                 | (IrType::Dictionary(_, _), "Count")
-                | (IrType::Array(_), "Length" | "Count")
-                | (IrType::String, "Length") => IrType::Int,
-                (IrType::Task(inner), "Result") => inner.as_ref().clone(),
-                (IrType::Task(_), "IsCompleted") => IrType::Bool,
-                (IrType::Exception, "Message") => IrType::String,
-                (IrType::Weak(inner), "Target") => inner.as_ref().clone(),
-                _ => IrType::Unknown(name.clone()),
+                | (IrType::Array(_), "Length" | "Count") => Some(FieldSignature {
+                    ty: IrType::Int,
+                    ownership: Ownership::Copy,
+                }),
+                (IrType::String, "Length") => Some(FieldSignature {
+                    ty: IrType::Int,
+                    ownership: Ownership::Copy,
+                }),
+                (IrType::Task(inner), "Result") => Some(FieldSignature {
+                    ty: inner.as_ref().clone(),
+                    ownership: ownership_for_type(inner),
+                }),
+                (IrType::Task(_), "IsCompleted") => Some(FieldSignature {
+                    ty: IrType::Bool,
+                    ownership: Ownership::Copy,
+                }),
+                (IrType::Exception, "Message") => Some(FieldSignature {
+                    ty: IrType::String,
+                    ownership: Ownership::Borrowed,
+                }),
+                (IrType::Weak(inner), "Target") => Some(FieldSignature {
+                    ty: inner.as_ref().clone(),
+                    ownership: Ownership::Borrowed,
+                }),
+                _ => None,
             };
-            let ownership = if target.ty == IrType::Exception && matches!(name.as_str(), "Message")
-            {
-                Ownership::Borrowed
-            } else {
-                ownership_for_type(&ty)
-            };
+            let (ty, ownership) = field_info
+                .map(|field| (field.ty, field.ownership))
+                .unwrap_or_else(|| {
+                    let ty = IrType::Unknown(name.clone());
+                    let ownership = ownership_for_type(&ty);
+                    (ty, ownership)
+                });
             typed_expr_with_ownership(
                 TypedExprKind::Field {
                     target: Box::new(target),
@@ -3618,8 +4152,8 @@ fn lower_typed_expr_with_expected(
             }
             let expected_types = find_expected_types(&candidates, args);
             let args = lower_call_args(args, &expected_types, env, scopes)?;
-            let (ty, symbol, resolution) = resolve_method_call(env, &target, name, &args)?;
-            typed_expr(
+            let (ty, ownership, symbol, resolution) = resolve_method_call(env, &target, name, &args)?;
+            typed_expr_with_ownership(
                 TypedExprKind::Call(TypedCall {
                     kind: TypedCallKind::Method {
                         target: Box::new(target),
@@ -3630,6 +4164,7 @@ fn lower_typed_expr_with_expected(
                     args,
                 }),
                 ty,
+                ownership,
             )
         }
         Expr::FunctionCall { name, args } => {
@@ -3661,19 +4196,26 @@ fn lower_typed_expr_with_expected(
             let args = lower_call_args(args, &expected_types, env, scopes)?;
             let signature = env.resolve_function_call(name, &args)?;
             let ty = signature
+                .as_ref()
                 .map(|signature| signature.return_type.clone())
                 .unwrap_or_else(|| IrType::Unknown(name.clone()));
-            typed_expr(
+            let ownership = signature
+                .as_ref()
+                .map(|signature| signature.return_ownership.clone())
+                .unwrap_or_else(|| Ownership::Shared);
+            typed_expr_with_ownership(
                 TypedExprKind::Call(TypedCall {
                     kind: TypedCallKind::Function {
                         name: name.clone(),
                         symbol: signature
+                            .as_ref()
                             .map(|signature| signature.symbol.clone())
                             .unwrap_or_else(|| name.clone()),
                     },
                     args,
                 }),
                 ty,
+                ownership,
             )
         }
         Expr::NewObject {
@@ -3777,6 +4319,27 @@ fn lower_typed_expr_with_expected(
             };
             typed_expr(TypedExprKind::Await(Box::new(inner)), ty)
         }
+        Expr::Throw(expr) => {
+            let inner = lower_typed_expr_with_expected(expr, env, scopes, expected)?;
+            let ty = expected.cloned().unwrap_or_else(|| inner.ty.clone());
+            typed_expr_with_ownership(
+                TypedExprKind::Throw(Box::new(inner)),
+                ty,
+                Ownership::Copy,
+            )
+        }
+        Expr::Assign { target, value } => {
+            let target = lower_typed_expr(target, env, scopes)?;
+            let value = lower_typed_expr_with_expected(value, env, scopes, Some(&target.ty))?;
+            typed_expr_with_ownership(
+                TypedExprKind::Assign {
+                    target: Box::new(target),
+                    value: Box::new(value.clone()),
+                },
+                value.ty.clone(),
+                value.ownership.clone(),
+            )
+        }
         Expr::Unary { op, expr } => {
             let expr = lower_typed_expr(expr, env, scopes)?;
             let ty = match op {
@@ -3796,7 +4359,9 @@ fn lower_typed_expr_with_expected(
             delta,
             prefix,
         } => {
-            let target = if let Some((this_type, field_type)) = implicit_field(env, scopes, name) {
+            let target = if let Some((this_type, field_type, field_ownership)) =
+                implicit_field(env, scopes, name)
+            {
                 let this_expr = typed_expr_with_ownership(
                     TypedExprKind::Var("this".to_string()),
                     this_type,
@@ -3808,7 +4373,7 @@ fn lower_typed_expr_with_expected(
                         name: name.clone(),
                     },
                     field_type.clone(),
-                    ownership_for_type(&field_type),
+                    field_ownership,
                 )
             } else {
                 let ty = lookup(scopes, name)
@@ -3858,7 +4423,11 @@ fn lower_typed_expr_with_expected(
         }
         Expr::Binary { left, op, right } => {
             let left = lower_typed_expr(left, env, scopes)?;
-            let right = lower_typed_expr(right, env, scopes)?;
+            let right = if *op == BinaryOp::Coalesce {
+                lower_typed_expr_with_expected(right, env, scopes, Some(&left.ty))?
+            } else {
+                lower_typed_expr(right, env, scopes)?
+            };
             let ty = if op.is_comparison() {
                 IrType::Bool
             } else {
@@ -3979,8 +4548,12 @@ fn lower_expr(
         }
         Expr::NewArray {
             element_type,
+            length,
             values,
         } => {
+            if let Some(length) = length {
+                lower_expr(length, env, scopes)?;
+            }
             for value in values {
                 lower_expr(value, env, scopes)?;
             }
@@ -4012,21 +4585,55 @@ fn lower_expr(
         }
         Expr::Field { target, name } => {
             let target = lower_expr(target, env, scopes)?;
-            let ty = match (&target.ty, name.as_str()) {
+            if target.ty == IrType::Int {
+                if let Some(value) = env.enum_values.get(&(target.name.clone(), name.clone())) {
+                    let _ = value;
+                    return Ok(TypedBinding {
+                        name: "<expr>".to_string(),
+                        ty: IrType::Int,
+                        ownership: Ownership::Copy,
+                    });
+                }
+            }
+            let field_info = match (&target.ty, name.as_str()) {
+                (IrType::Class(type_name), field) | (IrType::Struct(type_name), field) => {
+                    env.resolve_field(type_name, field)
+                }
                 (IrType::List(_), "Count")
                 | (IrType::Dictionary(_, _), "Count")
-                | (IrType::Array(_), "Length" | "Count") => IrType::Int,
-                (IrType::Task(inner), "Result") => inner.as_ref().clone(),
-                (IrType::Task(_), "IsCompleted") => IrType::Bool,
-                (IrType::Exception, "Message") => IrType::String,
-                _ => IrType::Unknown(name.clone()),
+                | (IrType::Array(_), "Length" | "Count") => Some(FieldSignature {
+                    ty: IrType::Int,
+                    ownership: Ownership::Copy,
+                }),
+                (IrType::String, "Length") => Some(FieldSignature {
+                    ty: IrType::Int,
+                    ownership: Ownership::Copy,
+                }),
+                (IrType::Task(inner), "Result") => Some(FieldSignature {
+                    ty: inner.as_ref().clone(),
+                    ownership: ownership_for_type(inner),
+                }),
+                (IrType::Task(_), "IsCompleted") => Some(FieldSignature {
+                    ty: IrType::Bool,
+                    ownership: Ownership::Copy,
+                }),
+                (IrType::Exception, "Message") => Some(FieldSignature {
+                    ty: IrType::String,
+                    ownership: Ownership::Borrowed,
+                }),
+                (IrType::Weak(inner), "Target") => Some(FieldSignature {
+                    ty: inner.as_ref().clone(),
+                    ownership: Ownership::Borrowed,
+                }),
+                _ => None,
             };
-            let ownership = if target.ty == IrType::Exception && matches!(name.as_str(), "Message")
-            {
-                Ownership::Borrowed
-            } else {
-                ownership_for_type(&ty)
-            };
+            let (ty, ownership) = field_info
+                .map(|field| (field.ty, field.ownership))
+                .unwrap_or_else(|| {
+                    let ty = IrType::Unknown(name.clone());
+                    let ownership = ownership_for_type(&ty);
+                    (ty, ownership)
+                });
             TypedBinding {
                 name: "<expr>".to_string(),
                 ty,
@@ -4055,7 +4662,7 @@ fn lower_expr(
                 }
                 (IrType::Task(inner), "GetResult") => inner.as_ref().clone(),
                 (IrType::Task(inner), "GetAwaiter") => IrType::Task(inner.clone()),
-                (_, "Contains") | (_, "ContainsKey") | (_, "Remove") => IrType::Bool,
+                (_, "Contains") | (_, "ContainsKey") | (_, "Remove") | (_, "TryGetValue") => IrType::Bool,
                 (_, "Add") | (_, "Clear") | (_, "Wait") => IrType::Void,
                 (IrType::Unknown(target) | IrType::Class(target), "Run") if target == "Task" => {
                     args.first()
@@ -4074,9 +4681,19 @@ fn lower_expr(
                 }
                 _ => IrType::Unknown(name.clone()),
             };
+            let ownership = if let IrType::Class(type_name)
+            | IrType::Struct(type_name)
+            | IrType::Interface(type_name) = &target.ty
+            {
+                env.resolve_method(type_name, name, &args.iter().map(|arg| arg.ty.clone()).collect::<Vec<_>>())
+                    .map(|signature| signature.return_ownership.clone())
+                    .unwrap_or_else(|| ownership_for_type(&ty))
+            } else {
+                ownership_for_type(&ty)
+            };
             TypedBinding {
                 name: "<expr>".to_string(),
-                ownership: ownership_for_type(&ty),
+                ownership,
                 ty,
             }
         }
@@ -4092,16 +4709,20 @@ fn lower_expr(
                 .iter()
                 .map(|arg| lower_expr(arg, env, scopes))
                 .collect::<Result<Vec<_>, _>>()?;
-            let ty = env
-                .resolve_function(
-                    name,
-                    &args.iter().map(|arg| arg.ty.clone()).collect::<Vec<_>>(),
-                )
+            let signature = env.resolve_function(
+                name,
+                &args.iter().map(|arg| arg.ty.clone()).collect::<Vec<_>>(),
+            );
+            let ty = signature
+                .as_ref()
                 .map(|signature| signature.return_type.clone())
                 .unwrap_or_else(|| IrType::Unknown(name.clone()));
             TypedBinding {
                 name: "<expr>".to_string(),
-                ownership: ownership_for_type(&ty),
+                ownership: signature
+                    .as_ref()
+                    .map(|signature| signature.return_ownership.clone())
+                    .unwrap_or_else(|| Ownership::Shared),
                 ty,
             }
         }
@@ -4163,6 +4784,23 @@ fn lower_expr(
                 ty,
             }
         }
+        Expr::Throw(expr) => {
+            lower_expr(expr, env, scopes)?;
+            TypedBinding {
+                name: "<expr>".to_string(),
+                ty: IrType::Unknown("throw".to_string()),
+                ownership: Ownership::Copy,
+            }
+        }
+        Expr::Assign { target, value } => {
+            lower_expr(target, env, scopes)?;
+            let value = lower_expr(value, env, scopes)?;
+            TypedBinding {
+                name: "<expr>".to_string(),
+                ty: value.ty,
+                ownership: value.ownership,
+            }
+        }
         Expr::Unary { expr, .. } => {
             lower_expr(expr, env, scopes)?;
             typed_temp(IrType::Bool)
@@ -4197,7 +4835,7 @@ fn lower_expr(
         }
         Expr::NamedArg { expr, .. } | Expr::RefArg { expr, .. } => lower_expr(expr, env, scopes)?,
         Expr::IncDec { name, .. } => {
-            let ty = if let Some((_, field_ty)) = implicit_field(env, scopes, name) {
+            let ty = if let Some((_, field_ty, _)) = implicit_field(env, scopes, name) {
                 field_ty
             } else {
                 lookup(scopes, name)
@@ -4221,7 +4859,7 @@ fn implicit_field(
     env: &TypeEnv,
     scopes: &[HashMap<String, TypedBinding>],
     name: &str,
-) -> Option<(IrType, IrType)> {
+) -> Option<(IrType, IrType, Ownership)> {
     let this_type = lookup(scopes, "this")?.ty;
     let owner = match &this_type {
         IrType::Class(name) | IrType::Struct(name) => name.as_str(),
@@ -4232,7 +4870,7 @@ fn implicit_field(
         _ => return None,
     };
     let field_type = env.resolve_field(owner, name)?;
-    Some((this_type, field_type))
+    Some((this_type, field_type.ty, field_type.ownership))
 }
 
 fn collect_condition_bindings(expr: &Expr, env: &TypeEnv) -> Vec<TypedBinding> {
@@ -4361,11 +4999,22 @@ fn resolve_method_call(
     target: &TypedExpr,
     name: &str,
     args: &[TypedExpr],
-) -> Result<(IrType, String, CallResolution), String> {
+) -> Result<(IrType, Ownership, String, CallResolution), String> {
     if matches!(target.ty, IrType::Unknown(_)) {
         if let Some(signature) = env.resolve_function_call(name, args)? {
             return Ok((
                 signature.return_type.clone(),
+                signature.return_ownership.clone(),
+                signature.symbol.clone(),
+                CallResolution::StaticFunction,
+            ));
+        }
+    }
+    if matches!(target.ty, IrType::Class(_)) {
+        if let Some(signature) = env.resolve_function_call(name, args)? {
+            return Ok((
+                signature.return_type.clone(),
+                signature.return_ownership.clone(),
                 signature.symbol.clone(),
                 CallResolution::StaticFunction,
             ));
@@ -4389,6 +5038,7 @@ fn resolve_method_call(
                 if params.is_empty() && return_type.as_ref() == &IrType::String {
                     return Ok((
                         IrType::Void,
+                        Ownership::Copy,
                         name.to_string(),
                         CallResolution::EndpointHandlerRegistration {
                             http_method: if name == "MapGet" { "GET" } else { "POST" }.to_string(),
@@ -4401,12 +5051,14 @@ fn resolve_method_call(
             if let Some(signature) = env.resolve_method_call(type_name, name, args)? {
                 Ok((
                     signature.return_type.clone(),
+                    signature.return_ownership.clone(),
                     signature.symbol.clone(),
                     CallResolution::InstanceMethod,
                 ))
             } else {
                 Ok((
                     IrType::Unknown(name.to_string()),
+                    Ownership::Shared,
                     name.to_string(),
                     CallResolution::InstanceMethod,
                 ))
@@ -4419,6 +5071,7 @@ fn resolve_method_call(
                 .unwrap_or(IrType::Void);
             Ok((
                 IrType::Task(Box::new(result)),
+                Ownership::Owned,
                 name.to_string(),
                 CallResolution::StaticFunction,
             ))
@@ -4435,6 +5088,7 @@ fn resolve_method_call(
                 .unwrap_or(IrType::Void);
             Ok((
                 IrType::Task(Box::new(result)),
+                Ownership::Owned,
                 name.to_string(),
                 CallResolution::StaticFunction,
             ))
@@ -4444,6 +5098,7 @@ fn resolve_method_call(
         {
             Ok((
                 IrType::String,
+                Ownership::Owned,
                 "System_IO_File_ReadAllText".to_string(),
                 CallResolution::StaticFunction,
             ))
@@ -4453,6 +5108,7 @@ fn resolve_method_call(
         {
             Ok((
                 IrType::Void,
+                Ownership::Copy,
                 "System_IO_File_WriteAllText".to_string(),
                 CallResolution::StaticFunction,
             ))
@@ -4472,6 +5128,7 @@ fn resolve_method_call(
             };
             Ok((
                 IrType::Void,
+                Ownership::Copy,
                 symbol.to_string(),
                 CallResolution::StaticFunction,
             ))
@@ -4483,12 +5140,14 @@ fn resolve_method_call(
             if let Some(signature) = env.resolve_method_call(type_name, method_name, args)? {
                 Ok((
                     signature.return_type.clone(),
+                    signature.return_ownership.clone(),
                     signature.symbol.clone(),
                     CallResolution::InstanceMethod,
                 ))
             } else {
                 Ok((
                     IrType::Unknown(name.to_string()),
+                    Ownership::Shared,
                     name.to_string(),
                     CallResolution::InstanceMethod,
                 ))
@@ -4496,37 +5155,50 @@ fn resolve_method_call(
         }
         (IrType::Task(inner), "GetResult") => Ok((
             inner.as_ref().clone(),
+            ownership_for_type(inner),
             name.to_string(),
             CallResolution::TaskMethod,
         )),
         (IrType::Task(inner), "GetAwaiter") => Ok((
             IrType::Task(inner.clone()),
+            Ownership::Owned,
+            name.to_string(),
+            CallResolution::TaskMethod,
+        )),
+        (IrType::Task(inner), "AsTask") => Ok((
+            IrType::Task(inner.clone()),
+            Ownership::Owned,
             name.to_string(),
             CallResolution::TaskMethod,
         )),
         (IrType::Weak(_), "TryGetTarget") => {
-            Ok((IrType::Bool, name.to_string(), CallResolution::WeakMethod))
+            Ok((IrType::Bool, Ownership::Copy, name.to_string(), CallResolution::WeakMethod))
         }
         (IrType::List(element), "ToArray") => Ok((
             IrType::Array(Box::new(element.as_ref().clone())),
+            Ownership::Owned,
             name.to_string(),
             CallResolution::CollectionMethod,
         )),
-        (IrType::List(_), "Contains") | (IrType::Dictionary(_, _), "ContainsKey" | "Remove") => {
+        (IrType::List(_), "Contains")
+        | (IrType::Dictionary(_, _), "ContainsKey" | "Remove" | "TryGetValue") => {
             Ok((
                 IrType::Bool,
+                Ownership::Copy,
                 name.to_string(),
                 CallResolution::CollectionMethod,
             ))
         }
         (IrType::List(_), "Add" | "Clear") | (IrType::Dictionary(_, _), "Add" | "Clear") => Ok((
             IrType::Void,
+            Ownership::Copy,
             name.to_string(),
             CallResolution::CollectionMethod,
         )),
-        (_, "Wait") => Ok((IrType::Void, name.to_string(), CallResolution::TaskMethod)),
+        (_, "Wait") => Ok((IrType::Void, Ownership::Copy, name.to_string(), CallResolution::TaskMethod)),
         _ => Ok((
             IrType::Unknown(name.to_string()),
+            Ownership::Shared,
             name.to_string(),
             CallResolution::Unknown,
         )),
@@ -4545,9 +5217,13 @@ fn type_syntax_to_ir_with_subst(
     match ty {
         TypeSyntax::GenericNamed { name, args }
             if name == "own"
+                || name == "shared"
                 || name == "borrow"
+                || name == "view"
                 || name == "System.Ownership.own"
-                || name == "System.Ownership.borrow" =>
+                || name == "System.Ownership.shared"
+                || name == "System.Ownership.borrow"
+                || name == "System.Ownership.view" =>
         {
             if let Some(first_arg) = args.first() {
                 type_syntax_to_ir_with_subst(first_arg, env, subst)
@@ -4588,7 +5264,11 @@ fn type_syntax_to_ir_with_subst(
             }
         }
         TypeSyntax::GenericNamed { name, args }
-            if name == "Weak" || name == "System.WeakReference" || name == "WeakReference" =>
+            if name == "Weak"
+                || name == "WeakReference"
+                || name == "System.WeakReference"
+                || name == "System.Ownership.weakref"
+                || name == "weakref" =>
         {
             if let Some(first_arg) = args.first() {
                 IrType::Weak(Box::new(type_syntax_to_ir_with_subst(first_arg, env, subst)))
@@ -4632,6 +5312,14 @@ fn type_syntax_to_ir_with_subst(
             if let Some(signature) = env.delegates.get(name) {
                 return delegate_signature_to_ir(signature, args, env, subst);
             }
+            if name == "IReadOnlyDictionary" || name == "System.Collections.Generic.IReadOnlyDictionary" {
+                if args.len() == 2 {
+                    return IrType::Dictionary(
+                        Box::new(type_syntax_to_ir_with_subst(&args[0], env, subst)),
+                        Box::new(type_syntax_to_ir_with_subst(&args[1], env, subst)),
+                    );
+                }
+            }
             match env.kinds.get(name) {
                 Some(TypeKind::Class) => IrType::Class(name.clone()),
                 Some(TypeKind::Interface) => IrType::Interface(name.clone()),
@@ -4663,6 +5351,49 @@ fn type_syntax_to_ir_with_subst(
         }
         TypeSyntax::Nullable(inner) => type_syntax_to_ir_with_subst(inner, env, subst),
         TypeSyntax::Void => IrType::Void,
+    }
+}
+
+fn ownership_for_declared_type_syntax(ty: &TypeSyntax, env: &TypeEnv) -> Ownership {
+    match ty {
+        TypeSyntax::GenericNamed { name, args }
+            if name == "own" || name == "System.Ownership.own" =>
+        {
+            let _ = args;
+            Ownership::Owned
+        }
+        TypeSyntax::GenericNamed { name, args }
+            if name == "shared" || name == "System.Ownership.shared" =>
+        {
+            let _ = args;
+            Ownership::Shared
+        }
+        TypeSyntax::GenericNamed { name, args }
+            if name == "borrow" || name == "System.Ownership.borrow" =>
+        {
+            let _ = args;
+            Ownership::Borrowed
+        }
+        TypeSyntax::GenericNamed { name, args }
+            if name == "view" || name == "System.Ownership.view" =>
+        {
+            let _ = args;
+            Ownership::View
+        }
+        TypeSyntax::GenericNamed { name, args }
+            if name == "weakref" || name == "System.Ownership.weakref" =>
+        {
+            let _ = args;
+            Ownership::Copy
+        }
+        TypeSyntax::GenericNamed { name, args }
+            if name == "IReadOnlyDictionary"
+                || name == "System.Collections.Generic.IReadOnlyDictionary" =>
+        {
+            let _ = args;
+            Ownership::View
+        }
+        _ => ownership_for_type(&type_syntax_to_ir(ty, env)),
     }
 }
 

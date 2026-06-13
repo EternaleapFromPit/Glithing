@@ -354,7 +354,10 @@ impl BorrowChecker {
                     Self::check_expr(value, state)?;
                 }
             }
-            Expr::NewArray { values, .. } => {
+            Expr::NewArray { length, values, .. } => {
+                if let Some(length) = length {
+                    Self::check_expr(length, state)?;
+                }
                 for value in values {
                     Self::check_expr(value, state)?;
                 }
@@ -375,6 +378,11 @@ impl BorrowChecker {
                 for arg in args {
                     Self::check_expr(arg, state)?;
                 }
+            }
+            Expr::Throw(expr) => Self::check_expr(expr, state)?,
+            Expr::Assign { target, value } => {
+                Self::check_expr(target, state)?;
+                Self::check_expr(value, state)?;
             }
             Expr::NewObject { args, fields, .. } => {
                 for arg in args {

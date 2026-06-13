@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
-use crate::codegen::sanitize_ident;
 use crate::tir::{self, TypedProgram};
 
 pub(crate) struct CompatibilityAnalyzer<'a> {
@@ -218,6 +217,7 @@ impl<'a> CompatibilityAnalyzer<'a> {
             if self.emitted.insert(key) {
                 self.diagnostics.push(render_diagnostic(
                     "GL2004",
+                    None,
                     index + 1,
                     col,
                     line,
@@ -439,7 +439,10 @@ impl<'a> CompatibilityAnalyzer<'a> {
                     self.visit_expr(value, emit_llvm);
                 }
             }
-            tir::TypedExprKind::NewArray { values, .. } => {
+            tir::TypedExprKind::NewArray { length, values, .. } => {
+                if let Some(length) = length {
+                    self.visit_expr(length, emit_llvm);
+                }
                 for value in values {
                     self.visit_expr(value, emit_llvm);
                 }
@@ -461,6 +464,11 @@ impl<'a> CompatibilityAnalyzer<'a> {
                     );
                 }
                 self.visit_expr(inner, emit_llvm);
+            }
+            tir::TypedExprKind::Throw(expr) => self.visit_expr(expr, emit_llvm),
+            tir::TypedExprKind::Assign { target, value } => {
+                self.visit_expr(target, emit_llvm);
+                self.visit_expr(value, emit_llvm);
             }
             tir::TypedExprKind::Unary { expr: inner, .. } => self.visit_expr(inner, emit_llvm),
             tir::TypedExprKind::Lambda { body, .. } => {
@@ -496,9 +504,16 @@ impl<'a> CompatibilityAnalyzer<'a> {
         if !self.emitted.insert(key) {
             return;
         }
-        let (line, col, snippet) = locate_source(self.source, needle);
-        self.diagnostics
-            .push(render_diagnostic(code, line, col, snippet, &message, &help));
+        let (file, line, col, snippet) = locate_source(self.source, needle);
+        self.diagnostics.push(render_diagnostic(
+            code,
+            file.as_deref(),
+            line,
+            col,
+            snippet,
+            &message,
+            &help,
+        ));
     }
 }
 
@@ -565,27 +580,43 @@ fn is_llvm_runtime_function(symbol: &str) -> bool {
     )
 }
 
-pub(crate) fn locate_source<'a>(source: &'a str, needle: &str) -> (usize, usize, &'a str) {
-    for (index, line) in source.lines().enumerate() {
-        if let Some(col) = line.find(needle) {
-            return (index + 1, col + 1, line);
+pub(crate) fn locate_source<'a>(source: &'a str, needle: &str) -> (Option<String>, usize, usize, &'a str) {
+    let mut current_file = None::<String>;
+    let mut current_line = 0usize;
+    for raw_line in source.lines() {
+        let line = raw_line.trim_start();
+        if let Some(path) = line.strip_prefix("// __FILE_PATH__: ") {
+            current_file = Some(path.trim().to_string());
+            current_line = 0;
+            continue;
+        }
+        current_line += 1;
+        if let Some(col) = raw_line.find(needle) {
+            return (current_file, current_line, col + 1, raw_line);
         }
     }
-    (1, 1, source.lines().next().unwrap_or(""))
+    (current_file, 1, 1, source.lines().next().unwrap_or(""))
 }
 
 pub(crate) fn render_diagnostic(
     code: &str,
+    file: Option<&str>,
     line: usize,
     col: usize,
     snippet: &str,
     message: &str,
     help: &str,
 ) -> String {
-    format!(
-        "warning {code} at {line}:{col}: {message}\n  {line} | {}\n  help: {help}",
-        snippet.trim_end()
-    )
+    match file {
+        Some(file) if !file.is_empty() => format!(
+            "warning {code} at {file}:{line}:{col}: {message}\n  {line} | {}\n  help: {help}",
+            snippet.trim_end()
+        ),
+        _ => format!(
+            "warning {code} at {line}:{col}: {message}\n  {line} | {}\n  help: {help}",
+            snippet.trim_end()
+        ),
+    }
 }
 
 
@@ -669,5 +700,21 @@ fn typed_default_description(ty: &tir::IrType) -> &'static str {
         | tir::IrType::Decimal => "0",
         tir::IrType::String => "\"\"",
         _ => "null",
+    }
+}
+
+fn sanitize_ident(name: &str) -> String {
+    let mut sanitized = String::new();
+    for ch in name.chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    if sanitized.is_empty() {
+        "_".to_string()
+    } else {
+        sanitized
     }
 }

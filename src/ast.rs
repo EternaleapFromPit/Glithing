@@ -195,6 +195,7 @@ pub(crate) enum Expr {
     ArrayLiteral(Vec<Expr>),
     NewArray {
         element_type: TypeSyntax,
+        length: Option<Box<Expr>>,
         values: Vec<Expr>,
     },
     Index {
@@ -219,6 +220,7 @@ pub(crate) enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+    Throw(Box<Expr>),
     NewObject {
         type_name: String,
         args: Vec<Expr>,
@@ -253,6 +255,10 @@ pub(crate) enum Expr {
         left: Box<Expr>,
         op: BinaryOp,
         right: Box<Expr>,
+    },
+    Assign {
+        target: Box<Expr>,
+        value: Box<Expr>,
     },
     NamedArg {
         name: String,

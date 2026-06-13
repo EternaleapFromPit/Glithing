@@ -157,9 +157,14 @@ impl LlvmEmitter {
                 ));
             }
             for (type_name, value) in &dependencies {
+                let drop_name = self
+                    .object_types
+                    .get(type_name)
+                    .map(|object| drop_symbol(&object.name))
+                    .unwrap_or_else(|| drop_symbol(type_name));
                 self.body.push_str(&format!(
                     "  call void @{}(ptr {value})\n",
-                    drop_symbol(type_name)
+                    drop_name
                 ));
             }
             let (action_args, string_args, object_args) =
@@ -177,14 +182,23 @@ impl LlvmEmitter {
                 ));
             }
             for (type_name, value) in object_args {
+                let drop_name = self
+                    .object_types
+                    .get(&type_name)
+                    .map(|object| drop_symbol(&object.name))
+                    .unwrap_or_else(|| drop_symbol(&type_name));
                 self.body.push_str(&format!(
                     "  call void @{}(ptr {value})\n",
-                    drop_symbol(&type_name)
+                    drop_name
                 ));
             }
             self.body.push_str(&format!(
                 "  call void @{}(ptr %controller)\n",
-                drop_symbol(controller_name)
+                self
+                    .object_types
+                    .get(controller_name)
+                    .map(|object| drop_symbol(&object.name))
+                    .unwrap_or_else(|| drop_symbol(controller_name))
             ));
             let response = self.emit_endpoint_result(&handler.response_type, "%result")?;
             self.body.push_str(&format!("  ret ptr {response}\n}}\n\n"));

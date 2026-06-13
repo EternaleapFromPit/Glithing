@@ -6,9 +6,14 @@ package System.Ownership;
 
 public type own<T> = T;
 public type borrow<T> = T;
+public type shared<T> = T;
+public type view<T> = T;
+public type weakref<T> = T;
 
 public static own<T> make_owned<T>(T value) => value;
+public static shared<T> make_shared<T>(T value) => value;
 public static borrow<T> make_borrow<T>(T value) => value;
+public static view<T> make_view<T>(T value) => value;
 
 public class Rc<T> {
     private T value;
