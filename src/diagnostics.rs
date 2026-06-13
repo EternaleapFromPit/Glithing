@@ -18,6 +18,7 @@ impl<'a> CompatibilityAnalyzer<'a> {
         source: &'a str,
         _program: &Program,
         typed: &TypedProgram,
+        emit_llvm: bool,
     ) -> Vec<String> {
         let interface_names = typed
             .types
@@ -69,11 +70,11 @@ impl<'a> CompatibilityAnalyzer<'a> {
         analyzer.detect_native_blocks();
         analyzer.detect_unexecutable_endpoints(typed);
         for function in &typed.functions {
-            analyzer.visit_stmts(&function.body);
+            analyzer.visit_stmts(&function.body, emit_llvm);
         }
         for ty in &typed.types {
             for function in ty.constructors.iter().chain(&ty.methods) {
-                analyzer.visit_stmts(&function.body);
+                analyzer.visit_stmts(&function.body, emit_llvm);
             }
         }
         analyzer.diagnostics
@@ -227,29 +228,29 @@ impl<'a> CompatibilityAnalyzer<'a> {
         }
     }
 
-    fn visit_stmts(&mut self, stmts: &[tir::TypedStmt]) {
+    fn visit_stmts(&mut self, stmts: &[tir::TypedStmt], emit_llvm: bool) {
         for stmt in stmts {
             match &stmt.kind {
                 tir::TypedStmtKind::Let { expr, .. }
                 | tir::TypedStmtKind::Assign { expr, .. }
                 | tir::TypedStmtKind::Print(expr)
                 | tir::TypedStmtKind::Expr(expr)
-                | tir::TypedStmtKind::Throw(expr) => self.visit_expr(expr),
+                | tir::TypedStmtKind::Throw(expr) => self.visit_expr(expr, emit_llvm),
                 tir::TypedStmtKind::AssignTarget { target, expr } => {
-                    self.visit_expr(target);
-                    self.visit_expr(expr);
+                    self.visit_expr(target, emit_llvm);
+                    self.visit_expr(expr, emit_llvm);
                 }
                 tir::TypedStmtKind::Block(body) | tir::TypedStmtKind::While { body, .. } => {
-                    self.visit_stmts(body)
+                    self.visit_stmts(body, emit_llvm)
                 }
                 tir::TypedStmtKind::If {
                     condition,
                     then_body,
                     else_body,
                 } => {
-                    self.visit_expr(condition);
-                    self.visit_stmts(then_body);
-                    self.visit_stmts(else_body);
+                    self.visit_expr(condition, emit_llvm);
+                    self.visit_stmts(then_body, emit_llvm);
+                    self.visit_stmts(else_body, emit_llvm);
                 }
                 tir::TypedStmtKind::Try {
                     try_body,
@@ -257,21 +258,21 @@ impl<'a> CompatibilityAnalyzer<'a> {
                     finally_body,
                     ..
                 } => {
-                    self.visit_stmts(try_body);
-                    self.visit_stmts(catch_body);
-                    self.visit_stmts(finally_body);
+                    self.visit_stmts(try_body, emit_llvm);
+                    self.visit_stmts(catch_body, emit_llvm);
+                    self.visit_stmts(finally_body, emit_llvm);
                 }
                 tir::TypedStmtKind::Switch {
                     expr,
                     cases,
                     default,
                 } => {
-                    self.visit_expr(expr);
+                    self.visit_expr(expr, emit_llvm);
                     for case in cases {
-                        self.visit_expr(&case.value);
-                        self.visit_stmts(&case.body);
+                        self.visit_expr(&case.value, emit_llvm);
+                        self.visit_stmts(&case.body, emit_llvm);
                     }
-                    self.visit_stmts(default);
+                    self.visit_stmts(default, emit_llvm);
                 }
                 tir::TypedStmtKind::For {
                     init,
@@ -280,23 +281,23 @@ impl<'a> CompatibilityAnalyzer<'a> {
                     body,
                 } => {
                     if let Some(init) = init {
-                        self.visit_stmts(std::slice::from_ref(init));
+                        self.visit_stmts(std::slice::from_ref(init), emit_llvm);
                     }
                     if let Some(condition) = condition {
-                        self.visit_expr(condition);
+                        self.visit_expr(condition, emit_llvm);
                     }
-                    self.visit_stmts(body);
+                    self.visit_stmts(body, emit_llvm);
                     if let Some(increment) = increment {
-                        self.visit_stmts(std::slice::from_ref(increment));
+                        self.visit_stmts(std::slice::from_ref(increment), emit_llvm);
                     }
                 }
                 tir::TypedStmtKind::ForEach {
                     collection, body, ..
                 } => {
-                    self.visit_expr(collection);
-                    self.visit_stmts(body);
+                    self.visit_expr(collection, emit_llvm);
+                    self.visit_stmts(body, emit_llvm);
                 }
-                tir::TypedStmtKind::Return(Some(expr)) => self.visit_expr(expr),
+                tir::TypedStmtKind::Return(Some(expr)) => self.visit_expr(expr, emit_llvm),
                 tir::TypedStmtKind::Return(None)
                 | tir::TypedStmtKind::Break
                 | tir::TypedStmtKind::Continue => {}
@@ -304,14 +305,14 @@ impl<'a> CompatibilityAnalyzer<'a> {
         }
     }
 
-    fn visit_expr(&mut self, expr: &tir::TypedExpr) {
+    fn visit_expr(&mut self, expr: &tir::TypedExpr, emit_llvm: bool) {
         match &expr.kind {
             tir::TypedExprKind::Call(call) => {
                 match &call.kind {
                     tir::TypedCallKind::Function { name, symbol } => {
                         if name == "sizeof" {
                             for arg in &call.args {
-                                self.visit_expr(arg);
+                                self.visit_expr(arg, emit_llvm);
                             }
                             return;
                         }
@@ -351,11 +352,11 @@ impl<'a> CompatibilityAnalyzer<'a> {
                                             symbol == &prefix
                                                 || symbol.starts_with(&format!("{prefix}__"))
                                         })
-                                    })
+                                })
                                 {
-                                    self.visit_expr(target);
+                                    self.visit_expr(target, emit_llvm);
                                     for arg in &call.args {
-                                        self.visit_expr(arg);
+                                        self.visit_expr(arg, emit_llvm);
                                     }
                                     return;
                                 }
@@ -373,11 +374,11 @@ impl<'a> CompatibilityAnalyzer<'a> {
                                 ),
                             );
                         }
-                        self.visit_expr(target);
+                        self.visit_expr(target, emit_llvm);
                     }
                 }
                 for arg in &call.args {
-                    self.visit_expr(arg);
+                    self.visit_expr(arg, emit_llvm);
                 }
             }
             tir::TypedExprKind::Field { target, name } => {
@@ -395,9 +396,9 @@ impl<'a> CompatibilityAnalyzer<'a> {
                         ),
                     );
                 }
-                self.visit_expr(target);
+                self.visit_expr(target, emit_llvm);
             }
-            tir::TypedExprKind::IsPattern { expr, .. } => self.visit_expr(expr),
+            tir::TypedExprKind::IsPattern { expr, .. } => self.visit_expr(expr, emit_llvm),
             tir::TypedExprKind::NewObject {
                 type_name,
                 args,
@@ -406,10 +407,10 @@ impl<'a> CompatibilityAnalyzer<'a> {
             } => {
                 if type_name == "Rc_int" || type_name.starts_with("Rc_") {
                     for arg in args {
-                        self.visit_expr(arg);
+                        self.visit_expr(arg, emit_llvm);
                     }
                     for field in fields {
-                        self.visit_expr(&field.expr);
+                        self.visit_expr(&field.expr, emit_llvm);
                     }
                     return;
                 }
@@ -427,25 +428,25 @@ impl<'a> CompatibilityAnalyzer<'a> {
                     );
                 }
                 for arg in args {
-                    self.visit_expr(arg);
+                    self.visit_expr(arg, emit_llvm);
                 }
                 for field in fields {
-                    self.visit_expr(&field.expr);
+                    self.visit_expr(&field.expr, emit_llvm);
                 }
             }
             tir::TypedExprKind::ArrayLiteral(values) => {
                 for value in values {
-                    self.visit_expr(value);
+                    self.visit_expr(value, emit_llvm);
                 }
             }
             tir::TypedExprKind::NewArray { values, .. } => {
                 for value in values {
-                    self.visit_expr(value);
+                    self.visit_expr(value, emit_llvm);
                 }
             }
             tir::TypedExprKind::Index { target, index } => {
-                self.visit_expr(target);
-                self.visit_expr(index);
+                self.visit_expr(target, emit_llvm);
+                self.visit_expr(index, emit_llvm);
             }
             tir::TypedExprKind::Await(inner) => {
                 if !matches!(inner.ty, tir::IrType::Task(_)) {
@@ -456,33 +457,35 @@ impl<'a> CompatibilityAnalyzer<'a> {
                             "awaited expression has unresolved task type {:?}; compatibility mode evaluates it synchronously",
                             inner.ty
                         ),
-                        "implement the called method with a `Task<T>` return type in a `.gl` package to enable owned async state-machine lowering".to_string(),
+                            "implement the called method with a `Task<T>` return type in a `.gl` package to enable owned async state-machine lowering".to_string(),
                     );
                 }
-                self.visit_expr(inner);
+                self.visit_expr(inner, emit_llvm);
             }
-            tir::TypedExprKind::Unary { expr: inner, .. } => self.visit_expr(inner),
+            tir::TypedExprKind::Unary { expr: inner, .. } => self.visit_expr(inner, emit_llvm),
             tir::TypedExprKind::Lambda { body, .. } => {
-                self.emit(
-                    "GL3005",
-                    "=>",
-                    "lambda has no executable LLVM closure or expression-tree lowering; compatibility mode emits an opaque delegate".to_string(),
-                    "for framework configuration, add the receiving API to a `.gl` package; for executable code, rewrite the lambda as a named function until closure lowering is available".to_string(),
-                );
-                self.visit_expr(body);
+                if !emit_llvm {
+                    self.emit(
+                        "GL3005",
+                        "=>",
+                        "lambda has no executable LLVM closure or expression-tree lowering; compatibility mode emits an opaque delegate".to_string(),
+                        "for framework configuration, add the receiving API to a `.gl` package; for executable code, rewrite the lambda as a named function until closure lowering is available".to_string(),
+                    );
+                }
+                self.visit_expr(body, emit_llvm);
             }
             tir::TypedExprKind::Conditional {
                 condition,
                 when_true,
                 when_false,
             } => {
-                self.visit_expr(condition);
-                self.visit_expr(when_true);
-                self.visit_expr(when_false);
+                self.visit_expr(condition, emit_llvm);
+                self.visit_expr(when_true, emit_llvm);
+                self.visit_expr(when_false, emit_llvm);
             }
             tir::TypedExprKind::Binary { left, right, .. } => {
-                self.visit_expr(left);
-                self.visit_expr(right);
+                self.visit_expr(left, emit_llvm);
+                self.visit_expr(right, emit_llvm);
             }
             _ => {}
         }

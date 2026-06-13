@@ -227,7 +227,7 @@ fn compile_source_with_options(
     let typed = TypedProgram::lower(&program)?;
     TypedProgram::check_ownership(&program)?;
     let leak_report = LeakAnalyzer::analyze_program(&program, &typed);
-    let mut diagnostics = CompatibilityAnalyzer::analyze(source, &program, &typed);
+    let mut diagnostics = CompatibilityAnalyzer::analyze(source, &program, &typed, emit_llvm);
     diagnostics.extend(cycle_warnings);
     let bytecode = BytecodeEmitter::emit_program(&program);
     let llvm_ir = if emit_llvm {

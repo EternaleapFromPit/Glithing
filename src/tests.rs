@@ -92,6 +92,28 @@ fn compiles_task_generic_smoke() {
 }
 
 #[test]
+fn lowers_task_run_delegate_invocation_in_llvm() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int Compute() {
+                return 42;
+            }
+
+            fn main() {
+                Task<int> numberTask = Task.Run(Compute);
+                int value = numberTask.Result;
+                print(value);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("Task.Run should lower to LLVM IR");
+
+    assert!(llvm_ir.contains("glitch_delegate_wrapper_Compute"));
+    assert!(llvm_ir.contains("glitch_task_from_result_i32"));
+}
+
+#[test]
 fn compiles_async_await_task_lowering() {
     let source = r#"
             using System.Threading.Tasks;
@@ -1372,15 +1394,17 @@ fn compiles_lambdas_with_captures() {
 
     // Assert that the environment struct is defined
     assert!(llvm_ir.contains("%glitch.lambda.0.env = type { i32 }"));
-    // Assert that the delegate struct is used
-    assert!(llvm_ir.contains("%glitch.delegate = type { ptr, ptr }"));
-    // Assert that the environment is stack-allocated and stored
-    assert!(llvm_ir.contains("alloca %glitch.lambda.0.env"));
+    // Assert that the delegate struct now carries refcount, invoke, env, and destroy pointers.
+    assert!(llvm_ir.contains("%glitch.delegate = type { i64, ptr, ptr, ptr }"));
+    // Assert that the environment is heap-allocated and linked to a destroy helper.
+    assert!(llvm_ir.contains("call ptr @glitch_calloc(i64 1, i64"));
+    assert!(llvm_ir.contains("store ptr @glitch_lambda_0_destroy"));
     // Assert that the delegate function signature matches and it loads the capture
     assert!(llvm_ir.contains("define ptr @glitch_lambda_0(ptr %env, ptr %x)"));
     assert!(llvm_ir.contains("getelementptr inbounds %glitch.lambda.0.env, ptr %env"));
-    // Assert that calling the delegate loads fields and calls the function pointer
-    assert!(llvm_ir.contains("getelementptr inbounds { ptr, ptr }"));
+    // Assert that calling and releasing the delegate use the refcounted runtime helpers.
+    assert!(llvm_ir.contains("glitch_delegate_release"));
+    assert!(llvm_ir.contains("glitch_delegate_retain"));
 }
 
 #[test]
@@ -1397,6 +1421,54 @@ fn emits_compatibility_warning_for_missing_members() {
 
     assert!(diagnostics.contains("warning GL3001"));
     assert!(diagnostics.contains("implement this member in a `.gl` package"));
+}
+
+#[test]
+fn supports_lambda_lowering_without_compatibility_warning_on_llvm_path() {
+    let source = r#"
+            class Runner {
+                public Func<int, int> Worker;
+
+                public Runner(Func<int, int> worker) {
+                    this.Worker = worker;
+                }
+
+                public int Run(int x) {
+                    var f = this.Worker;
+                    return f(x);
+                }
+            }
+
+            fn main() {
+                int factor = 3;
+                var runner = new Runner(x => x * factor);
+                int res = runner.Run(5);
+                print(res);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("lambda sample should compile on the LLVM path");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(!diagnostics.contains("warning GL3005"));
+    assert!(!diagnostics.contains("lambda has no executable LLVM closure or expression-tree lowering"));
+}
+
+#[test]
+fn rejects_borrowed_lambda_capture_that_could_outlive_source() {
+    let source = r#"
+            fn main() {
+                int value = 1;
+                ref int borrowed = borrow value;
+                var f = x => x + borrowed;
+                print(f(2));
+            }
+        "#;
+
+    let error = compile_source(source).expect_err("borrowed lambda capture should be rejected");
+
+    assert!(error.contains("ownership checker: lambda capture 'borrowed' may outlive borrowed/view source"));
 }
 
 #[test]
@@ -1450,7 +1522,7 @@ fn lowers_rc_int_layout_in_llvm() {
 }
 
 #[test]
-fn warns_on_lambda_without_executable_closure_lowering() {
+fn warns_on_lambda_without_executable_closure_lowering_in_c_path() {
     let source = r#"
             class Runner {
                 public Func<int, int> Worker;
@@ -1473,8 +1545,8 @@ fn warns_on_lambda_without_executable_closure_lowering() {
             }
         "#;
 
-    let output = compile_source_with_options(source, true, false)
-        .expect("lambda sample should compile with a compatibility warning");
+    let output = compile_source_with_options(source, false, true)
+        .expect("lambda sample should compile with a compatibility warning on the C path");
     let diagnostics = output.diagnostics.join("\n");
 
     assert!(diagnostics.contains("warning GL3005"));

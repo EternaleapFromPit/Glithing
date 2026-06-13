@@ -1,0 +1,776 @@
+use super::*;
+
+impl LlvmEmitter {
+    pub(super) fn emit_endpoint_dispatch(&mut self) -> Result<(), String> {
+        let handlers = self.endpoint_handlers.clone();
+        let mut thunk_names = Vec::with_capacity(handlers.len());
+        for (index, handler) in handlers.iter().enumerate() {
+            let thunk = format!("glitch_endpoint_handler_{index}");
+            self.emit_endpoint_thunk(&thunk, handler)?;
+            thunk_names.push(thunk);
+        }
+
+        let routes = handlers
+            .iter()
+            .map(|handler| {
+                (
+                    self.string_global(&handler.http_method),
+                    self.string_global(&handler.path),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        self.body.push_str(
+            "define i1 @glitch_endpoint_handlers_contains(ptr %app, ptr %method, ptr %path) {\nentry:\n",
+        );
+        if routes.is_empty() {
+            self.body.push_str("  ret i1 false\n}\n\n");
+        } else {
+            for (index, (method, path)) in routes.iter().enumerate() {
+                let next = if index + 1 == routes.len() {
+                    "endpoint_not_found".to_string()
+                } else {
+                    format!("endpoint_next_{index}")
+                };
+                self.body.push_str(&format!(
+                    "  %contains_method_cmp_{index} = call i32 @strcmp(ptr %method, ptr {method})\n  %contains_method_match_{index} = icmp eq i32 %contains_method_cmp_{index}, 0\n  br i1 %contains_method_match_{index}, label %contains_path_{index}, label %{next}\ncontains_path_{index}:\n  %contains_path_match_{index} = call i1 @glitch_route_match(ptr {path}, ptr %path)\n  br i1 %contains_path_match_{index}, label %endpoint_found, label %{next}\n"
+                ));
+                if index + 1 != routes.len() {
+                    self.body.push_str(&format!("{next}:\n"));
+                }
+            }
+            self.body.push_str(
+                "endpoint_found:\n  ret i1 true\nendpoint_not_found:\n  ret i1 false\n}\n\n",
+            );
+        }
+
+        let not_found = self.string_global("404");
+        self.body.push_str(
+            "define ptr @glitch_endpoint_handlers_invoke(ptr %app, ptr %method, ptr %path, ptr %body) {\nentry:\n",
+        );
+        if routes.is_empty() {
+            self.body
+                .push_str(&format!("  ret ptr {not_found}\n}}\n\n"));
+        } else {
+            for (index, ((method, path), thunk)) in
+                routes.iter().zip(thunk_names.iter()).enumerate()
+            {
+                let next = if index + 1 == routes.len() {
+                    "invoke_not_found".to_string()
+                } else {
+                    format!("invoke_next_{index}")
+                };
+                self.body.push_str(&format!(
+                    "  %invoke_method_cmp_{index} = call i32 @strcmp(ptr %method, ptr {method})\n  %invoke_method_match_{index} = icmp eq i32 %invoke_method_cmp_{index}, 0\n  br i1 %invoke_method_match_{index}, label %invoke_path_{index}, label %{next}\ninvoke_path_{index}:\n  %invoke_path_match_{index} = call i1 @glitch_route_match(ptr {path}, ptr %path)\n  br i1 %invoke_path_match_{index}, label %invoke_handler_{index}, label %{next}\ninvoke_handler_{index}:\n  %invoke_result_{index} = call ptr @{thunk}(ptr %path, ptr %body)\n  ret ptr %invoke_result_{index}\n"
+                ));
+                if index + 1 != routes.len() {
+                    self.body.push_str(&format!("{next}:\n"));
+                }
+            }
+            self.body
+                .push_str(&format!("invoke_not_found:\n  ret ptr {not_found}\n}}\n\n"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn emit_endpoint_thunk(
+        &mut self,
+        thunk: &str,
+        handler: &EndpointHandlerBinding,
+    ) -> Result<(), String> {
+        let supported_return = self.endpoint_return_supported(&handler.response_type);
+        let not_implemented = self.string_global("501 Not Implemented");
+        self.body.push_str(&format!(
+            "define ptr @{thunk}(ptr %path, ptr %body) {{\nentry:\n"
+        ));
+
+        if !supported_return
+            || !handler
+                .params
+                .iter()
+                .all(|param| self.endpoint_parameter_supported(param, &handler.path))
+        {
+            self.body
+                .push_str(&format!("  ret ptr {not_implemented}\n}}\n\n"));
+            return Ok(());
+        }
+
+        if let Some(controller_name) = &handler.controller {
+            let Some(object) = self.object_types.get(controller_name).cloned() else {
+                self.body
+                    .push_str(&format!("  ret ptr {not_implemented}\n}}\n\n"));
+                return Ok(());
+            };
+            let Some(method) = self.functions.get(&handler.function) else {
+                self.body
+                    .push_str(&format!("  ret ptr {not_implemented}\n}}\n\n"));
+                return Ok(());
+            };
+            let mut expected_method_params = vec![LlType::Ptr];
+            expected_method_params
+                .extend(handler.params.iter().map(|param| llvm_ir_type(&param.ty)));
+            if method.return_type != LlType::Ptr || method.params != expected_method_params {
+                self.body
+                    .push_str(&format!("  ret ptr {not_implemented}\n}}\n\n"));
+                return Ok(());
+            }
+            if !handler
+                .constructor_params
+                .iter()
+                .all(|ty| self.can_allocate_endpoint_dependency(ty))
+            {
+                self.body
+                    .push_str(&format!("  ret ptr {not_implemented}\n}}\n\n"));
+                return Ok(());
+            }
+
+            let llvm_name = llvm_object_name(controller_name);
+            self.body.push_str(&format!(
+                "  %size_ptr = getelementptr %{llvm_name}, ptr null, i32 1\n  %size = ptrtoint ptr %size_ptr to i64\n  %controller = call ptr @glitch_calloc(i64 1, i64 %size)\n"
+            ));
+            if matches!(object.kind, TypeKind::Class) {
+                self.body.push_str(&format!(
+                    "  %rc_ptr = getelementptr inbounds %{llvm_name}, ptr %controller, i32 0, i32 0\n  store i64 1, ptr %rc_ptr\n  %controller_drop_ptr = getelementptr inbounds %{llvm_name}, ptr %controller, i32 0, i32 1\n  store ptr @{}, ptr %controller_drop_ptr\n",
+                    destroy_symbol(controller_name)
+                ));
+            }
+            let mut dependencies = Vec::new();
+            for (index, dependency_type) in handler.constructor_params.iter().enumerate() {
+                let type_name = self
+                    .resolve_endpoint_dependency_name(dependency_type)
+                    .ok_or_else(|| {
+                    format!(
+                        "LLVM TIR backend: controller dependency has no object type: {dependency_type:?}"
+                    )
+                })?;
+                let value = self
+                    .emit_endpoint_object_allocation(&type_name, &format!("dependency_{index}"))?;
+                dependencies.push((type_name, value));
+            }
+            if let Some(constructor) = &handler.constructor {
+                let mut args = vec!["ptr %controller".to_string()];
+                args.extend(dependencies.iter().map(|(_, value)| format!("ptr {value}")));
+                self.body.push_str(&format!(
+                    "  call void @{}({})\n",
+                    sanitize(constructor),
+                    args.join(", ")
+                ));
+            }
+            for (type_name, value) in &dependencies {
+                self.body.push_str(&format!(
+                    "  call void @{}(ptr {value})\n",
+                    drop_symbol(type_name)
+                ));
+            }
+            let (action_args, string_args, object_args) =
+                self.emit_endpoint_action_arguments(handler, "%path", "%body")?;
+            let mut rendered_action_args = vec!["ptr %controller".to_string()];
+            rendered_action_args.extend(action_args);
+            self.body.push_str(&format!(
+                "  %result = call ptr @{}({})\n",
+                sanitize(&handler.function),
+                rendered_action_args.join(", ")
+            ));
+            for value in string_args {
+                self.body.push_str(&format!(
+                    "  call void @glitch_string_release(ptr {value})\n"
+                ));
+            }
+            for (type_name, value) in object_args {
+                self.body.push_str(&format!(
+                    "  call void @{}(ptr {value})\n",
+                    drop_symbol(&type_name)
+                ));
+            }
+            self.body.push_str(&format!(
+                "  call void @{}(ptr %controller)\n",
+                drop_symbol(controller_name)
+            ));
+            let response = self.emit_endpoint_result(&handler.response_type, "%result")?;
+            self.body.push_str(&format!("  ret ptr {response}\n}}\n\n"));
+            return Ok(());
+        }
+
+        let Some(function) = self.functions.get(&handler.function) else {
+            self.body
+                .push_str(&format!("  ret ptr {not_implemented}\n}}\n\n"));
+            return Ok(());
+        };
+        if function.return_type == LlType::Ptr && function.params.is_empty() {
+            self.body.push_str(&format!(
+                "  %result = call ptr @{}()\n  ret ptr %result\n}}\n\n",
+                sanitize(&handler.function)
+            ));
+        } else {
+            self.body
+                .push_str(&format!("  ret ptr {not_implemented}\n}}\n\n"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn emit_endpoint_action_arguments(
+        &mut self,
+        handler: &EndpointHandlerBinding,
+        path: &str,
+        body: &str,
+    ) -> Result<(Vec<String>, Vec<String>, Vec<(String, String)>), String> {
+        let mut args = Vec::new();
+        let mut strings_to_release = Vec::new();
+        let mut objects_to_release = Vec::new();
+        for (index, param) in handler.params.iter().enumerate() {
+            match (&param.source, &param.ty) {
+                (EndpointParameterSource::Route, IrType::Int) => {
+                    let segment =
+                        route_parameter_segment(&handler.path, &param.name).ok_or_else(|| {
+                            format!(
+                                "LLVM TIR backend: route '{}' has no parameter '{}'",
+                                handler.path, param.name
+                            )
+                        })?;
+                    let raw = format!("%action_arg_{index}_i64");
+                    let value = format!("%action_arg_{index}");
+                    self.body.push_str(&format!(
+                        "  {raw} = call i64 @glitch_path_segment_i64(ptr {path}, i64 {segment})\n  {value} = trunc i64 {raw} to i32\n"
+                    ));
+                    args.push(format!("i32 {value}"));
+                }
+                (EndpointParameterSource::Route, IrType::Long) => {
+                    let segment =
+                        route_parameter_segment(&handler.path, &param.name).ok_or_else(|| {
+                            format!(
+                                "LLVM TIR backend: route '{}' has no parameter '{}'",
+                                handler.path, param.name
+                            )
+                        })?;
+                    let value = format!("%action_arg_{index}");
+                    self.body.push_str(&format!(
+                        "  {value} = call i64 @glitch_path_segment_i64(ptr {path}, i64 {segment})\n"
+                    ));
+                    args.push(format!("i64 {value}"));
+                }
+                (EndpointParameterSource::Route, IrType::String) => {
+                    let segment =
+                        route_parameter_segment(&handler.path, &param.name).ok_or_else(|| {
+                            format!(
+                                "LLVM TIR backend: route '{}' has no parameter '{}'",
+                                handler.path, param.name
+                            )
+                        })?;
+                    let value = format!("%action_arg_{index}");
+                    self.body.push_str(&format!(
+                        "  {value} = call ptr @glitch_path_segment_string(ptr {path}, i64 {segment})\n"
+                    ));
+                    args.push(format!("ptr {value}"));
+                    strings_to_release.push(value);
+                }
+                (EndpointParameterSource::Body, IrType::String) => {
+                    let value = format!("%action_arg_{index}");
+                    let empty = self.string_global("");
+                    self.body.push_str(&format!(
+                        "  {value} = call ptr @glitch_string_concat(ptr {body}, ptr {empty})\n"
+                    ));
+                    args.push(format!("ptr {value}"));
+                    strings_to_release.push(value);
+                }
+                (EndpointParameterSource::Body, IrType::Class(type_name))
+                | (EndpointParameterSource::Body, IrType::Struct(type_name)) => {
+                    let value = self.emit_endpoint_body_object(
+                        type_name,
+                        body,
+                        &format!("action_arg_{index}"),
+                    )?;
+                    args.push(format!("ptr {value}"));
+                    objects_to_release.push((type_name.clone(), value));
+                }
+                (EndpointParameterSource::Query, IrType::String) => {
+                    let value = format!("%action_arg_{index}");
+                    let key = self.string_global(&param.name);
+                    let key_length = param.name.len();
+                    self.body.push_str(&format!(
+                        "  {value} = call ptr @glitch_query_value_string(ptr {path}, ptr {key}, i64 {key_length})\n"
+                    ));
+                    args.push(format!("ptr {value}"));
+                    strings_to_release.push(value);
+                }
+                (EndpointParameterSource::Query, IrType::Int) => {
+                    let raw = format!("%action_arg_{index}_i64");
+                    let value = format!("%action_arg_{index}");
+                    let key = self.string_global(&param.name);
+                    let key_length = param.name.len();
+                    self.body.push_str(&format!(
+                        "  {raw} = call i64 @glitch_query_value_i64(ptr {path}, ptr {key}, i64 {key_length})\n  {value} = trunc i64 {raw} to i32\n"
+                    ));
+                    args.push(format!("i32 {value}"));
+                }
+                (EndpointParameterSource::Query, IrType::Long) => {
+                    let value = format!("%action_arg_{index}");
+                    let key = self.string_global(&param.name);
+                    let key_length = param.name.len();
+                    self.body.push_str(&format!(
+                        "  {value} = call i64 @glitch_query_value_i64(ptr {path}, ptr {key}, i64 {key_length})\n"
+                    ));
+                    args.push(format!("i64 {value}"));
+                }
+                (EndpointParameterSource::Query, IrType::Bool) => {
+                    let text = format!("%action_arg_{index}_text");
+                    let true_cmp = format!("%action_arg_{index}_true_cmp");
+                    let one_cmp = format!("%action_arg_{index}_one_cmp");
+                    let is_true = format!("%action_arg_{index}_true");
+                    let is_one = format!("%action_arg_{index}_one");
+                    let value = format!("%action_arg_{index}");
+                    let key = self.string_global(&param.name);
+                    let true_text = self.string_global("true");
+                    let one_text = self.string_global("1");
+                    let key_length = param.name.len();
+                    self.body.push_str(&format!(
+                        "  {text} = call ptr @glitch_query_value_string(ptr {path}, ptr {key}, i64 {key_length})\n  {true_cmp} = call i32 @strcmp(ptr {text}, ptr {true_text})\n  {one_cmp} = call i32 @strcmp(ptr {text}, ptr {one_text})\n  {is_true} = icmp eq i32 {true_cmp}, 0\n  {is_one} = icmp eq i32 {one_cmp}, 0\n  {value} = or i1 {is_true}, {is_one}\n  call void @glitch_string_release(ptr {text})\n"
+                    ));
+                    args.push(format!("i1 {value}"));
+                }
+                _ => {
+                    return Err(format!(
+                        "LLVM TIR backend: unsupported endpoint parameter {param:?}"
+                    ));
+                }
+            }
+        }
+        Ok((args, strings_to_release, objects_to_release))
+    }
+
+    pub(super) fn endpoint_parameter_supported(&self, param: &EndpointParameterBinding, route: &str) -> bool {
+        match (&param.source, &param.ty) {
+            (EndpointParameterSource::Route, IrType::Int | IrType::Long | IrType::String) => {
+                route_parameter_segment(route, &param.name).is_some()
+            }
+            (EndpointParameterSource::Body, IrType::String) => true,
+            (EndpointParameterSource::Body, IrType::Class(name) | IrType::Struct(name)) => {
+                self.object_types.get(name).is_some_and(|object| {
+                    !matches!(object.kind, TypeKind::Interface)
+                        && object.fields.values().all(|field| {
+                            matches!(
+                                field.ty,
+                                IrType::Bool
+                                    | IrType::Byte
+                                    | IrType::Short
+                                    | IrType::Int
+                                    | IrType::Long
+                                    | IrType::UInt
+                                    | IrType::Double
+                                    | IrType::String
+                            )
+                        })
+                        && object.constructor.as_ref().is_none_or(|constructor| {
+                            self.functions
+                                .get(constructor)
+                                .is_some_and(|signature| signature.params == vec![LlType::Ptr])
+                        })
+                })
+            }
+            (
+                EndpointParameterSource::Query,
+                IrType::Bool | IrType::Int | IrType::Long | IrType::String,
+            ) => true,
+            _ => false,
+        }
+    }
+
+    pub(super) fn endpoint_return_supported(&self, ty: &IrType) -> bool {
+        match ty {
+            IrType::String => true,
+            IrType::Class(name) | IrType::Struct(name) => {
+                self.object_types.get(name).is_some_and(|object| {
+                    !matches!(object.kind, TypeKind::Interface)
+                        && object.fields.values().all(|field| {
+                            matches!(
+                                field.ty,
+                                IrType::Bool
+                                    | IrType::Byte
+                                    | IrType::Short
+                                    | IrType::Int
+                                    | IrType::Long
+                                    | IrType::UInt
+                                    | IrType::Double
+                                    | IrType::Decimal
+                                    | IrType::String
+                            )
+                        })
+                })
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn emit_endpoint_result(&mut self, ty: &IrType, value: &str) -> Result<String, String> {
+        match ty {
+            IrType::String => Ok(value.to_string()),
+            IrType::Class(name) | IrType::Struct(name) => {
+                let null_label = self.next_label("endpoint_result_null");
+                let value_label = self.next_label("endpoint_result_value");
+                let end_label = self.next_label("endpoint_result_end");
+                let is_null = self.tmp();
+                self.body.push_str(&format!(
+                    "  {is_null} = icmp eq ptr {value}, null\n  br i1 {is_null}, label %{null_label}, label %{value_label}\n{value_label}:\n"
+                ));
+                let json = self.emit_json_serialize_object(name, value)?;
+                self.body.push_str(&format!(
+                    "  call void @{}(ptr {value})\n  br label %{end_label}\n{null_label}:\n  br label %{end_label}\n{end_label}:\n",
+                    drop_symbol(name)
+                ));
+                let result = self.tmp();
+                let null_text = self.string_global("null");
+                self.body.push_str(&format!(
+                    "  {result} = phi ptr [{json}, %{value_label}], [{null_text}, %{null_label}]\n"
+                ));
+                Ok(result)
+            }
+            _ => Err(format!(
+                "LLVM TIR backend: unsupported endpoint result type {ty:?}"
+            )),
+        }
+    }
+
+    pub(super) fn emit_json_serialize_object(
+        &mut self,
+        type_name: &str,
+        value: &str,
+    ) -> Result<String, String> {
+        let object = self.object_types.get(type_name).cloned().ok_or_else(|| {
+            format!("LLVM TIR backend: result type '{type_name}' has no object layout")
+        })?;
+        let llvm_name = llvm_object_name(type_name);
+        let mut fields = object.fields.iter().collect::<Vec<_>>();
+        fields.sort_by_key(|(_, field)| field.index);
+        let mut current = self.string_global("{");
+        let mut current_is_managed = false;
+        for (position, (field_name, field)) in fields.into_iter().enumerate() {
+            let key = self.string_global(&format!(
+                "{}\"{}\":",
+                if position == 0 { "" } else { "," },
+                field_name
+            ));
+            let with_key = format!("%json_{}_{}_key", sanitize(type_name), field.index);
+            self.body.push_str(&format!(
+                "  {with_key} = call ptr @glitch_string_concat(ptr {current}, ptr {key})\n"
+            ));
+            if current_is_managed {
+                self.body.push_str(&format!(
+                    "  call void @glitch_string_release(ptr {current})\n"
+                ));
+            }
+            let field_ptr = format!("%json_{}_{}_ptr", sanitize(type_name), field.index);
+            let field_value = format!("%json_{}_{}", sanitize(type_name), field.index);
+            let field_type = llvm_ir_type(&field.ty);
+            self.body.push_str(&format!(
+                "  {field_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 {}\n  {field_value} = load {}, ptr {field_ptr}\n",
+                field.index,
+                field_type.as_ir()
+            ));
+            let (rendered, rendered_is_managed) = match &field.ty {
+                IrType::String => {
+                    let quote = self.string_global("\"");
+                    let quoted = format!("%json_{}_{}_quoted", sanitize(type_name), field.index);
+                    let complete =
+                        format!("%json_{}_{}_complete", sanitize(type_name), field.index);
+                    self.body.push_str(&format!(
+                        "  {quoted} = call ptr @glitch_string_concat(ptr {quote}, ptr {field_value})\n  {complete} = call ptr @glitch_string_concat(ptr {quoted}, ptr {quote})\n  call void @glitch_string_release(ptr {quoted})\n"
+                    ));
+                    (complete, true)
+                }
+                IrType::Bool => {
+                    let rendered = format!("%json_{}_{}_bool", sanitize(type_name), field.index);
+                    self.body.push_str(&format!(
+                        "  {rendered} = select i1 {field_value}, ptr getelementptr inbounds ([5 x i8], ptr @.json_true, i64 0, i64 0), ptr getelementptr inbounds ([6 x i8], ptr @.json_false, i64 0, i64 0)\n"
+                    ));
+                    (rendered, false)
+                }
+                IrType::Double | IrType::Decimal => {
+                    let rendered = format!("%json_{}_{}_double", sanitize(type_name), field.index);
+                    self.body.push_str(&format!(
+                        "  {rendered} = call ptr @glitch_double_to_string(double {field_value})\n"
+                    ));
+                    (rendered, true)
+                }
+                IrType::Byte | IrType::Short | IrType::Int | IrType::Long | IrType::UInt => {
+                    let wide = if field_type == LlType::I64 {
+                        field_value.clone()
+                    } else {
+                        let wide = format!("%json_{}_{}_wide", sanitize(type_name), field.index);
+                        let extension = if matches!(field.ty, IrType::Byte | IrType::UInt) {
+                            "zext"
+                        } else {
+                            "sext"
+                        };
+                        self.body.push_str(&format!(
+                            "  {wide} = {extension} {} {field_value} to i64\n",
+                            field_type.as_ir()
+                        ));
+                        wide
+                    };
+                    let rendered = format!("%json_{}_{}_integer", sanitize(type_name), field.index);
+                    self.body.push_str(&format!(
+                        "  {rendered} = call ptr @glitch_i64_to_string(i64 {wide})\n"
+                    ));
+                    (rendered, true)
+                }
+                _ => {
+                    return Err(format!(
+                        "LLVM TIR backend: JSON result field '{type_name}.{field_name}' has unsupported type {:?}",
+                        field.ty
+                    ));
+                }
+            };
+            let next = format!("%json_{}_{}_value", sanitize(type_name), field.index);
+            self.body.push_str(&format!(
+                "  {next} = call ptr @glitch_string_concat(ptr {with_key}, ptr {rendered})\n  call void @glitch_string_release(ptr {with_key})\n"
+            ));
+            if rendered_is_managed {
+                self.body.push_str(&format!(
+                    "  call void @glitch_string_release(ptr {rendered})\n"
+                ));
+            }
+            current = next;
+            current_is_managed = true;
+        }
+        let close = self.string_global("}");
+        let result = format!("%json_{}_result", sanitize(type_name));
+        self.body.push_str(&format!(
+            "  {result} = call ptr @glitch_string_concat(ptr {current}, ptr {close})\n"
+        ));
+        if current_is_managed {
+            self.body.push_str(&format!(
+                "  call void @glitch_string_release(ptr {current})\n"
+            ));
+        }
+        Ok(result)
+    }
+
+    pub(super) fn emit_endpoint_body_object(
+        &mut self,
+        type_name: &str,
+        body: &str,
+        prefix: &str,
+    ) -> Result<String, String> {
+        let object = self.object_types.get(type_name).cloned().ok_or_else(|| {
+            format!("LLVM TIR backend: body type '{type_name}' has no object layout")
+        })?;
+        let value = self.emit_endpoint_object_allocation(type_name, prefix)?;
+        let llvm_name = llvm_object_name(type_name);
+        for (field_name, field) in &object.fields {
+            let token = self.string_global(&format!("\"{field_name}\""));
+            let token_length = field_name.len() + 2;
+            let field_ptr = format!("%{prefix}_field_{}_ptr", sanitize(field_name));
+            self.body.push_str(&format!(
+                "  {field_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 {}\n",
+                field.index
+            ));
+            match &field.ty {
+                IrType::String => {
+                    let field_value = format!("%{prefix}_field_{}", sanitize(field_name));
+                    self.body.push_str(&format!(
+                        "  {field_value} = call ptr @glitch_json_value_string(ptr {body}, ptr {token}, i64 {token_length})\n  store ptr {field_value}, ptr {field_ptr}\n"
+                    ));
+                }
+                IrType::Bool => {
+                    let field_value = format!("%{prefix}_field_{}", sanitize(field_name));
+                    self.body.push_str(&format!(
+                        "  {field_value} = call i1 @glitch_json_value_bool(ptr {body}, ptr {token}, i64 {token_length})\n  store i1 {field_value}, ptr {field_ptr}\n"
+                    ));
+                }
+                IrType::Byte | IrType::Short | IrType::Int | IrType::Long | IrType::UInt => {
+                    let raw = format!("%{prefix}_field_{}_i64", sanitize(field_name));
+                    let field_type = llvm_ir_type(&field.ty);
+                    let field_value = format!("%{prefix}_field_{}", sanitize(field_name));
+                    self.body.push_str(&format!(
+                        "  {raw} = call i64 @glitch_json_value_i64(ptr {body}, ptr {token}, i64 {token_length})\n"
+                    ));
+                    if field_type == LlType::I64 {
+                        self.body
+                            .push_str(&format!("  store i64 {raw}, ptr {field_ptr}\n"));
+                    } else {
+                        self.body.push_str(&format!(
+                            "  {field_value} = trunc i64 {raw} to {}\n  store {} {field_value}, ptr {field_ptr}\n",
+                            field_type.as_ir(),
+                            field_type.as_ir()
+                        ));
+                    }
+                }
+                IrType::Double | IrType::Decimal => {
+                    let field_value = format!("%{prefix}_field_{}", sanitize(field_name));
+                    self.body.push_str(&format!(
+                        "  {field_value} = call double @glitch_json_value_double(ptr {body}, ptr {token}, i64 {token_length})\n  store double {field_value}, ptr {field_ptr}\n"
+                    ));
+                }
+                _ => {
+                    return Err(format!(
+                        "LLVM TIR backend: JSON field '{type_name}.{field_name}' has unsupported type {:?}",
+                        field.ty
+                    ));
+                }
+            }
+        }
+        Ok(value)
+    }
+
+    pub(super) fn can_allocate_endpoint_dependency(&self, ty: &IrType) -> bool {
+        self.can_allocate_endpoint_dependency_inner(ty, &mut std::collections::HashSet::new())
+    }
+
+    pub(super) fn can_allocate_endpoint_dependency_inner(
+        &self,
+        ty: &IrType,
+        visiting: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        let Some(type_name) = self.resolve_endpoint_dependency_name(ty) else {
+            return false;
+        };
+        if !visiting.insert(type_name.clone()) {
+            return false;
+        }
+        let Some(object) = self.object_types.get(&type_name) else {
+            visiting.remove(&type_name);
+            return false;
+        };
+        if matches!(object.kind, TypeKind::Interface) {
+            visiting.remove(&type_name);
+            return false;
+        }
+        let supported = object
+            .constructor_params
+            .iter()
+            .all(|param| self.can_allocate_endpoint_dependency_inner(param, visiting));
+        visiting.remove(&type_name);
+        supported
+    }
+
+    pub(super) fn resolve_endpoint_dependency_name(&self, ty: &IrType) -> Option<String> {
+        match ty {
+            IrType::Class(name) | IrType::Struct(name) => {
+                self.object_types.contains_key(name).then(|| name.clone())
+            }
+            IrType::Interface(name) => self.resolve_interface_implementation(name),
+            _ => None,
+        }
+    }
+
+    pub(super) fn resolve_interface_implementation(&self, interface_name: &str) -> Option<String> {
+        let mut candidates = self
+            .object_types
+            .values()
+            .filter(|object| {
+                matches!(object.kind, TypeKind::Class)
+                    && object.bases.iter().any(|base| {
+                        base == interface_name
+                            || base_type_name(base) == base_type_name(interface_name)
+                    })
+            })
+            .map(|object| object.name.clone())
+            .collect::<Vec<_>>();
+        candidates.sort();
+        candidates.dedup();
+        (candidates.len() == 1).then(|| candidates.remove(0))
+    }
+
+    pub(super) fn resolve_interface_method_symbol(
+        &self,
+        interface_name: &str,
+        method_name: &str,
+        arg_count: usize,
+    ) -> Option<String> {
+        let implementation = self.resolve_interface_implementation(interface_name)?;
+        let prefix = format!("{}_{}", sanitize(&implementation), sanitize(method_name));
+        let mut candidates = self
+            .functions
+            .iter()
+            .filter(|(symbol, signature)| {
+                (symbol.as_str() == prefix || symbol.starts_with(&format!("{prefix}__")))
+                    && signature.params.len() == arg_count + 1
+            })
+            .map(|(symbol, _)| symbol.clone())
+            .collect::<Vec<_>>();
+        candidates.sort();
+        candidates.dedup();
+        (candidates.len() == 1).then(|| candidates.remove(0))
+    }
+
+    pub(super) fn emit_endpoint_object_allocation(
+        &mut self,
+        type_name: &str,
+        prefix: &str,
+    ) -> Result<String, String> {
+        self.emit_endpoint_object_allocation_inner(
+            type_name,
+            prefix,
+            &mut std::collections::HashSet::new(),
+        )
+    }
+
+    pub(super) fn emit_endpoint_object_allocation_inner(
+        &mut self,
+        type_name: &str,
+        prefix: &str,
+        visiting: &mut std::collections::HashSet<String>,
+    ) -> Result<String, String> {
+        if !visiting.insert(type_name.to_string()) {
+            return Err(format!(
+                "LLVM TIR backend: dependency cycle while activating '{type_name}'"
+            ));
+        }
+        let object = self.object_types.get(type_name).cloned().ok_or_else(|| {
+            format!("LLVM TIR backend: dependency type '{type_name}' has no layout")
+        })?;
+        let llvm_name = llvm_object_name(type_name);
+        let size_ptr = format!("%{prefix}_size_ptr");
+        let size = format!("%{prefix}_size");
+        let value = format!("%{prefix}");
+        self.body.push_str(&format!(
+            "  {size_ptr} = getelementptr %{llvm_name}, ptr null, i32 1\n  {size} = ptrtoint ptr {size_ptr} to i64\n  {value} = call ptr @glitch_calloc(i64 1, i64 {size})\n"
+        ));
+        if matches!(object.kind, TypeKind::Class) {
+            let rc_ptr = format!("%{prefix}_rc_ptr");
+            let drop_ptr = format!("%{prefix}_drop_ptr");
+            self.body.push_str(&format!(
+                "  {rc_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 0\n  store i64 1, ptr {rc_ptr}\n  {drop_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 1\n  store ptr @{}, ptr {drop_ptr}\n",
+                destroy_symbol(type_name)
+            ));
+        }
+        let mut dependencies = Vec::new();
+        for (index, dependency_type) in object.constructor_params.iter().enumerate() {
+            let dependency_name = self
+                .resolve_endpoint_dependency_name(dependency_type)
+                .ok_or_else(|| {
+                    format!(
+                        "LLVM TIR backend: cannot resolve dependency {dependency_type:?} for '{type_name}'"
+                    )
+                })?;
+            let dependency_value = self.emit_endpoint_object_allocation_inner(
+                &dependency_name,
+                &format!("{prefix}_dependency_{index}"),
+                visiting,
+            )?;
+            dependencies.push((dependency_name, dependency_value));
+        }
+        if let Some(constructor) = &object.constructor {
+            let mut args = vec![format!("ptr {value}")];
+            args.extend(
+                dependencies
+                    .iter()
+                    .map(|(_, dependency)| format!("ptr {dependency}")),
+            );
+            self.body.push_str(&format!(
+                "  call void @{}({})\n",
+                sanitize(constructor),
+                args.join(", ")
+            ));
+        }
+        for (dependency_name, dependency_value) in dependencies {
+            self.body.push_str(&format!(
+                "  call void @{}(ptr {dependency_value})\n",
+                drop_symbol(&dependency_name)
+            ));
+        }
+        visiting.remove(type_name);
+        Ok(value)
+    }
+
+
+}

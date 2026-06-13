@@ -20,6 +20,7 @@ pub(crate) enum DropKind {
     Free,
     DropStruct,
     DropClass,
+    DropDelegate,
     DropCollection,
     DropTask,
     DropException,
@@ -3190,6 +3191,26 @@ fn lower_lambda(
     env: &TypeEnv,
     scopes: &[HashMap<String, TypedBinding>],
 ) -> Result<TypedExpr, String> {
+    let mut captures = Vec::new();
+    collect_lambda_captures(body, params, &mut captures);
+    captures.sort();
+    captures.dedup();
+    for capture in &captures {
+        if let Some(binding) = lookup(scopes, capture) {
+            if matches!(binding.ownership, Ownership::Borrowed | Ownership::View) {
+                return Err(format!(
+                    "ownership checker: lambda capture '{capture}' may outlive borrowed/view source; move the value into the closure or use an owned copy"
+                ));
+            }
+            if matches!(binding.ownership, Ownership::Owned) && !matches!(binding.ty, IrType::String)
+            {
+                return Err(format!(
+                    "ownership checker: lambda capture '{capture}' uses owned value {:?}; move it into the closure or capture a shared reference instead",
+                    binding.ty
+                ));
+            }
+        }
+    }
     let param_types: Vec<IrType> = if let Some(IrType::Function {
         params: expected_params,
         ..
@@ -3226,6 +3247,87 @@ fn lower_lambda(
         lambda_ty,
         Ownership::Shared,
     ))
+}
+
+fn collect_lambda_captures(expr: &Expr, params: &[String], out: &mut Vec<String>) {
+    match expr {
+        Expr::Var(name) | Expr::Move(name) | Expr::Borrow { name, .. } => {
+            if !params.contains(name) {
+                out.push(name.clone());
+            }
+        }
+        Expr::ArrayLiteral(values) => {
+            for value in values {
+                collect_lambda_captures(value, params, out);
+            }
+        }
+        Expr::NewArray { values, .. } => {
+            for value in values {
+                collect_lambda_captures(value, params, out);
+            }
+        }
+        Expr::Index { target, index } => {
+            collect_lambda_captures(target, params, out);
+            collect_lambda_captures(index, params, out);
+        }
+        Expr::Field { target, .. } => collect_lambda_captures(target, params, out),
+        Expr::IsPattern { expr, .. } | Expr::Await(expr) | Expr::Unary { expr, .. } => {
+            collect_lambda_captures(expr, params, out)
+        }
+        Expr::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            collect_lambda_captures(condition, params, out);
+            collect_lambda_captures(when_true, params, out);
+            collect_lambda_captures(when_false, params, out);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_lambda_captures(left, params, out);
+            collect_lambda_captures(right, params, out);
+        }
+        Expr::MethodCall { target, args, .. } => {
+            collect_lambda_captures(target, params, out);
+            for arg in args {
+                collect_lambda_captures(arg, params, out);
+            }
+        }
+        Expr::IncDec { name, .. } => {
+            if !params.contains(name) {
+                out.push(name.clone());
+            }
+        }
+        Expr::FunctionCall { args, .. } => {
+            for arg in args {
+                collect_lambda_captures(arg, params, out);
+            }
+        }
+        Expr::NewObject { args, fields, .. } => {
+            for arg in args {
+                collect_lambda_captures(arg, params, out);
+            }
+            for field in fields {
+                collect_lambda_captures(&field.expr, params, out);
+            }
+        }
+        Expr::Lambda { params: inner_params, body } => {
+            let mut merged = params.to_vec();
+            merged.extend(inner_params.iter().cloned());
+            collect_lambda_captures(body, &merged, out);
+        }
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Null
+        | Expr::String(_)
+        | Expr::NewCollection(_)
+        | Expr::NewThread(_)
+        => {}
+        Expr::NamedArg { expr, .. } | Expr::RefArg { expr, .. } => {
+            collect_lambda_captures(expr, params, out);
+        }
+    }
 }
 
 fn lower_call_args(
@@ -4492,8 +4594,8 @@ fn ownership_for_type(ty: &IrType) -> Ownership {
         | IrType::Double
         | IrType::Decimal
         | IrType::Void
-        | IrType::Weak(_)
-        | IrType::Function { .. } => Ownership::Copy,
+        | IrType::Weak(_) => Ownership::Copy,
+        IrType::Function { .. } => Ownership::Shared,
         IrType::Ref(_) => Ownership::Borrowed,
         IrType::Enumerable(_) => Ownership::View,
         IrType::Class(_) | IrType::Interface(_) => Ownership::Shared,
@@ -4517,6 +4619,7 @@ pub(crate) fn drop_kind_for_type(ty: &IrType, ownership: &Ownership) -> DropKind
         Ownership::Moved => DropKind::None,
         Ownership::Shared => match ty {
             IrType::Class(_) | IrType::Interface(_) => DropKind::DropClass,
+            IrType::Function { .. } => DropKind::DropDelegate,
             _ => DropKind::None,
         },
         Ownership::Owned => match ty {
