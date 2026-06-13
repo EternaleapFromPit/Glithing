@@ -5,6 +5,7 @@ pub(crate) struct Program {
     pub(crate) package_id: Option<String>,
     pub(crate) native_c: Vec<String>,
     pub(crate) enums: Vec<EnumDef>,
+    pub(crate) delegates: Vec<DelegateDef>,
     pub(crate) types: Vec<TypeDef>,
     pub(crate) functions: Vec<Function>,
 }
@@ -34,6 +35,16 @@ pub(crate) struct TypeDef {
     pub(crate) fields: Vec<FieldDef>,
     pub(crate) constructors: Vec<Constructor>,
     pub(crate) methods: Vec<Function>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DelegateDef {
+    pub(crate) namespace: Vec<String>,
+    pub(crate) attributes: Vec<Attribute>,
+    pub(crate) name: String,
+    pub(crate) generic_params: Vec<GenericParam>,
+    pub(crate) return_type: TypeSyntax,
+    pub(crate) params: Vec<Param>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

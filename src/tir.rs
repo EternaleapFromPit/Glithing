@@ -326,10 +326,19 @@ struct FunctionSignature {
     symbol: String,
 }
 
+#[derive(Debug, Clone)]
+struct DelegateSignature {
+    full_name: String,
+    generic_params: Vec<String>,
+    params: Vec<TypeSyntax>,
+    return_type: TypeSyntax,
+}
+
 #[derive(Default)]
 struct TypeEnv {
     kinds: HashMap<String, TypeKind>,
     bases: HashMap<String, Vec<String>>,
+    delegates: HashMap<String, DelegateSignature>,
     functions: HashMap<String, Vec<FunctionSignature>>,
     methods: HashMap<(String, String), Vec<FunctionSignature>>,
     constructors: HashMap<String, Vec<FunctionSignature>>,
@@ -347,6 +356,7 @@ impl TypedProgram {
             env.kinds.insert(ty.name.clone(), ty.kind);
             env.bases.insert(ty.name.clone(), ty.bases.clone());
         }
+        populate_delegate_signatures(program, &mut env);
         populate_function_signatures(program, &mut env);
         populate_method_signatures(program, &mut env);
         populate_constructor_signatures(program, &mut env);
@@ -536,6 +546,27 @@ fn populate_function_signatures(program: &Program, env: &mut TypeEnv) {
     }
 }
 
+fn populate_delegate_signatures(program: &Program, env: &mut TypeEnv) {
+    for delegate in &program.delegates {
+        let signature = DelegateSignature {
+            full_name: qualified_delegate_name(&delegate.namespace, &delegate.name),
+            generic_params: delegate
+                .generic_params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect(),
+            params: delegate.params.iter().map(|param| param.ty.clone()).collect(),
+            return_type: delegate.return_type.clone(),
+        };
+        env.delegates
+            .entry(signature.full_name.clone())
+            .or_insert_with(|| signature.clone());
+        env.delegates
+            .entry(delegate.name.clone())
+            .or_insert(signature);
+    }
+}
+
 fn populate_method_signatures(program: &Program, env: &mut TypeEnv) {
     for ty in &program.types {
         for method in &ty.methods {
@@ -630,6 +661,7 @@ impl TypeEnv {
             env.kinds.insert(ty.name.clone(), ty.kind);
             env.bases.insert(ty.name.clone(), ty.bases.clone());
         }
+        populate_delegate_signatures(program, &mut env);
         populate_function_signatures(program, &mut env);
         populate_method_signatures(program, &mut env);
         populate_constructor_signatures(program, &mut env);
@@ -1966,6 +1998,14 @@ fn sanitize_ir_symbol(value: &str) -> String {
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect()
+}
+
+fn qualified_delegate_name(namespace: &[String], name: &str) -> String {
+    if namespace.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}.{}", namespace.join("."), name)
+    }
 }
 
 fn collect_instantiation(ty: &IrType, output: &mut Vec<GenericInstantiation>) {
@@ -4383,6 +4423,22 @@ fn resolve_method_call(
                 CallResolution::StaticFunction,
             ))
         }
+        (IrType::Unknown(target) | IrType::Class(target), "FromResult")
+            if target == "Task"
+                || target == "ValueTask"
+                || target == "System.Threading.Tasks.Task"
+                || target == "System.Threading.Tasks.ValueTask" =>
+        {
+            let result = args
+                .first()
+                .map(|arg| arg.ty.clone())
+                .unwrap_or(IrType::Void);
+            Ok((
+                IrType::Task(Box::new(result)),
+                name.to_string(),
+                CallResolution::StaticFunction,
+            ))
+        }
         (IrType::Unknown(target) | IrType::Class(target), "ReadAllText")
             if target == "File" || target == "System.IO.File" =>
         {
@@ -4451,6 +4507,11 @@ fn resolve_method_call(
         (IrType::Weak(_), "TryGetTarget") => {
             Ok((IrType::Bool, name.to_string(), CallResolution::WeakMethod))
         }
+        (IrType::List(element), "ToArray") => Ok((
+            IrType::Array(Box::new(element.as_ref().clone())),
+            name.to_string(),
+            CallResolution::CollectionMethod,
+        )),
         (IrType::List(_), "Contains") | (IrType::Dictionary(_, _), "ContainsKey" | "Remove") => {
             Ok((
                 IrType::Bool,
@@ -4473,6 +4534,14 @@ fn resolve_method_call(
 }
 
 fn type_syntax_to_ir(ty: &TypeSyntax, env: &TypeEnv) -> IrType {
+    type_syntax_to_ir_with_subst(ty, env, &HashMap::new())
+}
+
+fn type_syntax_to_ir_with_subst(
+    ty: &TypeSyntax,
+    env: &TypeEnv,
+    subst: &HashMap<String, TypeSyntax>,
+) -> IrType {
     match ty {
         TypeSyntax::GenericNamed { name, args }
             if name == "own"
@@ -4481,15 +4550,19 @@ fn type_syntax_to_ir(ty: &TypeSyntax, env: &TypeEnv) -> IrType {
                 || name == "System.Ownership.borrow" =>
         {
             if let Some(first_arg) = args.first() {
-                type_syntax_to_ir(first_arg, env)
+                type_syntax_to_ir_with_subst(first_arg, env, subst)
             } else {
                 IrType::Unknown("T".to_string())
             }
         }
         TypeSyntax::Scalar(scalar) => scalar_to_ir(*scalar),
         TypeSyntax::String => IrType::String,
-        TypeSyntax::Array(inner) => IrType::Array(Box::new(type_syntax_to_ir(inner, env))),
-        TypeSyntax::Ref(inner) => IrType::Ref(Box::new(type_syntax_to_ir(inner, env))),
+        TypeSyntax::Array(inner) => {
+            IrType::Array(Box::new(type_syntax_to_ir_with_subst(inner, env, subst)))
+        }
+        TypeSyntax::Ref(inner) => {
+            IrType::Ref(Box::new(type_syntax_to_ir_with_subst(inner, env, subst)))
+        }
         TypeSyntax::Named(name) if name == "Exception" || name == "System.Exception" => {
             IrType::Exception
         }
@@ -4499,18 +4572,26 @@ fn type_syntax_to_ir(ty: &TypeSyntax, env: &TypeEnv) -> IrType {
                 return_type: Box::new(IrType::Void),
             }
         }
-        TypeSyntax::Named(name) => match env.kinds.get(name) {
-            Some(TypeKind::Class) => IrType::Class(name.clone()),
-            Some(TypeKind::Interface) => IrType::Interface(name.clone()),
-            Some(TypeKind::Enum) => IrType::Int,
-            Some(_) => IrType::Struct(name.clone()),
-            None => IrType::Unknown(name.clone()),
-        },
+        TypeSyntax::Named(name) => {
+            if let Some(replacement) = subst.get(name) {
+                return type_syntax_to_ir_with_subst(replacement, env, subst);
+            }
+            if let Some(signature) = env.delegates.get(name) {
+                return delegate_signature_to_ir(signature, &[], env, subst);
+            }
+            match env.kinds.get(name) {
+                Some(TypeKind::Class) => IrType::Class(name.clone()),
+                Some(TypeKind::Interface) => IrType::Interface(name.clone()),
+                Some(TypeKind::Enum) => IrType::Int,
+                Some(_) => IrType::Struct(name.clone()),
+                None => IrType::Unknown(name.clone()),
+            }
+        }
         TypeSyntax::GenericNamed { name, args }
             if name == "Weak" || name == "System.WeakReference" || name == "WeakReference" =>
         {
             if let Some(first_arg) = args.first() {
-                IrType::Weak(Box::new(type_syntax_to_ir(first_arg, env)))
+                IrType::Weak(Box::new(type_syntax_to_ir_with_subst(first_arg, env, subst)))
             } else {
                 IrType::Weak(Box::new(IrType::Unknown("T".to_string())))
             }
@@ -4525,9 +4606,9 @@ fn type_syntax_to_ir(ty: &TypeSyntax, env: &TypeEnv) -> IrType {
                 let (params_args, ret_arg) = args.split_at(args.len() - 1);
                 let params = params_args
                     .iter()
-                    .map(|arg| type_syntax_to_ir(arg, env))
+                    .map(|arg| type_syntax_to_ir_with_subst(arg, env, subst))
                     .collect();
-                let return_type = Box::new(type_syntax_to_ir(&ret_arg[0], env));
+                let return_type = Box::new(type_syntax_to_ir_with_subst(&ret_arg[0], env, subst));
                 IrType::Function {
                     params,
                     return_type,
@@ -4535,38 +4616,79 @@ fn type_syntax_to_ir(ty: &TypeSyntax, env: &TypeEnv) -> IrType {
             }
         }
         TypeSyntax::GenericNamed { name, args } if name == "Action" || name == "System.Action" => {
-            let params = args.iter().map(|arg| type_syntax_to_ir(arg, env)).collect();
+            let params = args
+                .iter()
+                .map(|arg| type_syntax_to_ir_with_subst(arg, env, subst))
+                .collect();
             IrType::Function {
                 params,
                 return_type: Box::new(IrType::Void),
             }
         }
-        TypeSyntax::GenericNamed { name, args } => match env.kinds.get(name) {
-            Some(TypeKind::Class) => IrType::Class(name.clone()),
-            Some(TypeKind::Interface) => IrType::Interface(name.clone()),
-            Some(TypeKind::Enum) => IrType::Int,
-            Some(_) => IrType::Struct(name.clone()),
-            None => IrType::Unknown(format!(
-                "{}<{}>",
-                name,
-                args.iter()
-                    .map(|arg| ir_symbol_suffix(&type_syntax_to_ir(arg, env)))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )),
-        },
-        TypeSyntax::List(inner) => IrType::List(Box::new(type_syntax_to_ir(inner, env))),
+        TypeSyntax::GenericNamed { name, args } => {
+            if let Some(replacement) = subst.get(name) {
+                return type_syntax_to_ir_with_subst(replacement, env, subst);
+            }
+            if let Some(signature) = env.delegates.get(name) {
+                return delegate_signature_to_ir(signature, args, env, subst);
+            }
+            match env.kinds.get(name) {
+                Some(TypeKind::Class) => IrType::Class(name.clone()),
+                Some(TypeKind::Interface) => IrType::Interface(name.clone()),
+                Some(TypeKind::Enum) => IrType::Int,
+                Some(_) => IrType::Struct(name.clone()),
+                None => IrType::Unknown(format!(
+                    "{}<{}>",
+                    name,
+                    args.iter()
+                        .map(|arg| ir_symbol_suffix(&type_syntax_to_ir_with_subst(arg, env, subst)))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )),
+            }
+        }
+        TypeSyntax::List(inner) => {
+            IrType::List(Box::new(type_syntax_to_ir_with_subst(inner, env, subst)))
+        }
         TypeSyntax::Dictionary(key, value) => IrType::Dictionary(
-            Box::new(type_syntax_to_ir(key, env)),
-            Box::new(type_syntax_to_ir(value, env)),
+            Box::new(type_syntax_to_ir_with_subst(key, env, subst)),
+            Box::new(type_syntax_to_ir_with_subst(value, env, subst)),
         ),
         TypeSyntax::IEnumerable(inner) => {
-            IrType::Enumerable(Box::new(type_syntax_to_ir(inner, env)))
+            IrType::Enumerable(Box::new(type_syntax_to_ir_with_subst(inner, env, subst)))
         }
         TypeSyntax::Thread => IrType::Thread,
-        TypeSyntax::Task(inner) => IrType::Task(Box::new(type_syntax_to_ir(inner, env))),
-        TypeSyntax::Nullable(inner) => type_syntax_to_ir(inner, env),
+        TypeSyntax::Task(inner) => {
+            IrType::Task(Box::new(type_syntax_to_ir_with_subst(inner, env, subst)))
+        }
+        TypeSyntax::Nullable(inner) => type_syntax_to_ir_with_subst(inner, env, subst),
         TypeSyntax::Void => IrType::Void,
+    }
+}
+
+fn delegate_signature_to_ir(
+    signature: &DelegateSignature,
+    args: &[TypeSyntax],
+    env: &TypeEnv,
+    outer_subst: &HashMap<String, TypeSyntax>,
+) -> IrType {
+    let mut subst = outer_subst.clone();
+    for (index, generic_name) in signature.generic_params.iter().enumerate() {
+        let replacement = args
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| TypeSyntax::Named(generic_name.clone()));
+        subst.insert(generic_name.clone(), replacement);
+    }
+    let params = signature
+        .params
+        .iter()
+        .map(|param| type_syntax_to_ir_with_subst(param, env, &subst))
+        .collect();
+    let return_type = Box::new(type_syntax_to_ir_with_subst(&signature.return_type, env, &subst));
+    IrType::Function {
+        params,
+        return_type,
     }
 }
 

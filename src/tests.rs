@@ -92,6 +92,38 @@ fn compiles_task_generic_smoke() {
 }
 
 #[test]
+fn compiles_valuetask_from_result_like_task() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            fn main() {
+                ValueTask<int> number = ValueTask.FromResult(7);
+                print(number.Result);
+            }
+        "#;
+
+    let c = compile_source(source).expect("ValueTask.FromResult should compile");
+    let llvm_ir = compile_llvm_ir(source).expect("ValueTask.FromResult should lower to LLVM");
+
+    assert!(c.contains("struct GlitchTask_i32 number = GlitchTask_i32_from_result(7);"));
+    assert!(llvm_ir.contains("glitch_task_from_result_i32"));
+    assert!(llvm_ir.contains("glitch_task_get_result_i32"));
+}
+
+#[test]
+fn parses_delegate_declarations_in_framework_packages() {
+    let source = r#"
+            delegate bool Predicate<T>(T item);
+
+            fn main() {
+                print(true);
+            }
+        "#;
+
+    compile_source(source).expect("delegate declaration should parse and compile");
+}
+
+#[test]
 fn lowers_task_run_delegate_invocation_in_llvm() {
     let source = r#"
             using System.Threading.Tasks;
@@ -111,6 +143,30 @@ fn lowers_task_run_delegate_invocation_in_llvm() {
 
     assert!(llvm_ir.contains("glitch_delegate_wrapper_Compute"));
     assert!(llvm_ir.contains("glitch_task_from_result_i32"));
+}
+
+#[test]
+fn tasks_retain_and_release_string_results_in_llvm() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            string LoadName() {
+                return "Ada";
+            }
+
+            fn main() {
+                Task<string> nameTask = Task.Run(LoadName);
+                string name = nameTask.Result;
+                print(name);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("Task<string> should lower to LLVM IR");
+
+    assert!(llvm_ir.contains("glitch_task_from_result_ptr"));
+    assert!(llvm_ir.contains("glitch_task_get_result_ptr"));
+    assert!(llvm_ir.contains("glitch_string_retain"));
+    assert!(llvm_ir.contains("glitch_string_release"));
 }
 
 #[test]
@@ -1333,6 +1389,46 @@ fn warns_on_reference_cycle_statically() {
 }
 
 #[test]
+fn warns_on_owned_collection_reference_cycle_statically() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            class Node {
+                public List<Node> Children;
+            }
+
+            fn main() {
+            }
+        "#;
+
+    let output =
+        compile_source_with_options(source, true, false).expect("should compile with warning");
+    let diagnostics = output.diagnostics.join("\n");
+    assert!(diagnostics.contains("warning GL3007"));
+    assert!(diagnostics.contains("List<Node> Children"));
+}
+
+#[test]
+fn warns_on_owned_task_reference_cycle_statically() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            class Node {
+                public Task<Node> Pending;
+            }
+
+            fn main() {
+            }
+        "#;
+
+    let output =
+        compile_source_with_options(source, true, false).expect("should compile with warning");
+    let diagnostics = output.diagnostics.join("\n");
+    assert!(diagnostics.contains("warning GL3007"));
+    assert!(diagnostics.contains("Task<Node> Pending"));
+}
+
+#[test]
 fn compiles_weak_reference_cycles() {
     let source = r#"
             class Node {
@@ -1456,6 +1552,134 @@ fn supports_lambda_lowering_without_compatibility_warning_on_llvm_path() {
 }
 
 #[test]
+fn resolves_generic_delegate_declarations_to_callable_function_types() {
+    let source = r#"
+            public delegate TResult Converter<T, TResult>(T value);
+
+            fn Apply(Converter<int, int> converter, int value) {
+                return converter(value);
+            }
+
+            fn main() {
+                int result = Apply(x => x + 1, 41);
+                print(result);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("generic delegate declaration should compile");
+    let llvm_ir = compile_llvm_ir(source).expect("generic delegate declaration should lower to LLVM");
+
+    let diagnostics = output.diagnostics.join("\n");
+    assert!(!diagnostics.contains("warning GL3005"));
+    assert!(llvm_ir.contains("define ptr @glitch_lambda_0"));
+    assert!(llvm_ir.contains("%glitch.delegate = type { i64, ptr, ptr, ptr }"));
+}
+
+#[test]
+fn resolves_namespace_qualified_delegate_declarations() {
+    let source = r#"
+            namespace Demo {
+                public delegate TResult Converter<T, TResult>(T value);
+            }
+
+            fn Apply(Demo.Converter<int, int> converter, int value) {
+                return converter(value);
+            }
+
+            fn main() {
+                int result = Apply(x => x + 1, 41);
+                print(result);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("qualified delegate declaration should compile");
+    let llvm_ir = compile_llvm_ir(source).expect("qualified delegate declaration should lower to LLVM");
+
+    let diagnostics = output.diagnostics.join("\n");
+    assert!(!diagnostics.contains("warning GL3005"));
+    assert!(llvm_ir.contains("define ptr @glitch_lambda_0"));
+}
+
+#[test]
+fn compiles_named_delegate_types_in_c_path() {
+    let source = r#"
+            public delegate int Converter(int value);
+
+            int Apply(Converter converter, int value) {
+                return converter(value);
+            }
+
+            fn main() {
+                int result = Apply(x => x + 1, 41);
+                print(result);
+            }
+        "#;
+
+    let c = compile_source(source).expect("named delegate type should compile in C path");
+
+    assert!(c.contains("GlitchDelegate"));
+    assert!(c.contains("Apply"));
+}
+
+#[test]
+fn compiles_system_ownership_package_surface() {
+    let source = r#"
+            using System.Ownership;
+
+            class Node {
+                public Weak<Node> Parent;
+            }
+
+            fn main() {
+                own<int> owned = make_owned(1);
+                borrow<int> borrowed = make_borrow(owned);
+                var parent = new Node();
+                var child = new Node();
+                child.Parent = new Weak<Node>(parent);
+                Node target;
+                child.Parent.TryGetTarget(out target);
+                print(owned);
+                print(borrowed);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("System.Ownership package surface should compile");
+    let diagnostics = output.diagnostics.join("\n");
+    assert!(!diagnostics.contains("warning GL3005"));
+    assert!(!diagnostics.contains("warning GL3007"));
+}
+
+#[test]
+fn compiles_system_collections_generic_surface() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            struct Entry {
+                public KeyValuePair<string, int> Pair;
+            }
+
+            fn main() {
+                IReadOnlyCollection<int> collection = new List<int>();
+                IReadOnlyList<int> list = new List<int>();
+                IDictionary<string, int> map = new Dictionary<string, int>();
+                KeyValuePair<string, int> pair = new KeyValuePair<string, int>("a", 1);
+                print(collection.Count);
+                print(list.Count);
+                print(map.Count);
+                print(pair.Value);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("System.Collections.Generic package surface should compile");
+    let diagnostics = output.diagnostics.join("\n");
+    assert!(!diagnostics.contains("warning GL3005"));
+}
+
+#[test]
 fn rejects_borrowed_lambda_capture_that_could_outlive_source() {
     let source = r#"
             fn main() {
@@ -1506,6 +1730,29 @@ fn supports_rc_string_without_remaining_compatibility_warnings() {
     assert!(llvm_ir.contains("%glitch.Rc_string = type { i64, ptr, ptr, i32 }"));
     assert!(llvm_ir.contains("call void @glitch_destroy_Rc_string"));
     assert!(llvm_ir.contains("call void @glitch_drop_Rc_string"));
+}
+
+#[test]
+fn supports_nested_generic_rc_without_remaining_compatibility_warnings() {
+    let source = r#"
+            using System.Ownership;
+            using System.Collections.Generic;
+
+            fn main() {
+                var owned = make_owned(new Rc<List<int>>(new List<int>()));
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("nested generic Rc fixture should compile");
+    let diagnostics = output.diagnostics.join("\n");
+    let llvm_ir = compile_llvm_ir(source).expect("nested generic Rc fixture should lower to LLVM");
+
+    assert!(!diagnostics.contains("warning GL3004"));
+    assert!(!diagnostics.contains("type 'Rc_List_int_' has no linked LLVM layout"));
+    assert!(llvm_ir.contains("%glitch.Rc_List_int_ = type { i64, ptr, ptr, i32 }"));
+    assert!(llvm_ir.contains("call void @glitch_destroy_Rc_List_int_"));
+    assert!(llvm_ir.contains("define void @glitch_drop_Rc_List_int_"));
 }
 
 #[test]
@@ -1713,6 +1960,55 @@ fn compiles_more_generic_collection_instantiations() {
     assert!(c.contains("Dict_string_f64_remove(&doubleMap, \"pi\")"));
     assert!(c.contains("Dict_string_f64_clear(&doubleMap);"));
     assert!(c.contains("Dict_string_string_free(&map);"));
+}
+
+#[test]
+fn compiles_linq_to_array_over_list_surface() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            fn main() {
+                List<int> numbers = new List<int>();
+                numbers.Add(1);
+                numbers.Add(2);
+                int[] copy = numbers.ToArray();
+                print(copy.Length);
+            }
+        "#;
+
+    let c = compile_source(source).expect("LINQ ToArray over List<T> should compile");
+    let llvm = compile_llvm_ir(source).expect("LINQ ToArray over List<T> should lower to LLVM");
+
+    assert!(c.contains("List_int_to_array(&numbers)"));
+    assert!(c.contains("copy.len"));
+    assert!(llvm.contains("%glitch.array"));
+}
+
+#[test]
+fn compiles_system_linq_iterator_surface() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Linq;
+
+            fn main() {
+                List<int> numbers = new List<int>();
+                numbers.Add(1);
+                numbers.Add(2);
+
+                int count = Enumerable.Count(numbers);
+                bool any = Enumerable.Any(numbers);
+                int[] copy = Enumerable.ToArray(numbers);
+                print(count);
+                print(any);
+                print(copy.Length);
+            }
+        "#;
+
+    let c = compile_source(source).expect("System.Linq iterator surface should compile");
+
+    assert!(c.contains("List_int_to_array"));
+    assert!(c.contains("Count"));
+    assert!(c.contains("Any"));
 }
 
 #[test]
@@ -2063,6 +2359,41 @@ fn borrow_checker_rejects_use_after_loop_move() {
     let error = compile_source(source).expect_err("loop move should poison the join state");
 
     assert!(error.contains("borrow checker: use of moved value 'name'"));
+}
+
+#[test]
+fn borrow_checker_rejects_use_after_try_move() {
+    let source = r#"
+            fn main() {
+                string name = "Ada";
+                try {
+                    string moved = move name;
+                } finally {
+                }
+                print(name);
+            }
+        "#;
+
+    let error = compile_source(source).expect_err("try/finally move should poison the join state");
+
+    assert!(error.contains("borrow checker: use of moved value 'name'"));
+}
+
+#[test]
+fn borrow_checker_allows_use_after_returning_branch_move() {
+    let source = r#"
+            fn main() {
+                string name = "Ada";
+                if (true) {
+                    string moved = move name;
+                    return;
+                } else {
+                }
+                print(name);
+            }
+        "#;
+
+    compile_source(source).expect("returning branch should not poison join state");
 }
 
 #[test]

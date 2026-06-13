@@ -405,7 +405,7 @@ impl<'a> CompatibilityAnalyzer<'a> {
                 fields,
                 ..
             } => {
-                if type_name == "Rc_int" || type_name.starts_with("Rc_") {
+                if type_name.starts_with("Rc_") {
                     for arg in args {
                         self.visit_expr(arg, emit_llvm);
                     }
@@ -588,16 +588,6 @@ pub(crate) fn render_diagnostic(
     )
 }
 
-pub(crate) fn referenced_class<'a>(
-    ty: &'a TypeSyntax,
-    classes: &HashSet<String>,
-) -> Option<&'a String> {
-    match ty {
-        TypeSyntax::Named(name) if classes.contains(name) => Some(name),
-        TypeSyntax::Nullable(inner) => referenced_class(inner, classes),
-        _ => None,
-    }
-}
 
 pub(crate) fn has_type_path(
     graph: &HashMap<String, Vec<String>>,

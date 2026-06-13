@@ -336,6 +336,11 @@ impl LlvmEmitter {
                     value.value
                 ));
             }
+            DropKind::DropTask => {
+                if let IrType::Task(inner) = &expr.ty {
+                    self.emit_task_drop_value(&value.value, inner);
+                }
+            }
             _ => {}
         }
     }
@@ -382,6 +387,15 @@ impl LlvmEmitter {
             self.body.push_str(&format!(
                 "  call void @glitch_delegate_release(ptr {value})\n"
             ));
+            return;
+        }
+        if matches!(var.drop_kind, DropKind::DropTask) {
+            let value = self.tmp();
+            self.body
+                .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
+            if let IrType::Task(inner) = &var.ir_ty {
+                self.emit_task_drop_value(&value, inner);
+            }
             return;
         }
         if !matches!(var.drop_kind, DropKind::DropClass | DropKind::DropStruct) {
@@ -511,9 +525,41 @@ impl LlvmEmitter {
             }
         } else if let Some(type_name) = object {
             self.emit_drop(&type_name, &item);
+        } else if let IrType::Task(inner) = element {
+            self.emit_task_drop_value(&item, inner);
         }
         self.body.push_str(&format!(
             "  {next} = add i64 {index}, 1\n  store i64 {next}, ptr {index_ptr}\n  br label %{loop_label}\n{done_label}:\n"
+        ));
+    }
+
+    pub(super) fn emit_task_drop_value(&mut self, task_value: &str, inner: &IrType) {
+        let is_null = self.tmp();
+        let release_label = self.next_label("task_release");
+        let done_label = self.next_label("task_release_done");
+        let result_ptr = self.tmp();
+        let result = self.tmp();
+        self.body.push_str(&format!(
+            "  {is_null} = icmp eq ptr {task_value}, null\n  br i1 {is_null}, label %{done_label}, label %{release_label}\n{release_label}:\n  {result_ptr} = getelementptr inbounds %glitch.task, ptr {task_value}, i32 0, i32 1\n  {result} = load ptr, ptr {result_ptr}\n"
+        ));
+        match inner {
+            IrType::String => self.body.push_str(&format!(
+                "  call void @glitch_string_release(ptr {result})\n"
+            )),
+            IrType::Array(element) => self.emit_array_drop_value(&result, element),
+            IrType::List(_) | IrType::Dictionary(_, _) => {
+                self.emit_collection_drop_value(inner, &result)
+            }
+            _ => {
+                if let Some(type_name) = object_type_name(inner) {
+                    if self.object_types.contains_key(type_name) {
+                        self.emit_drop(type_name, &result);
+                    }
+                }
+            }
+        }
+        self.body.push_str(&format!(
+            "  call void @glitch_free(ptr {task_value})\n  br label %{done_label}\n{done_label}:\n"
         ));
     }
 

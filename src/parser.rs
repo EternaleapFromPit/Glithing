@@ -41,10 +41,13 @@ impl Parser {
             package_id: None,
             native_c: Vec::new(),
             enums: Vec::new(),
+            delegates: Vec::new(),
             types: Vec::new(),
             functions: Vec::new(),
         };
-        self.parse_items(&mut program, Vec::new(), false)?;
+        let mut delegates = Vec::new();
+        self.parse_items(&mut program, Vec::new(), false, &mut delegates)?;
+        program.delegates = delegates;
         program.types = merge_type_declarations(program.types);
 
         if !self.test_registrations.is_empty() {
@@ -83,6 +86,7 @@ impl Parser {
         program: &mut Program,
         base_namespace: Vec<String>,
         stop_at_rbrace: bool,
+        delegates: &mut Vec<DelegateDef>,
     ) -> Result<(), String> {
         let mut current_namespace = base_namespace.clone();
         let mut top_level_stmts = Vec::new();
@@ -162,11 +166,11 @@ impl Parser {
                     let mut nested = current_namespace.clone();
                     nested.extend(name);
                     self.expect(TokenKind::LBrace)?;
-                    self.parse_items(program, nested, true)?;
+                    self.parse_items(program, nested, true, delegates)?;
                     self.expect(TokenKind::RBrace)?;
                 }
             } else if self.current_ident_is("type") {
-                self.parse_type_alias()?;
+                self.parse_type_alias()?; 
             } else if self.at(&TokenKind::Ref)
                 || self.at(&TokenKind::Struct)
                 || self.at(&TokenKind::Class)
@@ -178,6 +182,7 @@ impl Parser {
                     attributes,
                     &mut nested,
                     &mut program.native_c,
+                    delegates,
                 )?;
                 program.types.push(type_def);
                 program.types.extend(nested);
@@ -185,6 +190,8 @@ impl Parser {
                 program
                     .enums
                     .push(self.parse_enum_def(current_namespace.clone(), attributes)?);
+            } else if self.match_kind(&TokenKind::Delegate) {
+                delegates.push(self.parse_delegate_decl(current_namespace.clone(), attributes)?);
             } else {
                 let checkpoint = self.pos;
                 match self.parse_function(
@@ -385,6 +392,7 @@ impl Parser {
         attributes: Vec<Attribute>,
         nested_types: &mut Vec<TypeDef>,
         native_c: &mut Vec<String>,
+        delegates: &mut Vec<DelegateDef>,
     ) -> Result<TypeDef, String> {
         let kind = if self.match_kind(&TokenKind::Ref) {
             self.expect(TokenKind::Struct)?;
@@ -474,12 +482,17 @@ impl Parser {
                     member_attributes,
                     nested_types,
                     native_c,
+                    delegates,
                 )?;
                 nested_types.push(nested);
                 continue;
             }
             if self.at(&TokenKind::Enum) {
                 let _nested = self.parse_enum_def(namespace.clone(), member_attributes)?;
+                continue;
+            }
+            if self.match_kind(&TokenKind::Delegate) {
+                delegates.push(self.parse_delegate_decl(namespace.clone(), member_attributes)?);
                 continue;
             }
             if self.current_ident_is(&name) && self.peek_is(1, &TokenKind::LParen) {
@@ -667,6 +680,31 @@ impl Parser {
             params,
             return_type,
             body,
+        })
+    }
+
+    fn parse_delegate_decl(
+        &mut self,
+        namespace: Vec<String>,
+        attributes: Vec<Attribute>,
+    ) -> Result<DelegateDef, String> {
+        let return_type = self
+            .parse_type_syntax()?
+            .ok_or_else(|| self.error_here("expected delegate return type"))?;
+        let name = self.expect_ident()?;
+        let parsed_generic_params = self.parse_generic_params()?;
+        let generic_params = self.parse_generic_constraints(parsed_generic_params)?;
+        self.expect(TokenKind::LParen)?;
+        let params = self.parse_params()?;
+        self.expect(TokenKind::RParen)?;
+        self.expect(TokenKind::Semi)?;
+        Ok(DelegateDef {
+            namespace,
+            attributes,
+            name,
+            generic_params,
+            return_type,
+            params,
         })
     }
 
@@ -2544,6 +2582,7 @@ fn token_to_string(tok: &Token) -> String {
         TokenKind::Struct => "struct".to_string(),
         TokenKind::Class => "class".to_string(),
         TokenKind::Interface => "interface".to_string(),
+        TokenKind::Delegate => "delegate".to_string(),
         TokenKind::Enum => "enum".to_string(),
         TokenKind::Public => "public".to_string(),
         TokenKind::Borrow => "borrow".to_string(),

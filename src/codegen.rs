@@ -139,6 +139,7 @@ struct CCallArg {
 pub(crate) struct Codegen {
     types: HashMap<String, TypeKind>,
     bases: HashMap<String, Vec<String>>,
+    delegates: HashMap<String, usize>,
     fields: HashMap<String, Vec<(String, CType)>>,
     constructors: HashMap<String, FunctionInfo>,
     functions: HashMap<String, Vec<FunctionInfo>>,
@@ -195,9 +196,23 @@ impl Codegen {
         for ty in &program.types {
             types.insert(ty.name.clone(), ty.kind);
         }
+        let mut delegates = HashMap::new();
+        for delegate in &program.delegates {
+            delegates.insert(
+                delegate.name.clone(),
+                delegate.generic_params.len(),
+            );
+            let full_name = if delegate.namespace.is_empty() {
+                delegate.name.clone()
+            } else {
+                format!("{}.{}", delegate.namespace.join("."), delegate.name)
+            };
+            delegates.insert(full_name, delegate.generic_params.len());
+        }
         let mut codegen = Self {
             types,
             bases: HashMap::new(),
+            delegates,
             fields: HashMap::new(),
             constructors: HashMap::new(),
             functions: HashMap::new(),
@@ -1762,6 +1777,22 @@ impl Codegen {
                         ),
                         c_type: CType::Scalar(ScalarType::Bool),
                     }),
+                    (CType::ListInt, "ToArray") => Ok(EmittedExpr {
+                        code: format!("List_int_to_array(&{})", t.code),
+                        c_type: CType::Array(ScalarType::I32, 0),
+                    }),
+                    (CType::ListI64, "ToArray") => Ok(EmittedExpr {
+                        code: format!("List_i64_to_array(&{})", t.code),
+                        c_type: CType::Array(ScalarType::I64, 0),
+                    }),
+                    (CType::ListBool, "ToArray") => Ok(EmittedExpr {
+                        code: format!("List_bool_to_array(&{})", t.code),
+                        c_type: CType::Array(ScalarType::Bool, 0),
+                    }),
+                    (CType::ListF64, "ToArray") => Ok(EmittedExpr {
+                        code: format!("List_f64_to_array(&{})", t.code),
+                        c_type: CType::Array(ScalarType::F64, 0),
+                    }),
                     (
                         CType::ListInt
                         | CType::ListI64
@@ -2522,6 +2553,9 @@ impl Codegen {
                 TypeSyntax::Scalar(s) => Ok(CType::Ptr(*s)),
                 _ => Err("ref supports scalar values only".to_string()),
             },
+            TypeSyntax::Named(name) if self.is_delegate_type(name) => {
+                Ok(CType::GenericPtr("GlitchDelegate".to_string()))
+            }
             TypeSyntax::Named(name) => match self.types.get(name) {
                 Some(TypeKind::Class) => Ok(CType::ClassPtr(name.clone())),
                 Some(TypeKind::Interface) => Ok(CType::ClassPtr(name.clone())),
@@ -2531,6 +2565,16 @@ impl Codegen {
                 None => Ok(CType::GenericPtr(name.clone())),
             },
             TypeSyntax::GenericNamed { name, args } => {
+                if self.is_delegate_type(name) {
+                    let expected = self.delegates.get(name).copied().unwrap_or_default();
+                    if expected != args.len() {
+                        return Err(format!(
+                            "delegate type '{name}' expects {expected} generic arguments, found {}",
+                            args.len()
+                        ));
+                    }
+                    return Ok(CType::GenericPtr("GlitchDelegate".to_string()));
+                }
                 Ok(CType::GenericPtr(generic_type_name(name, args.as_slice())))
             }
             TypeSyntax::List(element)
@@ -2627,6 +2671,10 @@ impl Codegen {
             TypeSyntax::Nullable(inner) => self.type_syntax_to_ctype(inner),
             TypeSyntax::Void => Ok(CType::Void),
         }
+    }
+
+    fn is_delegate_type(&self, name: &str) -> bool {
+        self.delegates.contains_key(name)
     }
 
     fn param_to_ctype(&self, param: &Param) -> Result<CType, String> {
@@ -4511,6 +4559,7 @@ static int List_int_get(struct List_int *list, int index) { if (index < 0 || ind
 static int List_int_contains(struct List_int *list, int value) { for (int i = 0; i < list->len; i++) { if (list->data[i] == value) { return 1; } } return 0; }
 static void List_int_clear(struct List_int *list) { list->len = 0; }
 static void List_int_free(struct List_int *list) { free(list->data); list->data = NULL; list->len = 0; list->cap = 0; }
+static struct GlitchArray_int List_int_to_array(struct List_int *list) { struct GlitchArray_int array; array.len = list->len; array.data = malloc(sizeof(int) * (size_t)array.len); if (array.len > 0 && !array.data) { abort(); } for (int i = 0; i < list->len; i++) { array.data[i] = list->data[i]; } return array; }
 
 struct List_i64 { long long *data; int len; int cap; };
 static struct List_i64 List_i64_new(void) { struct List_i64 list; list.len = 0; list.cap = 4; list.data = malloc(sizeof(long long) * (size_t)list.cap); if (!list.data) { abort(); } return list; }
@@ -4519,6 +4568,7 @@ static long long List_i64_get(struct List_i64 *list, int index) { if (index < 0 
 static int List_i64_contains(struct List_i64 *list, long long value) { for (int i = 0; i < list->len; i++) { if (list->data[i] == value) { return 1; } } return 0; }
 static void List_i64_clear(struct List_i64 *list) { list->len = 0; }
 static void List_i64_free(struct List_i64 *list) { free(list->data); list->data = NULL; list->len = 0; list->cap = 0; }
+static struct GlitchArray_i64 List_i64_to_array(struct List_i64 *list) { struct GlitchArray_i64 array; array.len = list->len; array.data = malloc(sizeof(long long) * (size_t)array.len); if (array.len > 0 && !array.data) { abort(); } for (int i = 0; i < list->len; i++) { array.data[i] = list->data[i]; } return array; }
 
 struct List_bool { int *data; int len; int cap; };
 static struct List_bool List_bool_new(void) { struct List_bool list; list.len = 0; list.cap = 4; list.data = malloc(sizeof(int) * (size_t)list.cap); if (!list.data) { abort(); } return list; }
@@ -4527,6 +4577,7 @@ static int List_bool_get(struct List_bool *list, int index) { if (index < 0 || i
 static int List_bool_contains(struct List_bool *list, int value) { for (int i = 0; i < list->len; i++) { if (list->data[i] == value) { return 1; } } return 0; }
 static void List_bool_clear(struct List_bool *list) { list->len = 0; }
 static void List_bool_free(struct List_bool *list) { free(list->data); list->data = NULL; list->len = 0; list->cap = 0; }
+static struct GlitchArray_bool List_bool_to_array(struct List_bool *list) { struct GlitchArray_bool array; array.len = list->len; array.data = malloc(sizeof(int) * (size_t)array.len); if (array.len > 0 && !array.data) { abort(); } for (int i = 0; i < list->len; i++) { array.data[i] = list->data[i]; } return array; }
 
 struct List_f64 { double *data; int len; int cap; };
 static struct List_f64 List_f64_new(void) { struct List_f64 list; list.len = 0; list.cap = 4; list.data = malloc(sizeof(double) * (size_t)list.cap); if (!list.data) { abort(); } return list; }
@@ -4535,6 +4586,7 @@ static double List_f64_get(struct List_f64 *list, int index) { if (index < 0 || 
 static int List_f64_contains(struct List_f64 *list, double value) { for (int i = 0; i < list->len; i++) { if (list->data[i] == value) { return 1; } } return 0; }
 static void List_f64_clear(struct List_f64 *list) { list->len = 0; }
 static void List_f64_free(struct List_f64 *list) { free(list->data); list->data = NULL; list->len = 0; list->cap = 0; }
+static struct GlitchArray_f64 List_f64_to_array(struct List_f64 *list) { struct GlitchArray_f64 array; array.len = list->len; array.data = malloc(sizeof(double) * (size_t)array.len); if (array.len > 0 && !array.data) { abort(); } for (int i = 0; i < list->len; i++) { array.data[i] = list->data[i]; } return array; }
 
 struct List_string { char **data; int len; int cap; };
 static struct List_string List_string_new(void) { struct List_string list; list.len = 0; list.cap = 4; list.data = malloc(sizeof(char *) * (size_t)list.cap); if (!list.data) { abort(); } return list; }

@@ -401,6 +401,8 @@ impl LlvmEmitter {
                 ));
                 if let IrType::Array(element) = &field.ty {
                     self.emit_array_drop_value(&value_name, element);
+                } else if let IrType::Task(inner) = &field.ty {
+                    self.emit_task_drop_value(&value_name, inner);
                 }
                 continue;
             }
@@ -1428,6 +1430,16 @@ impl LlvmEmitter {
                                 helper_name,
                                 task_val.value
                             ));
+                            if matches!(result_ty, IrType::String) {
+                                self.body.push_str(&format!(
+                                    "  call void @glitch_string_retain(ptr {})\n",
+                                    call_res
+                                ));
+                            } else if let Some(type_name) = object_type_name(&result_ty) {
+                                if self.object_types.contains_key(type_name) {
+                                    self.emit_retain(type_name, &call_res);
+                                }
+                            }
                             return Ok(LlValue {
                                 value: call_res,
                                 ty: result_llvm_type,
@@ -1884,6 +1896,15 @@ impl LlvmEmitter {
                             }
                         }
                         CallResolution::StaticFunction => {
+                            if name == "FromResult"
+                                && matches!(target.ty, IrType::Class(ref type_name)
+                                    if type_name == "Task"
+                                        || type_name == "ValueTask"
+                                        || type_name == "System.Threading.Tasks.Task"
+                                        || type_name == "System.Threading.Tasks.ValueTask")
+                            {
+                                return self.emit_task_from_result_inline(call, &expr.ty);
+                            }
                             if self.functions.contains_key(symbol) {
                                 self.emit_typed_function_call(symbol, &call.args)
                             } else {
@@ -2860,6 +2881,7 @@ impl LlvmEmitter {
                 self.emit_collection_clear(&collection.value, element, "glitch.list", 0);
                 Ok(void_value())
             }
+            (IrType::List(element), "ToArray") => self.emit_list_to_array(&collection.value, element),
             (IrType::Dictionary(_, value), "Clear") => {
                 self.emit_collection_clear(&collection.value, value, "glitch.dict", 0);
                 Ok(void_value())
@@ -2986,6 +3008,63 @@ impl LlvmEmitter {
         Ok(LlValue {
             value: result,
             ty: LlType::I1,
+        })
+    }
+
+    fn emit_list_to_array(&mut self, list: &str, element: &IrType) -> Result<LlValue, String> {
+        if matches!(
+            element,
+            IrType::Array(_)
+                | IrType::List(_)
+                | IrType::Dictionary(_, _)
+                | IrType::Task(_)
+                | IrType::Enumerable(_)
+        ) {
+            return Err(
+                "LLVM TIR backend: List.ToArray is not supported for nested owned collections"
+                    .to_string(),
+            );
+        }
+        let len_ptr = self.tmp();
+        let data_ptr = self.tmp();
+        let len = self.tmp();
+        let data = self.tmp();
+        let array = self.tmp();
+        let array_data = self.tmp();
+        let array_len_ptr = self.tmp();
+        let array_data_ptr = self.tmp();
+        let index_ptr = self.tmp();
+        let loop_label = self.next_label("list_to_array_loop");
+        let copy_label = self.next_label("list_to_array_copy");
+        let done_label = self.next_label("list_to_array_done");
+        let index = self.tmp();
+        let in_range = self.tmp();
+        let slot = self.tmp();
+        let item = self.tmp();
+        let array_slot = self.tmp();
+        let next = self.tmp();
+        let element_ty = llvm_ir_type(element);
+        let synthetic = TypedExpr {
+            kind: TypedExprKind::Var("<list_to_array>".to_string()),
+            ty: element.clone(),
+            ownership: Ownership::Owned,
+            drop_kind: DropKind::None,
+        };
+        let element_size = self.emit_type_size(element);
+        self.body.push_str(&format!(
+            "  {len_ptr} = getelementptr inbounds %glitch.list, ptr {list}, i32 0, i32 0\n  {data_ptr} = getelementptr inbounds %glitch.list, ptr {list}, i32 0, i32 2\n  {len} = load i64, ptr {len_ptr}\n  {data} = load ptr, ptr {data_ptr}\n  {array} = call ptr @glitch_calloc(i64 1, i64 16)\n  {array_data} = call ptr @glitch_calloc(i64 {len}, i64 {element_size})\n  {array_len_ptr} = getelementptr inbounds %glitch.array, ptr {array}, i32 0, i32 0\n  store i64 {len}, ptr {array_len_ptr}\n  {array_data_ptr} = getelementptr inbounds %glitch.array, ptr {array}, i32 0, i32 1\n  store ptr {array_data}, ptr {array_data_ptr}\n  {index_ptr} = alloca i64\n  store i64 0, ptr {index_ptr}\n  br label %{loop_label}\n{loop_label}:\n  {index} = load i64, ptr {index_ptr}\n  {in_range} = icmp ult i64 {index}, {len}\n  br i1 {in_range}, label %{copy_label}, label %{done_label}\n{copy_label}:\n  {slot} = getelementptr inbounds {}, ptr {data}, i64 {index}\n  {item} = load {}, ptr {slot}\n",
+            element_ty.as_ir(),
+            element_ty.as_ir()
+        ));
+        self.retain_for_store(element, &synthetic, &item);
+        self.body.push_str(&format!(
+            "  {array_slot} = getelementptr inbounds {}, ptr {array_data}, i64 {index}\n  store {} {item}, ptr {array_slot}\n  {next} = add i64 {index}, 1\n  store i64 {next}, ptr {index_ptr}\n  br label %{loop_label}\n{done_label}:\n",
+            element_ty.as_ir(),
+            element_ty.as_ir(),
+        ));
+        Ok(LlValue {
+            value: array,
+            ty: LlType::Ptr,
         })
     }
 
