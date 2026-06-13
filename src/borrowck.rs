@@ -115,6 +115,27 @@ impl BorrowState {
         self.ref_targets
             .insert(reference_name.to_string(), target.to_string());
     }
+
+    fn merge_from_branches(base: &BorrowState, branches: &[BorrowState]) -> BorrowState {
+        let mut merged = base.clone();
+        for (name, state) in &mut merged.vars {
+            let mut moved = false;
+            let mut shared_borrows = 0usize;
+            let mut mutable_borrowed = false;
+            for branch in branches {
+                if let Some(branch_state) = branch.vars.get(name) {
+                    moved |= branch_state.moved;
+                    shared_borrows = shared_borrows.max(branch_state.shared_borrows);
+                    mutable_borrowed |= branch_state.mutable_borrowed;
+                }
+            }
+            state.moved = moved;
+            state.shared_borrows = shared_borrows;
+            state.mutable_borrowed = mutable_borrowed;
+        }
+        merged.ref_targets = base.ref_targets.clone();
+        merged
+    }
 }
 
 pub(crate) struct BorrowChecker;
@@ -189,12 +210,16 @@ impl BorrowChecker {
                 else_body,
             } => {
                 Self::check_expr(condition, state)?;
-                let mut then_state = state.clone();
+                let base_state = state.clone();
+                let mut then_state = base_state.clone();
                 then_state.push_scope();
                 Self::check_stmts(then_body, &mut then_state)?;
-                let mut else_state = state.clone();
+                then_state.pop_scope();
+                let mut else_state = base_state.clone();
                 else_state.push_scope();
                 Self::check_stmts(else_body, &mut else_state)?;
+                else_state.pop_scope();
+                *state = BorrowState::merge_from_branches(&base_state, &[then_state, else_state]);
             }
             Stmt::Try {
                 try_body,
@@ -222,21 +247,32 @@ impl BorrowChecker {
                 default,
             } => {
                 Self::check_expr(expr, state)?;
+                let base_state = state.clone();
+                let mut branch_states = Vec::new();
                 for case in cases {
-                    Self::check_expr(&case.value, state)?;
-                    let mut case_state = state.clone();
+                    let mut case_value_state = base_state.clone();
+                    Self::check_expr(&case.value, &mut case_value_state)?;
+                    let mut case_state = base_state.clone();
                     case_state.push_scope();
                     Self::check_stmts(&case.body, &mut case_state)?;
+                    case_state.pop_scope();
+                    branch_states.push(case_state);
                 }
-                let mut default_state = state.clone();
+                let mut default_state = base_state.clone();
                 default_state.push_scope();
                 Self::check_stmts(default, &mut default_state)?;
+                default_state.pop_scope();
+                branch_states.push(default_state);
+                *state = BorrowState::merge_from_branches(&base_state, &branch_states);
             }
             Stmt::While { condition, body } => {
                 Self::check_expr(condition, state)?;
-                let mut body_state = state.clone();
+                let base_state = state.clone();
+                let mut body_state = base_state.clone();
                 body_state.push_scope();
                 Self::check_stmts(body, &mut body_state)?;
+                body_state.pop_scope();
+                *state = BorrowState::merge_from_branches(&base_state, &[body_state]);
             }
             Stmt::For {
                 init,
@@ -244,7 +280,8 @@ impl BorrowChecker {
                 increment,
                 body,
             } => {
-                let mut loop_state = state.clone();
+                let base_state = state.clone();
+                let mut loop_state = base_state.clone();
                 loop_state.push_scope();
                 if let Some(init) = init {
                     Self::check_stmt(init, &mut loop_state)?;
@@ -256,6 +293,8 @@ impl BorrowChecker {
                 if let Some(increment) = increment {
                     Self::check_stmt(increment, &mut loop_state)?;
                 }
+                loop_state.pop_scope();
+                *state = BorrowState::merge_from_branches(&base_state, &[loop_state]);
             }
             Stmt::ForEach {
                 item_name,
@@ -264,10 +303,13 @@ impl BorrowChecker {
                 ..
             } => {
                 Self::check_expr(collection, state)?;
-                let mut loop_state = state.clone();
+                let base_state = state.clone();
+                let mut loop_state = base_state.clone();
                 loop_state.push_scope();
                 loop_state.declare(item_name);
                 Self::check_stmts(body, &mut loop_state)?;
+                loop_state.pop_scope();
+                *state = BorrowState::merge_from_branches(&base_state, &[loop_state]);
             }
             Stmt::Print(expr) | Stmt::Expr(expr) | Stmt::Throw(expr) => {
                 Self::check_expr(expr, state)?;

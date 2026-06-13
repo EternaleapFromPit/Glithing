@@ -1415,6 +1415,28 @@ fn supports_sizeof_and_rc_int_without_remaining_compatibility_warnings() {
 }
 
 #[test]
+fn supports_rc_string_without_remaining_compatibility_warnings() {
+    let source = r#"
+            using System.Ownership;
+
+            fn main() {
+                var owned = new Rc<string>("Ada");
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("Rc<string> fixture should compile");
+    let diagnostics = output.diagnostics.join("\n");
+    let llvm_ir = compile_llvm_ir(source).expect("Rc<string> fixture should lower to LLVM");
+
+    assert!(!diagnostics.contains("warning GL3004"));
+    assert!(!diagnostics.contains("type 'Rc_string' has no linked LLVM layout"));
+    assert!(llvm_ir.contains("%glitch.Rc_string = type { i64, ptr, ptr, i32 }"));
+    assert!(llvm_ir.contains("call void @glitch_destroy_Rc_string"));
+    assert!(llvm_ir.contains("call void @glitch_drop_Rc_string"));
+}
+
+#[test]
 fn lowers_rc_int_layout_in_llvm() {
     let source = std::fs::read_to_string("tests/xunit_memory/memory_leak_tests.gl")
         .expect("should read memory_leak_tests.gl");
@@ -1933,6 +1955,42 @@ fn borrow_checker_rejects_assignment_while_borrowed() {
     let error = compile_source(source).expect_err("assignment while borrowed should fail");
 
     assert!(error.contains("borrow checker: cannot assign to 'value' while it is borrowed"));
+}
+
+#[test]
+fn borrow_checker_rejects_use_after_branch_move() {
+    let source = r#"
+            fn main() {
+                string name = "Ada";
+                if (true) {
+                    string moved = move name;
+                } else {
+                }
+                print(name);
+            }
+        "#;
+
+    let error = compile_source(source).expect_err("branch move should poison the join state");
+
+    assert!(error.contains("borrow checker: use of moved value 'name'"));
+}
+
+#[test]
+fn borrow_checker_rejects_use_after_loop_move() {
+    let source = r#"
+            fn main() {
+                string name = "Ada";
+                while (true) {
+                    string moved = move name;
+                    break;
+                }
+                print(name);
+            }
+        "#;
+
+    let error = compile_source(source).expect_err("loop move should poison the join state");
+
+    assert!(error.contains("borrow checker: use of moved value 'name'"));
 }
 
 #[test]

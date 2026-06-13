@@ -4509,7 +4509,7 @@ fn ownership_for_type(ty: &IrType) -> Ownership {
     }
 }
 
-fn drop_kind_for_type(ty: &IrType, ownership: &Ownership) -> DropKind {
+pub(crate) fn drop_kind_for_type(ty: &IrType, ownership: &Ownership) -> DropKind {
     match ownership {
         Ownership::Copy => DropKind::None,
         Ownership::Borrowed => DropKind::BorrowOnly,

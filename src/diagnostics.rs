@@ -404,7 +404,7 @@ impl<'a> CompatibilityAnalyzer<'a> {
                 fields,
                 ..
             } => {
-                if type_name == "Rc_int" {
+                if type_name == "Rc_int" || type_name.starts_with("Rc_") {
                     for arg in args {
                         self.visit_expr(arg);
                     }

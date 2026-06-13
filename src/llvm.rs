@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::tir::*;
@@ -137,7 +137,7 @@ impl LlvmEmitter {
         for ty in &program.types {
             emitter.register_object_type(ty);
         }
-        emitter.register_builtin_rc_instantiation();
+        emitter.register_rc_instantiations(program);
         for function in &program.functions {
             emitter.register_function(function);
         }
@@ -287,17 +287,31 @@ impl LlvmEmitter {
         );
     }
 
-    fn register_builtin_rc_instantiation(&mut self) {
-        if self.object_types.contains_key("Rc_int") {
+    fn register_rc_instantiations(&mut self, program: &TypedProgram) {
+        let mut instantiations = HashSet::new();
+        collect_rc_instantiations_program(program, &mut instantiations);
+        for type_name in instantiations {
+            self.register_rc_instantiation(&type_name);
+        }
+    }
+
+    fn register_rc_instantiation(&mut self, type_name: &str) {
+        if self.object_types.contains_key(type_name) {
             return;
         }
+        let Some(inner_name) = type_name.strip_prefix("Rc_") else {
+            return;
+        };
+        let inner_ty = parse_monomorphized_rc_inner_type(inner_name, &self.object_types)
+            .unwrap_or_else(|| IrType::Unknown(inner_name.to_string()));
+        let inner_ll = llvm_ir_type(&inner_ty);
         let mut fields = HashMap::new();
         fields.insert(
             "value".to_string(),
             LlField {
                 index: 2,
-                ty: IrType::Int,
-                drop_kind: DropKind::None,
+                ty: inner_ty.clone(),
+                drop_kind: drop_kind_for_type(&inner_ty, &Ownership::Owned),
             },
         );
         fields.insert(
@@ -308,17 +322,20 @@ impl LlvmEmitter {
                 drop_kind: DropKind::None,
             },
         );
-        self.type_defs
-            .push("%glitch.Rc_int = type { i64, ptr, i32, i32 }\n".to_string());
+        self.type_defs.push(format!(
+            "%{} = type {{ i64, ptr, {}, i32 }}\n",
+            llvm_object_name(type_name),
+            inner_ll.as_ir()
+        ));
         self.object_types.insert(
-            "Rc_int".to_string(),
+            type_name.to_string(),
             LlObjectType {
-                name: "Rc_int".to_string(),
+                name: type_name.to_string(),
                 kind: TypeKind::Class,
                 bases: Vec::new(),
                 fields,
                 constructor: None,
-                constructor_params: vec![IrType::Int],
+                constructor_params: vec![inner_ty],
             },
         );
     }
@@ -3568,12 +3585,11 @@ impl LlvmEmitter {
                 "LLVM TIR backend: interface '{type_name}' cannot be allocated"
             ));
         }
-        if type_name == "Rc_int" {
+        if type_name.starts_with("Rc_") {
             let [value_expr] = args else {
-                return Err(
-                    "LLVM TIR backend: Rc<int> constructor expects exactly one argument"
-                        .to_string(),
-                );
+                return Err(format!(
+                    "LLVM TIR backend: {type_name} constructor expects exactly one argument"
+                ));
             };
             let llvm_name = llvm_object_name(type_name);
             let size_ptr = self.tmp();
@@ -3589,20 +3605,24 @@ impl LlvmEmitter {
                 destroy_symbol(type_name)
             ));
             let field_value = self.emit_typed_expr(value_expr)?;
-            let field_value = self.cast_value(field_value, &LlType::I32)?;
+            let inner_field = object.fields.get("value").cloned().ok_or_else(|| {
+                format!(
+                    "LLVM TIR backend: {type_name} layout is missing the value field"
+                )
+            })?;
+            let field_ty = llvm_ir_type(&inner_field.ty);
+            let field_value = self.cast_value(field_value, &field_ty)?;
             let ptr = self.tmp();
             self.body.push_str(&format!(
-                "  {ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 2\n  store i32 {}, ptr {ptr}\n",
+                "  {ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 2\n  store {} {}, ptr {ptr}\n",
+                field_ty.as_ir(),
                 field_value.value
             ));
             let ref_count_ptr = self.tmp();
             self.body.push_str(&format!(
                 "  {ref_count_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 3\n  store i32 1, ptr {ref_count_ptr}\n"
             ));
-            return Ok(LlValue {
-                value,
-                ty: LlType::Ptr,
-            });
+            return Ok(LlValue { value, ty: LlType::Ptr });
         }
         let llvm_name = llvm_object_name(type_name);
         let size_ptr = self.tmp();
@@ -5547,6 +5567,338 @@ fn expr_source_name(expr: &TypedExpr) -> Option<&str> {
         TypedExprKind::Var(name) | TypedExprKind::Move(name) => Some(name),
         _ => None,
     }
+}
+
+fn collect_rc_instantiations_program(program: &TypedProgram, out: &mut HashSet<String>) {
+    for function in &program.functions {
+        collect_rc_instantiations_function(function, out);
+    }
+    for ty in &program.types {
+        for field in &ty.fields {
+            collect_rc_type(&field.ty, out);
+        }
+        for constructor in &ty.constructors {
+            collect_rc_instantiations_function(constructor, out);
+        }
+        for method in &ty.methods {
+            collect_rc_instantiations_function(method, out);
+        }
+    }
+    for endpoint in &program.endpoint_handlers {
+        collect_rc_type(&endpoint.return_type, out);
+        collect_rc_type(&endpoint.response_type, out);
+        for param in &endpoint.params {
+            collect_rc_type(&param.ty, out);
+        }
+    }
+}
+
+fn collect_rc_instantiations_function(function: &TypedFunction, out: &mut HashSet<String>) {
+    collect_rc_type(&function.return_type, out);
+    for param in &function.params {
+        collect_rc_type(&param.ty, out);
+    }
+    for local in &function.locals {
+        collect_rc_type(&local.ty, out);
+    }
+    collect_rc_stmts(&function.body, out);
+}
+
+fn collect_rc_stmts(stmts: &[TypedStmt], out: &mut HashSet<String>) {
+    for stmt in stmts {
+        match &stmt.kind {
+            TypedStmtKind::Let { binding, expr } => {
+                collect_rc_type(&binding.ty, out);
+                collect_rc_expr(expr, out);
+            }
+            TypedStmtKind::Assign { expr, .. } | TypedStmtKind::Print(expr) | TypedStmtKind::Expr(expr) => {
+                collect_rc_expr(expr, out);
+            }
+            TypedStmtKind::AssignTarget { target, expr } => {
+                collect_rc_expr(target, out);
+                collect_rc_expr(expr, out);
+            }
+            TypedStmtKind::Block(body) | TypedStmtKind::While { body, .. } => {
+                collect_rc_stmts(body, out);
+            }
+            TypedStmtKind::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_rc_expr(condition, out);
+                collect_rc_stmts(then_body, out);
+                collect_rc_stmts(else_body, out);
+            }
+            TypedStmtKind::Try {
+                try_body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
+                collect_rc_stmts(try_body, out);
+                collect_rc_stmts(catch_body, out);
+                collect_rc_stmts(finally_body, out);
+            }
+            TypedStmtKind::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                collect_rc_expr(expr, out);
+                for case in cases {
+                    collect_rc_expr(&case.value, out);
+                    collect_rc_stmts(&case.body, out);
+                }
+                collect_rc_stmts(default, out);
+            }
+            TypedStmtKind::For {
+                init,
+                condition,
+                increment,
+                body,
+            } => {
+                if let Some(init) = init {
+                    collect_rc_stmts(std::slice::from_ref(init), out);
+                }
+                if let Some(condition) = condition {
+                    collect_rc_expr(condition, out);
+                }
+                if let Some(increment) = increment {
+                    collect_rc_stmts(std::slice::from_ref(increment), out);
+                }
+                collect_rc_stmts(body, out);
+            }
+            TypedStmtKind::ForEach { collection, body, .. } => {
+                collect_rc_expr(collection, out);
+                collect_rc_stmts(body, out);
+            }
+            TypedStmtKind::Return(Some(expr)) | TypedStmtKind::Throw(expr) => {
+                collect_rc_expr(expr, out);
+            }
+            TypedStmtKind::Return(None) | TypedStmtKind::Break | TypedStmtKind::Continue => {}
+        }
+    }
+}
+
+fn collect_rc_expr(expr: &TypedExpr, out: &mut HashSet<String>) {
+    collect_rc_type(&expr.ty, out);
+    if let TypedExprKind::NewObject { type_name, .. } = &expr.kind {
+        if type_name.starts_with("Rc_") {
+            out.insert(type_name.clone());
+        }
+    }
+    match &expr.kind {
+        TypedExprKind::ArrayLiteral(values) => {
+            for value in values {
+                collect_rc_expr(value, out);
+            }
+        }
+        TypedExprKind::NewArray { values, .. } => {
+            for value in values {
+                collect_rc_expr(value, out);
+            }
+        }
+        TypedExprKind::Index { target, index } => {
+            collect_rc_expr(target, out);
+            collect_rc_expr(index, out);
+        }
+        TypedExprKind::Field { target, .. } => collect_rc_expr(target, out),
+        TypedExprKind::IsPattern { expr, .. } => collect_rc_expr(expr, out),
+        TypedExprKind::Call(call) => {
+            match &call.kind {
+                TypedCallKind::Method { target, .. } => collect_rc_expr(target, out),
+                TypedCallKind::Function { .. } => {}
+            }
+            for arg in &call.args {
+                collect_rc_expr(arg, out);
+            }
+        }
+        TypedExprKind::NewObject { args, fields, .. } => {
+            for arg in args {
+                collect_rc_expr(arg, out);
+            }
+            for field in fields {
+                collect_rc_expr(&field.expr, out);
+            }
+        }
+        TypedExprKind::NewCollection(_)
+        | TypedExprKind::NewThread(_)
+        | TypedExprKind::Int(_)
+        | TypedExprKind::Float(_)
+        | TypedExprKind::Bool(_)
+        | TypedExprKind::Null
+        | TypedExprKind::String(_)
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FunctionSymbol(_)
+        | TypedExprKind::Move(_)
+        | TypedExprKind::Borrow { .. } => {}
+        TypedExprKind::Await(inner)
+        | TypedExprKind::Unary { expr: inner, .. }
+        | TypedExprKind::IncDec { target: inner, .. } => collect_rc_expr(inner, out),
+        TypedExprKind::Lambda { body, .. } => collect_rc_expr(body, out),
+        TypedExprKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            collect_rc_expr(condition, out);
+            collect_rc_expr(when_true, out);
+            collect_rc_expr(when_false, out);
+        }
+        TypedExprKind::Binary { left, right, .. } => {
+            collect_rc_expr(left, out);
+            collect_rc_expr(right, out);
+        }
+    }
+}
+
+fn collect_rc_type(ty: &IrType, out: &mut HashSet<String>) {
+    match ty {
+        IrType::Struct(name) if name.starts_with("Rc_") => {
+            out.insert(name.clone());
+        }
+        IrType::Array(inner)
+        | IrType::Ref(inner)
+        | IrType::List(inner)
+        | IrType::Enumerable(inner)
+        | IrType::Task(inner)
+        | IrType::Weak(inner) => collect_rc_type(inner, out),
+        IrType::Dictionary(key, value) => {
+            collect_rc_type(key, out);
+            collect_rc_type(value, out);
+        }
+        IrType::Function { params, return_type } => {
+            for ty in params {
+                collect_rc_type(ty, out);
+            }
+            collect_rc_type(return_type, out);
+        }
+        _ => {}
+    }
+}
+
+fn parse_monomorphized_rc_inner_type(
+    text: &str,
+    known_objects: &HashMap<String, LlObjectType>,
+) -> Option<IrType> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    match text {
+        "bool" => Some(IrType::Bool),
+        "byte" => Some(IrType::Byte),
+        "short" => Some(IrType::Short),
+        "int" => Some(IrType::Int),
+        "long" => Some(IrType::Long),
+        "uint" => Some(IrType::UInt),
+        "double" => Some(IrType::Double),
+        "decimal" => Some(IrType::Decimal),
+        "string" => Some(IrType::String),
+        "void" => Some(IrType::Void),
+        "Exception" | "System.Exception" => Some(IrType::Exception),
+        _ => {
+            if let Some((base, args)) = split_monomorphized_type(text) {
+                let base_name = base_type_name(base);
+                match base_name {
+                    "List" if args.len() == 1 => Some(IrType::List(Box::new(
+                        parse_monomorphized_rc_inner_type(&args[0], known_objects)?,
+                    ))),
+                    "Dictionary" if args.len() == 2 => Some(IrType::Dictionary(
+                        Box::new(parse_monomorphized_rc_inner_type(&args[0], known_objects)?),
+                        Box::new(parse_monomorphized_rc_inner_type(&args[1], known_objects)?),
+                    )),
+                    "IEnumerable" | "ICollection" if args.len() == 1 => Some(IrType::Enumerable(
+                        Box::new(parse_monomorphized_rc_inner_type(&args[0], known_objects)?),
+                    )),
+                    "Task" | "ValueTask" if args.len() == 1 => Some(IrType::Task(Box::new(
+                        parse_monomorphized_rc_inner_type(&args[0], known_objects)?,
+                    ))),
+                    "Weak" | "WeakReference" if args.len() == 1 => Some(IrType::Weak(Box::new(
+                        parse_monomorphized_rc_inner_type(&args[0], known_objects)?,
+                    ))),
+                    _ => resolve_known_object_type(base_name, known_objects)
+                        .or_else(|| Some(IrType::Unknown(text.to_string()))),
+                }
+            } else {
+                resolve_known_object_type(base_type_name(text), known_objects)
+                    .or_else(|| Some(IrType::Unknown(text.to_string())))
+            }
+        }
+    }
+}
+
+fn resolve_known_object_type(
+    name: &str,
+    known_objects: &HashMap<String, LlObjectType>,
+) -> Option<IrType> {
+    known_objects
+        .get(name)
+        .or_else(|| known_objects.get(name.rsplit('.').next().unwrap_or(name)))
+        .map(|object| match object.kind {
+            TypeKind::Class => IrType::Class(object.name.clone()),
+            TypeKind::Interface => IrType::Interface(object.name.clone()),
+            TypeKind::Enum => IrType::Int,
+            TypeKind::Struct | TypeKind::RefStruct => IrType::Struct(object.name.clone()),
+        })
+}
+
+fn split_monomorphized_type(text: &str) -> Option<(&str, Vec<String>)> {
+    let mut depth = 0usize;
+    let mut open = None;
+    let mut close = None;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '<' => {
+                if depth == 0 {
+                    open = Some(index);
+                }
+                depth += 1;
+            }
+            '>' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let open = open?;
+    let close = close?;
+    let base = &text[..open];
+    let args = &text[open + 1..close];
+    let mut parsed_args = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for ch in args.chars() {
+        match ch {
+            '<' => {
+                depth += 1;
+                current.push(ch);
+            }
+            '>' => {
+                depth = depth.checked_sub(1)?;
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                let arg = current.trim();
+                if arg.is_empty() {
+                    return None;
+                }
+                parsed_args.push(arg.to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let tail = current.trim();
+    if !tail.is_empty() {
+        parsed_args.push(tail.to_string());
+    }
+    Some((base, parsed_args))
 }
 
 fn void_value() -> LlValue {
