@@ -4,7 +4,7 @@ This is a small compiler prototype for a C#-inspired systems language with Rust-
 
 Accepted source file extensions are `.gl` and `.cs`. The parser is the same for both; `.cs` is intended for C#-migration snippets.
 
-Current MVP:
+Current implemented subset:
 
 - `fn name() { ... }`
 - C#-style free functions with typed parameters and return values, e.g. `int Add(int a, int b) { return a + b; }`
@@ -28,6 +28,8 @@ Current MVP:
 - C#-style `Thread` with `new Thread(worker)`, `.Start()`, and `.Join()`
 - `System.Threading.Tasks.Task` with `Task.Run(worker)` and `task.Wait()`
 - `System.Threading.Tasks.Task<T>` for `int`, `long`, and owned `string` results with `Task.Run(worker)`, `task.Result`, and `task.GetResult()`
+- compiler intrinsics such as `sizeof(T)` in the LLVM backend
+- a concrete `Rc<int>` LLVM layout and drop glue for the current ownership test slice
 - variables
 - mutable assignment, e.g. `x = x + 1;`
 - `if` / `else` with scalar comparison conditions
@@ -50,8 +52,8 @@ Current MVP:
 - Rust static runtime linkage for the LLVM HTTP socket host
 - reference-counted dynamic LLVM strings with deterministic release
 - typed `try` / `catch` / `finally` exception propagation in LLVM
-- legacy C code generation with `--emit-c`
-- NuGet package generation containing emitted native C source
+- legacy C code generation with `--emit-c` for compatibility
+- NuGet package generation containing emitted native C source for compatibility; it is not a managed `.dll` yet
 - source-level packages with `package Name;` and `native "C source";`
 
 `var x = value;` is accepted as a conversion-friendly spelling for `let mut x = value;`.
@@ -246,7 +248,8 @@ cargo run -- examples\borrow_conflict.gl
 This is intentionally a C#-compatibility subset, not full C#. The typed LLVM backend now
 supports user class layouts, constructors, instance methods, fields, reference-counted class
 ownership, and owned `List<T>` / `Dictionary<K,V>` buffers for the currently lowered scalar,
-string, and pointer element types. It does not use a tracing GC.
+string, and pointer element types. It also has concrete LLVM lowering for `sizeof(T)` and the
+current `Rc<int>` ownership/layout path used by the memory-leak tests. It does not use a tracing GC.
 
 Important remaining safety boundaries:
 
@@ -266,6 +269,6 @@ Important remaining safety boundaries:
   sanitizer.
 
 The cloned `Backend/Library` source tree currently parses, lowers, and links to a native
-executable. Compatibility diagnostics still identify unresolved ASP.NET Core, third-party,
-controller, and EF Core behavior; successful linking does not yet mean that application routes
-or database operations are functionally equivalent to .NET.
+executable in the supported subset. Compatibility diagnostics still identify unresolved ASP.NET
+Core, third-party, controller, and EF Core behavior; successful linking does not yet mean that
+application routes or database operations are functionally equivalent to .NET.

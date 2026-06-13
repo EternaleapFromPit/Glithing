@@ -137,6 +137,7 @@ impl LlvmEmitter {
         for ty in &program.types {
             emitter.register_object_type(ty);
         }
+        emitter.register_builtin_rc_instantiation();
         for function in &program.functions {
             emitter.register_function(function);
         }
@@ -282,6 +283,42 @@ impl LlvmEmitter {
                             .collect()
                     })
                     .unwrap_or_default(),
+            },
+        );
+    }
+
+    fn register_builtin_rc_instantiation(&mut self) {
+        if self.object_types.contains_key("Rc_int") {
+            return;
+        }
+        let mut fields = HashMap::new();
+        fields.insert(
+            "value".to_string(),
+            LlField {
+                index: 2,
+                ty: IrType::Int,
+                drop_kind: DropKind::None,
+            },
+        );
+        fields.insert(
+            "refCount".to_string(),
+            LlField {
+                index: 3,
+                ty: IrType::Int,
+                drop_kind: DropKind::None,
+            },
+        );
+        self.type_defs
+            .push("%glitch.Rc_int = type { i64, ptr, i32, i32 }\n".to_string());
+        self.object_types.insert(
+            "Rc_int".to_string(),
+            LlObjectType {
+                name: "Rc_int".to_string(),
+                kind: TypeKind::Class,
+                bases: Vec::new(),
+                fields,
+                constructor: None,
+                constructor_params: vec![IrType::Int],
             },
         );
     }
@@ -1781,22 +1818,34 @@ impl LlvmEmitter {
                 }
                 match &call.kind {
                     TypedCallKind::Function { name, symbol } => {
-                        if name == "sizeof" {
-                            let size = if let Some(arg) = call.args.first() {
-                                if let TypedExprKind::Var(type_name) = &arg.kind {
-                                    match type_name.as_str() {
-                                        "bool" => 1,
-                                        "byte" | "sbyte" => 1,
-                                        "short" | "ushort" => 2,
-                                        "int" | "uint" => 4,
-                                        "long" | "ulong" => 8,
-                                        "float" => 4,
-                                        "double" => 8,
-                                        _ => 8,
-                                    }
-                                } else {
-                                    4
-                                }
+                if name == "sizeof" {
+                    let size = if let Some(arg) = call.args.first() {
+                        if let TypedExprKind::Var(type_name) = &arg.kind {
+                            if self.object_types.contains_key(type_name) {
+                                let llvm_name = llvm_object_name(type_name);
+                                let size_ptr = self.tmp();
+                                let size = self.tmp();
+                                self.body.push_str(&format!(
+                                    "  {size_ptr} = getelementptr %{llvm_name}, ptr null, i32 1\n  {size} = ptrtoint ptr {size_ptr} to i64\n"
+                                ));
+                                return Ok(LlValue {
+                                    value: size,
+                                    ty: LlType::I64,
+                                });
+                            }
+                            match type_name.as_str() {
+                                "bool" => 1,
+                                "byte" | "sbyte" => 1,
+                                "short" | "ushort" => 2,
+                                "int" | "uint" => 4,
+                                "long" | "ulong" => 8,
+                                "float" => 4,
+                                "double" => 8,
+                                _ => 8,
+                            }
+                        } else {
+                            4
+                        }
                             } else {
                                 4
                             };
@@ -3518,6 +3567,42 @@ impl LlvmEmitter {
             return Err(format!(
                 "LLVM TIR backend: interface '{type_name}' cannot be allocated"
             ));
+        }
+        if type_name == "Rc_int" {
+            let [value_expr] = args else {
+                return Err(
+                    "LLVM TIR backend: Rc<int> constructor expects exactly one argument"
+                        .to_string(),
+                );
+            };
+            let llvm_name = llvm_object_name(type_name);
+            let size_ptr = self.tmp();
+            let size = self.tmp();
+            let value = self.tmp();
+            self.body.push_str(&format!(
+                "  {size_ptr} = getelementptr %{llvm_name}, ptr null, i32 1\n  {size} = ptrtoint ptr {size_ptr} to i64\n  {value} = call ptr @glitch_calloc(i64 1, i64 {size})\n"
+            ));
+            let rc_ptr = self.tmp();
+            let drop_ptr = self.tmp();
+            self.body.push_str(&format!(
+                "  {rc_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 0\n  store i64 1, ptr {rc_ptr}\n  {drop_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 1\n  store ptr @{}, ptr {drop_ptr}\n",
+                destroy_symbol(type_name)
+            ));
+            let field_value = self.emit_typed_expr(value_expr)?;
+            let field_value = self.cast_value(field_value, &LlType::I32)?;
+            let ptr = self.tmp();
+            self.body.push_str(&format!(
+                "  {ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 2\n  store i32 {}, ptr {ptr}\n",
+                field_value.value
+            ));
+            let ref_count_ptr = self.tmp();
+            self.body.push_str(&format!(
+                "  {ref_count_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 3\n  store i32 1, ptr {ref_count_ptr}\n"
+            ));
+            return Ok(LlValue {
+                value,
+                ty: LlType::Ptr,
+            });
         }
         let llvm_name = llvm_object_name(type_name);
         let size_ptr = self.tmp();

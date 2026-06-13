@@ -10,6 +10,7 @@ mod linker;
 mod llvm;
 mod parser;
 mod runtime;
+mod xunit_runner;
 mod tir;
 mod toolchain;
 

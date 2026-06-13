@@ -1400,6 +1400,66 @@ fn emits_compatibility_warning_for_missing_members() {
 }
 
 #[test]
+fn supports_sizeof_and_rc_int_without_remaining_compatibility_warnings() {
+    let source = std::fs::read_to_string("tests/xunit_memory/memory_leak_tests.gl")
+        .expect("should read memory_leak_tests.gl");
+
+    let output = compile_source_with_options(&source, true, false)
+        .expect("memory leak fixture should compile");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(!diagnostics.contains("warning GL3002 at 71:40"));
+    assert!(!diagnostics.contains("function 'sizeof' has no linked GL or LLVM implementation"));
+    assert!(!diagnostics.contains("warning GL3004"));
+    assert!(!diagnostics.contains("type 'Rc_int' has no linked LLVM layout"));
+}
+
+#[test]
+fn lowers_rc_int_layout_in_llvm() {
+    let source = std::fs::read_to_string("tests/xunit_memory/memory_leak_tests.gl")
+        .expect("should read memory_leak_tests.gl");
+
+    let llvm_ir = compile_llvm_ir(&source).expect("Rc<int> fixture should lower to LLVM");
+
+    assert!(llvm_ir.contains("%glitch.Rc_int = type { i64, ptr, i32, i32 }"));
+    assert!(llvm_ir.contains("getelementptr %glitch.Rc_int, ptr null, i32 1"));
+    assert!(llvm_ir.contains("call void @glitch_destroy_Rc_int"));
+    assert!(llvm_ir.contains("call void @glitch_drop_Rc_int"));
+}
+
+#[test]
+fn warns_on_lambda_without_executable_closure_lowering() {
+    let source = r#"
+            class Runner {
+                public Func<int, int> Worker;
+
+                public Runner(Func<int, int> worker) {
+                    this.Worker = worker;
+                }
+
+                public int Run(int x) {
+                    var f = this.Worker;
+                    return f(x);
+                }
+            }
+
+            fn main() {
+                int factor = 3;
+                var runner = new Runner(x => x * factor);
+                int res = runner.Run(5);
+                print(res);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("lambda sample should compile with a compatibility warning");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3005"));
+    assert!(diagnostics.contains("lambda has no executable LLVM closure or expression-tree lowering"));
+}
+
+#[test]
 fn warns_with_route_specific_endpoint_rewrite_proposals() {
     let source = r#"
             using Glitching.AspNetCore;

@@ -309,6 +309,12 @@ impl<'a> CompatibilityAnalyzer<'a> {
             tir::TypedExprKind::Call(call) => {
                 match &call.kind {
                     tir::TypedCallKind::Function { name, symbol } => {
+                        if name == "sizeof" {
+                            for arg in &call.args {
+                                self.visit_expr(arg);
+                            }
+                            return;
+                        }
                         if !self.symbols.contains(symbol) && !is_llvm_runtime_function(symbol) {
                             self.emit(
                                 "GL3002",
@@ -398,6 +404,15 @@ impl<'a> CompatibilityAnalyzer<'a> {
                 fields,
                 ..
             } => {
+                if type_name == "Rc_int" {
+                    for arg in args {
+                        self.visit_expr(arg);
+                    }
+                    for field in fields {
+                        self.visit_expr(&field.expr);
+                    }
+                    return;
+                }
                 if type_name != "Exception"
                     && type_name != "System.Exception"
                     && !self.known_types.contains(type_name)

@@ -38,7 +38,7 @@ public class TestCase {
     public Func<void> TestMethod;
 }
 
-// Native runner entry point (implemented in C)
+// Native runner entry point (implemented in Rust by the compiler runtime)
 native "
 void XUnit_AddTest(const char* class_name, const char* test_name, void (*fn)());
 void XUnit_RunAllTests();
@@ -51,8 +51,8 @@ extern void XUnit_RunAllTests();
 public static void Register(string className, string testName, Func<void> test) => XUnit_AddTest(className, testName, test);
 
 // Macro to simplify registration of a fact method
-macro XUNIT_FACT(className, methodName) => System.XUnit.Register(#className, #methodName, () => new className().methodName());
+macro XUNIT_FACT(className, methodName) => XUnit_AddTest(#className, #methodName, () => new className().methodName());
 macro XUNIT_THEORY(className, methodName) => ;
-macro XUNIT_INLINE_DATA(className, methodName, val) => System.XUnit.Register(#className, #methodName, () => new className().methodName(val));
+macro XUNIT_INLINE_DATA(className, methodName, val) => XUnit_AddTest(#className, #methodName, () => new className().methodName(val));
 
 public static void RunAllTests() => XUnit_RunAllTests();

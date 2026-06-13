@@ -95,6 +95,9 @@ pub(crate) fn find_package_native_sources(linked_source: &str) -> Vec<PathBuf> {
     let mut native_files = Vec::new();
     let packages = source_using_packages(linked_source);
     for package_id in packages {
+        if package_id == "System.XUnit" {
+            continue;
+        }
         if let Some(source_path) = package_source_path(&package_id) {
             if let Some(parent) = source_path.parent() {
                 let native_dir = parent.join("native");
@@ -102,7 +105,9 @@ pub(crate) fn find_package_native_sources(linked_source: &str) -> Vec<PathBuf> {
                     if let Ok(entries) = fs::read_dir(native_dir) {
                         for entry in entries.flatten() {
                             let path = entry.path();
-                            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("c") {
+                            if path.is_file()
+                                && path.extension().and_then(|e| e.to_str()) == Some("c")
+                            {
                                 native_files.push(path);
                             }
                         }
