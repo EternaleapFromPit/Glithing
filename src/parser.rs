@@ -23,6 +23,7 @@ pub(crate) struct Parser {
 struct Modifiers {
     is_async: bool,
     is_extern: bool,
+    is_static: bool,
 }
 
 impl Parser {
@@ -49,6 +50,8 @@ impl Parser {
         self.parse_items(&mut program, Vec::new(), false, &mut delegates)?;
         program.delegates = delegates;
         program.types = merge_type_declarations(program.types);
+        synthesize_generated_regex_methods(&mut program);
+        synthesize_xunit_fact_tests(self, &program);
 
         if !self.test_registrations.is_empty() {
             let main_fn = program.functions.iter_mut().find(|f| f.name == "main");
@@ -62,6 +65,7 @@ impl Parser {
                     attributes: Vec::new(),
                     is_async: false,
                     is_extern: false,
+                    is_static: false,
                     is_extension: false,
                     name: "main".to_string(),
                     generic_params: Vec::new(),
@@ -74,7 +78,14 @@ impl Parser {
                         default: None,
                     }],
                     return_type: TypeSyntax::Void,
-                    body: self.test_registrations.clone(),
+                    body: {
+                        let mut body = self.test_registrations.clone();
+                        body.push(Stmt::Expr(Expr::FunctionCall {
+                            name: "XUnit_RunAllTests".to_string(),
+                            args: Vec::new(),
+                        }));
+                        body
+                    },
                 });
             }
         }
@@ -210,6 +221,7 @@ impl Parser {
                     attributes.clone(),
                     modifiers.is_async,
                     modifiers.is_extern,
+                    modifiers.is_static,
                 ) {
                     Ok(function) => program.functions.push(function),
                     Err(_) => {
@@ -225,6 +237,7 @@ impl Parser {
                 attributes: Vec::new(),
                 is_async: false,
                 is_extern: false,
+                is_static: false,
                 is_extension: false,
                 name: "main".to_string(),
                 generic_params: Vec::new(),
@@ -316,7 +329,14 @@ impl Parser {
             if self.match_kind(&TokenKind::Async) {
                 modifiers.is_async = true;
             } else if self.match_kind(&TokenKind::Public)
-                || self.match_kind(&TokenKind::Static)
+                || {
+                    if self.match_kind(&TokenKind::Static) {
+                        modifiers.is_static = true;
+                        true
+                    } else {
+                        false
+                    }
+                }
                 || self.match_kind(&TokenKind::Const)
                 || self.match_kind(&TokenKind::Readonly)
             {
@@ -324,8 +344,13 @@ impl Parser {
                 let TokenKind::Ident(ref name) = self.current().kind else {
                     break;
                 };
-                if name == "extern" {
+                if matches!(name.as_str(), "private" | "protected" | "internal" | "protected internal" | "private protected") {
+                    self.advance();
+                } else if name == "extern" {
                     modifiers.is_extern = true;
+                    self.advance();
+                } else if name == "static" {
+                    modifiers.is_static = true;
                     self.advance();
                 } else if matches!(
                     name.as_str(),
@@ -597,6 +622,7 @@ impl Parser {
                     member_attributes,
                     member_modifiers.is_async,
                     member_modifiers.is_extern,
+                    member_modifiers.is_static,
                 )?);
                 continue;
             }
@@ -623,6 +649,7 @@ impl Parser {
                     attributes: member_attributes,
                     is_async: member_modifiers.is_async,
                     is_extern: member_modifiers.is_extern,
+                    is_static: member_modifiers.is_static,
                     is_extension: false,
                     name,
                     generic_params,
@@ -638,6 +665,7 @@ impl Parser {
                     attributes: member_attributes,
                     is_async: false,
                     is_extern: false,
+                    is_static: false,
                     is_extension: false,
                     name: property_getter_name(&name),
                     generic_params: Vec::new(),
@@ -715,6 +743,7 @@ impl Parser {
                 member_attributes,
                 member_modifiers.is_async,
                 member_modifiers.is_extern,
+                member_modifiers.is_static,
             )?;
             let Some(first_param) = method.params.first() else {
                 return Err(self.error_here(
@@ -781,6 +810,7 @@ impl Parser {
         attributes: Vec<Attribute>,
         is_async: bool,
         is_extern: bool,
+        is_static: bool,
     ) -> Result<Function, String> {
         let (return_type, name) = if self.match_kind(&TokenKind::Fn) {
             let checkpoint = self.pos;
@@ -826,6 +856,7 @@ impl Parser {
             attributes,
             is_async,
             is_extern,
+            is_static,
             is_extension: false,
             name,
             generic_params,
@@ -1929,11 +1960,12 @@ impl Parser {
                     return Ok(Expr::String(String::new()));
                 }
                 if name == "typeof" && self.at(&TokenKind::LParen) {
-                    self.parse_opaque_parenthesized()?;
-                    return Ok(Expr::FunctionCall {
-                        name,
-                        args: Vec::new(),
-                    });
+                    self.expect(TokenKind::LParen)?;
+                    let ty = self
+                        .parse_type_syntax()?
+                        .ok_or_else(|| self.error_here("expected type after typeof("))?;
+                    self.expect(TokenKind::RParen)?;
+                    return Ok(type_object_expr(&ty));
                 }
                 let generic_checkpoint = self.pos;
                 if self.at(&TokenKind::Less) {
@@ -2452,12 +2484,14 @@ impl Parser {
             || is_type_path(&parts, &["ICollection"])
             || is_type_path(&parts, &["System", "Collections", "Generic", "ICollection"])
         {
-            let mut args = self.parse_generic_type_args("collection interface")?;
-            if args.len() != 1 {
+            let args = self.parse_generic_type_args("collection interface")?;
+            if args.len() > 1 {
                 return Err(self.error_here("collection interface expects one element type"));
             }
-            let element = args.remove(0);
-            return Ok(Some(TypeSyntax::IEnumerable(Box::new(element))));
+            return Ok(Some(TypeSyntax::GenericNamed {
+                name: parts.join("."),
+                args,
+            }));
         }
         if self.at(&TokenKind::Less) {
             let args = self.parse_generic_type_args(&parts.join("."))?;
@@ -2472,6 +2506,9 @@ impl Parser {
     fn parse_generic_type_args(&mut self, type_name: &str) -> Result<Vec<TypeSyntax>, String> {
         self.expect(TokenKind::Less)?;
         let mut args = Vec::new();
+        if self.match_kind(&TokenKind::Greater) {
+            return Ok(args);
+        }
         loop {
             let ty = self.parse_type_syntax()?.ok_or_else(|| {
                 self.error_here(&format!("expected type argument for {type_name}"))
@@ -3077,6 +3114,72 @@ fn type_syntax_name(ty: &TypeSyntax) -> String {
     }
 }
 
+fn generic_type_definition_name(ty: &TypeSyntax) -> String {
+    match ty {
+        TypeSyntax::GenericNamed { name, args } => {
+            if args.is_empty() {
+                format!("{name}<>")
+            } else {
+                let placeholders = std::iter::repeat("")
+                    .take(args.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{name}<{placeholders}>")
+            }
+        }
+        TypeSyntax::List(_) => "List<>".to_string(),
+        TypeSyntax::Dictionary(_, _) => "Dictionary<,>".to_string(),
+        TypeSyntax::IEnumerable(_) => "IEnumerable<>".to_string(),
+        TypeSyntax::Task(_) => "Task<>".to_string(),
+        _ => type_syntax_name(ty),
+    }
+}
+
+fn is_generic_type_syntax(ty: &TypeSyntax) -> bool {
+    matches!(
+        ty,
+        TypeSyntax::GenericNamed { .. }
+            | TypeSyntax::List(_)
+            | TypeSyntax::Dictionary(_, _)
+            | TypeSyntax::IEnumerable(_)
+            | TypeSyntax::Task(_)
+    )
+}
+
+fn type_object_expr(ty: &TypeSyntax) -> Expr {
+    let generic_args = match ty {
+        TypeSyntax::GenericNamed { args, .. } => args.iter().map(type_object_expr).collect(),
+        TypeSyntax::List(inner)
+        | TypeSyntax::IEnumerable(inner)
+        | TypeSyntax::Task(inner) => vec![type_object_expr(inner)],
+        TypeSyntax::Dictionary(key, value) => vec![type_object_expr(key), type_object_expr(value)],
+        TypeSyntax::Nullable(inner) => vec![type_object_expr(inner)],
+        _ => Vec::new(),
+    };
+    Expr::NewObject {
+        type_name: "Type".to_string(),
+        args: Vec::new(),
+        fields: vec![
+            FieldInit {
+                name: "FullName".to_string(),
+                expr: Expr::String(type_syntax_name(ty)),
+            },
+            FieldInit {
+                name: "GenericTypeDefinitionName".to_string(),
+                expr: Expr::String(generic_type_definition_name(ty)),
+            },
+            FieldInit {
+                name: "IsGenericType".to_string(),
+                expr: Expr::Bool(is_generic_type_syntax(ty)),
+            },
+            FieldInit {
+                name: "GenericArguments".to_string(),
+                expr: Expr::ArrayLiteral(generic_args),
+            },
+        ],
+    }
+}
+
 fn generic_type_name_for_parser(name: &str, args: &[TypeSyntax]) -> String {
     format!(
         "{}_{}",
@@ -3117,6 +3220,119 @@ fn merge_type_declarations(types: Vec<TypeDef>) -> Vec<TypeDef> {
         merged.push(ty);
     }
     merged
+}
+
+fn synthesize_generated_regex_methods(program: &mut Program) {
+    for function in &mut program.functions {
+        synthesize_generated_regex_function(function);
+    }
+    for ty in &mut program.types {
+        for method in &mut ty.methods {
+            synthesize_generated_regex_function(method);
+        }
+    }
+}
+
+fn synthesize_generated_regex_function(function: &mut Function) {
+    if !function.body.is_empty() {
+        return;
+    }
+    if !function
+        .attributes
+        .iter()
+        .any(|attribute| attribute.name.contains("GeneratedRegex"))
+    {
+        return;
+    }
+    let Some(pattern) = function.attributes.iter().find_map(|attribute| {
+        if !attribute.name.contains("GeneratedRegex") {
+            return None;
+        }
+        attribute.args.first().and_then(|arg| match arg {
+            Expr::String(value) => Some(value.clone()),
+            _ => None,
+        })
+    }) else {
+        return;
+    };
+    let return_type_name = type_syntax_name(&function.return_type);
+    function.body = vec![Stmt::Return(Some(Expr::NewObject {
+        type_name: return_type_name,
+        args: vec![Expr::String(pattern)],
+        fields: Vec::new(),
+    }))];
+}
+
+fn synthesize_xunit_fact_tests(parser: &mut Parser, program: &Program) {
+    for ty in &program.types {
+        let class_name = qualified_type_name(&ty.namespace, &ty.name);
+        for method in &ty.methods {
+            if method.is_extern || !is_fact_attribute(&method.attributes) {
+                continue;
+            }
+            if !method.generic_params.is_empty() || !method.params.is_empty() {
+                continue;
+            }
+            let invoke = Expr::MethodCall {
+                target: Box::new(Expr::NewObject {
+                    type_name: ty.name.clone(),
+                    args: Vec::new(),
+                    fields: Vec::new(),
+                }),
+                name: method.name.clone(),
+                args: Vec::new(),
+            };
+            let invoke = if is_task_like_type(&method.return_type) {
+                Expr::MethodCall {
+                    target: Box::new(invoke),
+                    name: "Wait".to_string(),
+                    args: Vec::new(),
+                }
+            } else {
+                invoke
+            };
+            parser.test_registrations.push(Stmt::Expr(Expr::FunctionCall {
+                name: "XUnit_AddTest".to_string(),
+                args: vec![
+                    Expr::String(class_name.clone()),
+                    Expr::String(method.name.clone()),
+                    Expr::Lambda {
+                        params: Vec::new(),
+                        body: Box::new(invoke),
+                    },
+                ],
+            }));
+        }
+    }
+}
+
+fn is_fact_attribute(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        matches!(
+            attribute.name.rsplit('.').next().unwrap_or(&attribute.name),
+            "Fact" | "FactAttribute"
+        )
+    })
+}
+
+fn is_task_like_type(ty: &TypeSyntax) -> bool {
+    match ty {
+        TypeSyntax::Task(_) => true,
+        TypeSyntax::Named(name) => matches!(name.as_str(), "Task" | "ValueTask" | "System.Threading.Tasks.Task" | "System.Threading.Tasks.ValueTask"),
+        TypeSyntax::GenericNamed { name, .. } => matches!(
+            name.as_str(),
+            "Task" | "ValueTask" | "System.Threading.Tasks.Task" | "System.Threading.Tasks.ValueTask"
+        ),
+        _ => false,
+    }
+}
+
+fn qualified_type_name(namespace: &[String], name: &str) -> String {
+    if namespace.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}.{}", namespace.join("."), name)
+    }
 }
 
 fn default_expr_for_type(ty: &TypeSyntax) -> Expr {

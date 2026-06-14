@@ -9,10 +9,10 @@ class Path {
         return path1 + "/" + path2;
     }
     static string GetExtension(string path) {
-        return ".jpg";
+        return System_IO_Path_GetExtension_Native(path);
     }
     static string GetFileName(string path) {
-        return path;
+        return System_IO_Path_GetFileName_Native(path);
     }
 }
 
@@ -34,6 +34,14 @@ class FileStream {
     void Dispose() {}
 }
 
+class MemoryStream {
+    public byte[] Buffer;
+
+    public MemoryStream(byte[] buffer) {
+        this.Buffer = buffer;
+    }
+}
+
 class File {
     static string ReadAllText(string path) {
         return System_IO_File_ReadAllText_Native(path);
@@ -53,6 +61,52 @@ static char * System_IO_Directory_GetCurrentDirectory_Native();
 static void System_IO_Directory_CreateDirectory_Native(const char *path);
 static char * System_IO_Directory_GetFiles_Native(const char *path);
 static int System_IO_File_Exists_Native(const char *path);
+static char * System_IO_Path_GetExtension_Native(const char *path);
+static char * System_IO_Path_GetFileName_Native(const char *path);
+static char *glitch_string_dup(const char *value) {
+    size_t len = value ? strlen(value) : 0;
+    char *result = (char *)malloc(len + 1);
+    if (!result) { abort(); }
+    if (len > 0) {
+        memcpy(result, value, len);
+    }
+    result[len] = '\\0';
+    return result;
+}
+static char * System_IO_Path_GetExtension_Native(const char *path) {
+    if (!path) {
+        return NULL;
+    }
+    const char *last_slash = strrchr(path, '/');
+    const char *last_backslash = strrchr(path, '\\');
+    const char *name = path;
+    if (last_slash && last_slash + 1 > name) {
+        name = last_slash + 1;
+    }
+    if (last_backslash && last_backslash + 1 > name) {
+        name = last_backslash + 1;
+    }
+    const char *last_dot = strrchr(name, '.');
+    if (!last_dot || last_dot == name || last_dot[1] == '\0') {
+        return glitch_string_dup(\"\");
+    }
+    return glitch_string_dup(last_dot);
+}
+static char * System_IO_Path_GetFileName_Native(const char *path) {
+    if (!path) {
+        return NULL;
+    }
+    const char *last_slash = strrchr(path, '/');
+    const char *last_backslash = strrchr(path, '\\');
+    const char *name = path;
+    if (last_slash && last_slash + 1 > name) {
+        name = last_slash + 1;
+    }
+    if (last_backslash && last_backslash + 1 > name) {
+        name = last_backslash + 1;
+    }
+    return glitch_string_dup(name);
+}
 ";
 
 string ReadAllText(string path) {

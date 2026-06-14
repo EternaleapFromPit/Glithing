@@ -1,6 +1,12 @@
 package System.Threading.Tasks;
 
 class Task {
+    public bool IsCompleted {
+        get {
+            return true;
+        }
+    }
+
     public static Task CompletedTask {
         get {
             return new Task();
@@ -19,6 +25,14 @@ class Task {
     public static Task<T> Run<T>(Func<T> function) {
         return new Task<T> { Result = function() };
     }
+
+    public static Task WhenAll(Task[] tasks) {
+        return CompletedTask;
+    }
+
+    public static Task WhenAll<T>(Task<T>[] tasks) {
+        return CompletedTask;
+    }
 }
 
 class Task<T> {
@@ -29,11 +43,16 @@ class Task<T> {
     }
 
     public static Task WhenAll(Task<T> first, Task<T> second) {
-        return new Task();
+        return CompletedTask;
     }
 }
 
 class ValueTask {
+    public bool IsCompleted {
+        get {
+            return true;
+        }
+    }
 }
 
 class ValueTask<T> {
@@ -44,7 +63,7 @@ class ValueTask<T> {
     }
 
     public Task<T> AsTask() {
-        return Task.FromResult(Result);
+        return new Task<T> { Result = Result };
     }
 }
 

@@ -1,0 +1,16 @@
+package Microsoft.Extensions.Localization;
+
+class LocalizedString {
+    public string Value;
+
+    public LocalizedString() {
+        this.Value = "";
+    }
+
+    public LocalizedString(string value) {
+        this.Value = value;
+    }
+}
+
+interface IStringLocalizer<T> {
+}

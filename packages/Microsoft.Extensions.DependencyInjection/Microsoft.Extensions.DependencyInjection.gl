@@ -15,16 +15,25 @@ using System;
 
 interface IServiceProvider {
     T GetRequiredService<T>();
-    string GetRequiredService(string name);
+    object GetRequiredService(string name);
     T GetService<T>();
     IServiceScope CreateScope();
 }
+
+delegate void DbContextOptionsConfigure(DbContextOptionsBuilder options);
+delegate void LocalizationConfigure(LocalizationOptions options);
+delegate void CorsConfigure(CorsPolicyBuilder options);
+delegate void AutoMapperConfigure(MapperConfigurationExpression options);
+delegate void MediatRConfigure(MediatRServiceConfiguration options);
+delegate void JsonOptionsConfigure(MvcJsonOptions options);
+delegate void JwtBearerConfigure(JwtBearerOptions options);
+delegate void MvcOptionsConfigure(MvcOptions options);
 
 class DbContextOptionsBuilder {
     public DbContextOptions Options;
 
     public DbContextOptionsBuilder() {
-        this.Options = null;
+        this.Options = new DbContextOptions();
     }
 
     void UseSqlite(string connectionString) {
@@ -41,7 +50,7 @@ class DbContextOptionsBuilder {
 
     void UseInMemoryDatabase(string connectionString) {
         if (this.Options != null) {
-            this.Options.ConnectionString = "inmemory";
+            this.Options.ConnectionString = "inmemory:" + connectionString;
         }
     }
 }
@@ -85,7 +94,7 @@ class MvcOptions {
 }
 
 class AuthenticationBuilder {
-    AuthenticationBuilder AddJwtBearer(JwtBearerOptions configure) {
+    AuthenticationBuilder AddJwtBearer(JwtBearerConfigure configure) {
         return new AuthenticationBuilder();
     }
 }
@@ -114,22 +123,22 @@ class SwaggerGenOptions {
 }
 
 class ServiceProvider : IServiceProvider, IServiceScopeFactory {
-    public string Message;
+    public object Singleton;
 
-    public ServiceProvider(string message) {
-        this.Message = message;
+    public ServiceProvider(object singleton) {
+        this.Singleton = singleton;
     }
 
     T GetRequiredService<T>() {
-        return new LoggerFactory();
+        return this.GetRequiredService(typeof(T));
     }
 
-    string GetRequiredService(string name) {
-        return this.Message;
+    object GetRequiredService(string name) {
+        return this.Singleton;
     }
 
     T GetService<T>() {
-        return null;
+        return this.GetRequiredService(typeof(T));
     }
 
     IServiceScope CreateScope() {
@@ -154,7 +163,7 @@ class ServiceScope : IServiceScope {
 }
 
 class MvcBuilder {
-    MvcBuilder AddJsonOptions(MvcJsonOptions configure) {
+    MvcBuilder AddJsonOptions(JsonOptionsConfigure configure) {
         return new MvcBuilder();
     }
 
@@ -162,7 +171,7 @@ class MvcBuilder {
         return new MvcBuilder();
     }
 
-    MvcBuilder AddJwtBearer(JwtBearerOptions configure) {
+    MvcBuilder AddJwtBearer(JwtBearerConfigure configure) {
         return new MvcBuilder();
     }
 
@@ -176,13 +185,20 @@ class MvcBuilder {
 }
 
 class IServiceCollection {
+    public object Singleton;
     public string Message;
 
     public IServiceCollection() {
         this.Message = "";
+        this.Singleton = null;
     }
 
-    void AddSingleton(object value) {}
+    void AddSingleton(object value) {
+        this.Singleton = value;
+    }
+    void AddSingleton<T>(T value) {
+        this.Singleton = value;
+    }
     void AddSingleton(string value) {
         this.Message = value;
     }
@@ -204,18 +220,18 @@ class IServiceCollection {
     void AddAndConfigureSwagger(object configuration, string path, bool enabled) {}
     void AddOptions() {}
     void AddLogging() {}
-    void AddMediatR(MediatRServiceConfiguration configure) {}
+    void AddMediatR(MediatRConfigure configure) {}
     void AddValidatorsFromAssemblyContaining<T>() {}
-    void AddDbContext<T>(DbContextOptionsBuilder configure) {}
+    void AddDbContext<T>(DbContextOptionsConfigure configure) {}
     void AddDbContextPool<T>(object configure) {}
-    void AddLocalization(LocalizationOptions configure) {}
+    void AddLocalization(LocalizationConfigure configure) {}
     void AddCors() {}
-    void AddCors(CorsPolicyBuilder configure) {}
-    void AddAutoMapper(object marker) {}
+    void AddCors(CorsConfigure configure) {}
+    void AddAutoMapper(AutoMapperConfigure marker) {}
     void AddAutoMapper(MapperConfigurationExpression marker) {}
     void AddRepositories() {}
     void AddDataServices() {}
-    MvcBuilder AddMvc(MvcOptions configure) {
+    MvcBuilder AddMvc(MvcOptionsConfigure configure) {
         return new MvcBuilder();
     }
     MvcBuilder AddControllers(object configure) {
@@ -229,13 +245,14 @@ class IServiceCollection {
     }
 
     ServiceProvider BuildServiceProvider() {
-        return new ServiceProvider(this.Message);
+        return new ServiceProvider(this.Singleton);
     }
 }
 
 class ServiceCollection : IServiceCollection {
     public ServiceCollection() {
         this.Message = "";
+        this.Singleton = null;
     }
 
     void AddSwaggerGen(SwaggerGenConfigure configure) {}

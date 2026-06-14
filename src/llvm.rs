@@ -1490,6 +1490,12 @@ impl LlvmEmitter {
                             });
                         }
                     }
+                    if name == "IsCompleted" && matches!(target.ty, IrType::Task(_)) {
+                        return Ok(LlValue {
+                            value: "true".to_string(),
+                            ty: LlType::I1,
+                        });
+                    }
                     if name == "Target" && matches!(target.ty, IrType::Weak(_)) {
                         let weak_val = self.emit_typed_expr(target)?;
                         if let IrType::Weak(inner) = &target.ty {
@@ -1810,6 +1816,28 @@ impl LlvmEmitter {
                         IrType::Unknown(n) => n == "Task" || n.starts_with("Task<"),
                         _ => false,
                     };
+                    let is_mediator = match &target.ty {
+                        IrType::Interface(name) | IrType::Class(name) => {
+                            base_type_name(name) == "IMediator"
+                        }
+                        _ => false,
+                    };
+                    if is_mediator && name == "Send" {
+                        let response_ty = match &expr.ty {
+                            IrType::Task(inner) => inner.as_ref().clone(),
+                            other => other.clone(),
+                        };
+                        return self.emit_mediator_send(target, &call.args[0], &response_ty);
+                    }
+                    let is_mapper = match &target.ty {
+                        IrType::Interface(name) | IrType::Class(name) => {
+                            base_type_name(name) == "IMapper"
+                        }
+                        _ => false,
+                    };
+                    if is_mapper && name == "Map" && !call.args.is_empty() {
+                        return self.emit_mapper_map(target, &call.args[0], &expr.ty);
+                    }
                     if is_task && name == "Run" {
                         return self.emit_task_run_inline(call, &expr.ty);
                     }

@@ -1,15 +1,41 @@
 package FluentValidation;
 
-interface IValidator<T> {
-    bool Validate(T value);
-}
+using System.Collections.Generic;
 
 class ValidationFailure {
     public string ErrorMessage;
 }
 
+class ValidationResult {
+    public List<ValidationFailure> Errors;
+
+    public ValidationResult() {
+        this.Errors = new List<ValidationFailure>();
+    }
+
+    public ValidationResult(List<ValidationFailure> errors) {
+        this.Errors = errors;
+    }
+}
+
+class ValidationException : Exception {
+    public List<ValidationFailure> Errors;
+
+    public ValidationException(List<ValidationFailure> errors) {
+        this.Errors = errors;
+    }
+}
+
 class ValidationContext<T> {
     public T InstanceToValidate;
+
+    public ValidationContext(T instanceToValidate) {
+        this.InstanceToValidate = instanceToValidate;
+    }
+}
+
+interface IValidator<T> {
+    ValidationResult Validate(ValidationContext<T> context);
 }
 
 class RuleBuilder<T, TProperty> {
@@ -27,12 +53,16 @@ class RuleBuilder<T, TProperty> {
     RuleBuilder<T, TProperty> WithMessage(string message) { return new RuleBuilder<T, TProperty>(); }
 }
 
-class AbstractValidator<T> {
+class AbstractValidator<T> : IValidator<T> {
     RuleBuilder<T, object> RuleFor(object expression) {
         return new RuleBuilder<T, object>();
     }
 
     RuleBuilder<T, object> RuleForEach(object expression) {
         return new RuleBuilder<T, object>();
+    }
+
+    ValidationResult Validate(ValidationContext<T> context) {
+        return new ValidationResult();
     }
 }

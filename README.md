@@ -24,12 +24,22 @@ Current implemented subset:
 - field access with `value.Field`
 - `List<int>` with `new List<int>()`, `.Add(value)`, and indexing
 - `Dictionary<string, int>` with `new Dictionary<string, int>()`, `.Add(key, value)`, and indexing
+- `HashSet<string>` with `new HashSet<string>()`, `.Add(value)`, `.Contains(value)`, and `.Clear()`
 - `System.Collections.Generic.List<int>` and `System.Collections.Generic.Dictionary<string, int>`, including `using` aliases
 - C#-style `Thread` with `new Thread(worker)`, `.Start()`, and `.Join()`
 - `System.Threading.Tasks.Task` with `Task.Run(worker)` and `task.Wait()`
 - `System.Threading.Tasks.Task<T>` for `int`, `long`, and owned `string` results with `Task.Run(worker)`, `task.Result`, and `task.GetResult()`
+- `System.Threading.Tasks.Task.IsCompleted`, `Task.WhenAll(Task[])`, and `ValueTask<T>.AsTask()`
+- `System.Threading.Tasks.Task.WhenAll(Task<T>[])` for the supported task-array subset
+- `System.Linq.Enumerable` now has working `IEnumerable<T>` overloads for `Count`, `Any`, `First`, `FirstOrDefault`, `ToList`, and `ToArray`
+- `System.Array.Empty<T>()` is present on the current core-library surface, and `bool.Parse` / the `string` null helpers compile on the current path
+- `int.Parse`, `int.TryParse`, `DateTime.Parse`, and `TimeSpan.FromMinutes` are present on the current `System` surface
+- `System.IO.Path.GetExtension` and `System.IO.Path.GetFileName` are available on the current file-system surface
+- `System.Text.Encoding.UTF8.GetBytes` is available on the current text-encoding surface
+- `System.Type` now carries package-backed reflection metadata for `GetMethod`, `GetProperty`, `GetProperties`, `GetGenericArguments`, and `GetGenericTypeDefinition`, which is enough for the current package reflection slice and open generic checks such as `ICollection<>`
 - compiler intrinsics such as `sizeof(T)` in the LLVM backend
 - a concrete `Rc<int>` LLVM layout and drop glue for the current ownership test slice
+- generated-regex partial methods for the slug helper pattern used by the ASP.NET sample
 - variables
 - mutable assignment, e.g. `x = x + 1;`
 - `if` / `else` with scalar comparison conditions
@@ -52,6 +62,8 @@ Current implemented subset:
 - Rust static runtime linkage for the LLVM HTTP socket host
 - reference-counted dynamic LLVM strings with deterministic release
 - typed `try` / `catch` / `finally` exception propagation in LLVM
+- a small ASP.NET-style helper surface, including `ModelState.AddModelError`, `ControllerBase.Ok`, and `ControllerBase.NotFound`
+- simple configuration and model-builder defaults for the current ASP.NET / EF compatibility slice
 - default CLI output builds a native executable when no explicit output is requested
 - NuGet package emission produces LLVM-native assets and linked source metadata
 - source-level packages with `package Name;` and `native "C source";`

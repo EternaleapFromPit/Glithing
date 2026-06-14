@@ -3,12 +3,12 @@ package AutoMapper;
 using System.Collections.Generic;
 
 interface IMapper {
-    T Map<T>(object source);
+    TDestination Map<TSource, TDestination>(TSource source);
 }
 
 class Mapper : IMapper {
-    T Map<T>(object source) {
-        return null;
+    TDestination Map<TSource, TDestination>(TSource source) {
+        return default(TDestination);
     }
 }
 

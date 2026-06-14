@@ -12,3 +12,9 @@ class Assembly {
     }
 }
 
+class MethodInfo {
+    public string Name;
+    public System.Type DeclaringType;
+    public System.Type ReturnType;
+    public System.Type[] ParameterTypes;
+}

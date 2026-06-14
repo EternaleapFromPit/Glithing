@@ -1,0 +1,15 @@
+package System.Security.Cryptography;
+
+using System.IO;
+using System.Threading.Tasks;
+using System.Text;
+
+class HMACSHA512 {
+    public HMACSHA512(byte[] key) {}
+
+    Task<byte[]> ComputeHashAsync(MemoryStream stream) {
+        return new Task<byte[]> { Result = stream.Buffer };
+    }
+
+    void Dispose() {}
+}

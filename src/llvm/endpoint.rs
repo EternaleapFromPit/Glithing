@@ -786,5 +786,248 @@ impl LlvmEmitter {
         Ok(value)
     }
 
+    pub(super) fn emit_mediator_send(
+        &mut self,
+        mediator: &TypedExpr,
+        request: &TypedExpr,
+        response_ty: &IrType,
+    ) -> Result<LlValue, String> {
+        let mediator_value = self.emit_typed_expr(mediator)?;
+        let mediator_iface = match &mediator.ty {
+            IrType::Interface(name) => name.clone(),
+            _ => {
+                return Err("LLVM TIR backend: mediator dispatch expects an IMediator target".to_string())
+            }
+        };
+        let get_provider_symbol = self
+            .resolve_interface_method_symbol(&mediator_iface, "GetProvider", 0)
+            .ok_or_else(|| {
+                format!(
+                    "LLVM TIR backend: no provider accessor found for mediator interface '{mediator_iface}'"
+                )
+            })?;
+        let provider = self.tmp();
+        self.body.push_str(&format!(
+            "  {provider} = call ptr @{}(ptr {})\n",
+            sanitize(&get_provider_symbol),
+            mediator_value.value
+        ));
+
+        let request_name = object_type_name(&request.ty)
+            .or_else(|| match &request.ty {
+                IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {
+                    Some(name.as_str())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                format!(
+                    "LLVM TIR backend: mediator request '{:?}' has no object layout",
+                    request.ty
+                )
+            })?;
+
+        let response_name = match response_ty {
+            IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {
+                Some(name.as_str())
+            }
+            _ => None,
+        }
+        .unwrap_or("void");
+
+        let handler = self
+            .object_types
+            .values()
+            .find(|object| {
+                object.kind == TypeKind::Class
+                    && object.bases.iter().any(|base| {
+                        base.contains("IRequestHandler")
+                            && base.contains(request_name)
+                            && base.contains(response_name)
+                    })
+            })
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "LLVM TIR backend: no IRequestHandler<{request_name}, {response_name}> implementation found"
+                )
+            })?;
+
+        let handler_ptr = self.tmp();
+        let handler_size_ptr = self.tmp();
+        let handler_size = self.tmp();
+        self.body.push_str(&format!(
+            "  {handler_size_ptr} = getelementptr %{llvm_name}, ptr null, i32 1\n  {handler_size} = ptrtoint ptr {handler_size_ptr} to i64\n  {handler_ptr} = call ptr @glitch_calloc(i64 1, i64 {handler_size})\n",
+            llvm_name = llvm_object_name(&handler.name)
+        ));
+        let handler_rc_ptr = self.tmp();
+        let handler_drop_ptr = self.tmp();
+        self.body.push_str(&format!(
+            "  {handler_rc_ptr} = getelementptr inbounds %{llvm_name}, ptr {handler_ptr}, i32 0, i32 0\n  store i64 1, ptr {handler_rc_ptr}\n  {handler_drop_ptr} = getelementptr inbounds %{llvm_name}, ptr {handler_ptr}, i32 0, i32 1\n  store ptr @{}, ptr {handler_drop_ptr}\n",
+            destroy_symbol(&handler.name),
+            llvm_name = llvm_object_name(&handler.name)
+        ));
+
+        let mut ctor_args = vec![format!("ptr {handler_ptr}")];
+        for (index, dependency_ty) in handler.constructor_params.iter().enumerate() {
+            let dependency_name = self.resolve_endpoint_dependency_name(dependency_ty).ok_or_else(|| {
+                format!(
+                    "LLVM TIR backend: mediator dependency {dependency_ty:?} for '{}' has no resolved implementation",
+                    handler.name
+                )
+            })?;
+            let dependency_value = if base_type_name(&dependency_name) == "ConduitContext" {
+                let provider_call = self.tmp();
+                let service_name = self.string_global(&dependency_name);
+                let get_service_symbol = self
+                    .resolve_interface_method_symbol(
+                        "Microsoft.Extensions.DependencyInjection.IServiceProvider",
+                        "GetRequiredService",
+                        1,
+                    )
+                    .or_else(|| {
+                        self.resolve_interface_method_symbol(
+                            "IServiceProvider",
+                            "GetRequiredService",
+                            1,
+                        )
+                    })
+                    .ok_or_else(|| {
+                        "LLVM TIR backend: IServiceProvider.GetRequiredService(string) is not available"
+                            .to_string()
+                    })?;
+                self.body.push_str(&format!(
+                    "  {provider_call} = call ptr @{}(ptr {provider}, ptr {service_name})\n",
+                    sanitize(&get_service_symbol)
+                ));
+                provider_call
+            } else {
+                self.emit_endpoint_object_allocation(
+                    &dependency_name,
+                    &format!("mediator_dependency_{index}"),
+                )?
+            };
+            let _ = index;
+            ctor_args.push(format!("ptr {dependency_value}"));
+        }
+
+        if let Some(constructor) = &handler.constructor {
+            self.body.push_str(&format!(
+                "  call void @{}({})\n",
+                sanitize(constructor),
+                ctor_args.join(", ")
+            ));
+        }
+
+        let handle_symbol = self
+            .functions
+            .keys()
+            .find(|symbol| {
+                symbol.starts_with(&format!("{}_", sanitize(&handler.name)))
+                    && symbol.contains("_Handle")
+            })
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "LLVM TIR backend: no lowered Handle method found for mediator handler '{}'",
+                    handler.name
+                )
+            })?;
+
+        let request_value = self.emit_typed_expr(request)?;
+        let token = "null".to_string();
+        let result = self.tmp();
+        self.body.push_str(&format!(
+            "  {result} = call {} @{}(ptr {handler_ptr}, {} {}, ptr {token})\n",
+            llvm_ir_type(&IrType::Task(Box::new(response_ty.clone()))).as_ir(),
+            sanitize(&handle_symbol),
+            request_value.ty.as_ir(),
+            request_value.value
+        ));
+        Ok(LlValue {
+            value: result,
+            ty: llvm_ir_type(&IrType::Task(Box::new(response_ty.clone()))),
+        })
+    }
+
+    pub(super) fn emit_mapper_map(
+        &mut self,
+        mapper: &TypedExpr,
+        source: &TypedExpr,
+        dest_ty: &IrType,
+    ) -> Result<LlValue, String> {
+        let mapper_value = self.emit_typed_expr(mapper)?;
+        self.emit_temporary_drop(mapper, &mapper_value);
+        let source_value = self.emit_typed_expr(source)?;
+        let source_name = object_type_name(&source.ty)
+            .or_else(|| match &source.ty {
+                IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {
+                    Some(name.as_str())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                format!(
+                    "LLVM TIR backend: mapper source '{:?}' has no object layout",
+                    source.ty
+                )
+            })?;
+        let dest_name = object_type_name(dest_ty)
+            .or_else(|| match dest_ty {
+                IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {
+                    Some(name.as_str())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                format!("LLVM TIR backend: mapper destination '{dest_ty:?}' has no object layout")
+            })?;
+        let source_object = self
+            .object_types
+            .get(source_name)
+            .cloned()
+            .ok_or_else(|| {
+                format!("LLVM TIR backend: source type '{source_name}' has no LLVM layout")
+            })?;
+        let dest_object = self
+            .object_types
+            .get(dest_name)
+            .cloned()
+            .ok_or_else(|| {
+                format!("LLVM TIR backend: destination type '{dest_name}' has no LLVM layout")
+            })?;
+
+        let mapped = self.emit_new_object(dest_name, None, &[], &[])?;
+        for (field_name, dest_field) in &dest_object.fields {
+            let Some(source_field) = source_object.fields.get(field_name) else {
+                continue;
+            };
+            let source_expr = TypedExpr {
+                kind: TypedExprKind::Field {
+                    target: Box::new(source.clone()),
+                    name: field_name.clone(),
+                },
+                ty: source_field.ty.clone(),
+                ownership: Ownership::Owned,
+                drop_kind: source_field.drop_kind.clone(),
+            };
+            let field_value = self.emit_typed_expr(&source_expr)?;
+            let field_ty = llvm_ir_type(&dest_field.ty);
+            let casted = self.cast_value(field_value, &field_ty)?;
+            self.retain_for_store(&dest_field.ty, &source_expr, &casted.value);
+            let ptr = self.tmp();
+            self.body.push_str(&format!(
+                "  {ptr} = getelementptr inbounds %{llvm_name}, ptr {}, i32 0, i32 {}\n  store {} {}, ptr {ptr}\n",
+                mapped.value,
+                dest_field.index,
+                field_ty.as_ir(),
+                casted.value,
+                llvm_name = llvm_object_name(&dest_object.name)
+            ));
+        }
+        self.emit_temporary_drop(source, &source_value);
+        Ok(mapped)
+    }
+
 
 }

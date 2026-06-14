@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 class InMemoryDatabaseRoot {
+    public string Name;
 }
 
 class InMemoryOptionsExtension {
@@ -17,11 +18,19 @@ class InMemoryOptionsExtension {
 
 class InMemoryDbContextOptionsBuilderExtensions {
     DbContextOptionsBuilder UseInMemoryDatabase(string databaseName) {
-        return new DbContextOptionsBuilder();
+        var builder = new DbContextOptionsBuilder();
+        if (builder.Options != null) {
+            builder.Options.ConnectionString = "inmemory:" + databaseName;
+        }
+        return builder;
     }
 
     DbContextOptionsBuilder UseInMemoryDatabase(string databaseName, InMemoryDatabaseRoot databaseRoot) {
-        return new DbContextOptionsBuilder();
+        var builder = new DbContextOptionsBuilder();
+        if (builder.Options != null) {
+            builder.Options.ConnectionString = "inmemory:" + databaseName;
+        }
+        return builder;
     }
 }
 

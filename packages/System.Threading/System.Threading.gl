@@ -1,0 +1,9 @@
+package System.Threading;
+
+struct CancellationToken {
+    static CancellationToken None {
+        get {
+            return new CancellationToken();
+        }
+    }
+}

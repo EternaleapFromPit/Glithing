@@ -979,6 +979,79 @@ fn compiles_system_text_json_package_helpers() {
 }
 
 #[test]
+fn compiles_system_text_encoding_getbytes() {
+    let source = r#"
+            using System.Text;
+
+            fn main() {
+                Encoding utf8 = Encoding.UTF8;
+                byte[] bytes = utf8.GetBytes("abc");
+                print(bytes.Length);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("Encoding.GetBytes should compile");
+
+    assert!(!llvm_ir.is_empty());
+}
+
+#[test]
+fn compiles_system_parse_and_timespan_helpers() {
+    let source = r#"
+            using System;
+
+            fn main() {
+                int number = int.Parse("42");
+                int parsed = 0;
+                bool ok = int.TryParse("7", out parsed);
+                DateTime value = DateTime.Parse("90");
+                TimeSpan span = TimeSpan.FromMinutes(15.5);
+                print(number);
+                print(parsed);
+                print(ok);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("parse and timespan helpers should compile");
+
+    assert!(!llvm_ir.is_empty());
+}
+
+#[test]
+fn compiles_system_array_empty_and_bool_parse_surface() {
+    let source = r#"
+            using System;
+
+            fn main() {
+                string[] empty = Array.Empty<string>();
+                print(empty.Length);
+                print(bool.Parse("true"));
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("System.Array.Empty and bool.Parse should lower");
+
+    assert!(!llvm_ir.is_empty());
+}
+
+#[test]
+fn compiles_system_string_null_helpers() {
+    let source = r#"
+            using System;
+
+            fn main() {
+                print(string.IsNullOrEmpty(""));
+                print(string.IsNullOrWhiteSpace(""));
+                print(String.IsNullOrEmpty("glitch"));
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("System string null helpers should lower");
+
+    assert!(!llvm_ir.is_empty());
+}
+
+#[test]
 fn emits_llvm_native_nuget_package_assets() {
     let source = r#"
             using System.Text.Json;
@@ -1035,11 +1108,25 @@ fn compiles_system_io_file_operations() {
 
     let llvm_ir =
         compile_llvm_ir(source).expect("System.IO.File operations should compile to LLVM IR");
-    assert!(llvm_ir.contains("call void @WriteAllText("));
-    assert!(llvm_ir.contains("call ptr @ReadAllText("));
-
     assert!(llvm_ir.contains("System_IO_File_WriteAllText"));
     assert!(llvm_ir.contains("System_IO_File_ReadAllText"));
+}
+
+#[test]
+fn compiles_system_io_path_helpers() {
+    let source = r#"
+            using System.IO;
+
+            fn main() {
+                string path = "assets/images/logo.png";
+                print(Path.GetFileName(path));
+                print(Path.GetExtension(path));
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("System.IO.Path helpers should compile");
+
+    assert!(!llvm_ir.is_empty());
 }
 
 #[test]
@@ -1060,6 +1147,28 @@ fn compiles_collections_smoke() {
 
     assert!(llvm_ir.contains("%glitch.list = type"));
     assert!(llvm_ir.contains("%glitch.dict = type"));
+}
+
+#[test]
+fn compiles_hashset_package_surface() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            fn main() {
+                HashSet<string> values = new HashSet<string>();
+                values.Add("a");
+                values.Add("a");
+                values.Add("b");
+                print(values.Count);
+                print(values.Contains("a"));
+                values.Clear();
+                print(values.Count);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("HashSet package surface should compile");
+
+    assert!(llvm_ir.contains("HashSet"));
 }
 
 #[test]
@@ -1439,6 +1548,69 @@ fn lowers_aspnet_string_routes_and_rust_socket_host_to_llvm() {
 }
 
 #[test]
+fn compiles_aspnet_model_state_and_action_result_surface() {
+    let source = r#"
+            using Glitching.AspNetCore;
+
+            class DemoController : ControllerBase {
+                object Validate() {
+                    this.ModelState.AddModelError("name", "required");
+                    if (!this.ModelState.IsValid) {
+                        return this.NotFound();
+                    }
+                    return this.Ok("ok");
+                }
+            }
+
+            fn main() {
+                DemoController controller = new DemoController {};
+                controller.Validate();
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("model-state surface should lower");
+    assert!(llvm_ir.contains("AddModelError"));
+    assert!(llvm_ir.contains("NotFound"));
+    assert!(llvm_ir.contains("Ok"));
+}
+
+#[test]
+fn compiles_configuration_manager_and_model_builder_defaults() {
+    let source = r#"
+            using Glitching.AspNetCore;
+            using Microsoft.EntityFrameworkCore;
+
+            fn main() {
+                WebApplicationBuilder builder = CreateBuilder(new string[] { });
+                string name = builder.Configuration.GetValue<string>("name");
+                int port = builder.Configuration.GetValue<int>("port");
+                ModelBuilder model = new ModelBuilder();
+                object entity = model.Entity("Book");
+                print(name);
+                print(port);
+                print(entity != null);
+            }
+        "#;
+
+    compile_llvm_ir(source).expect("configuration and model builder defaults should lower");
+}
+
+#[test]
+fn compiles_efcore_savechangesasync_helper_to_task() {
+    let source = r#"
+            using Microsoft.EntityFrameworkCore;
+
+            fn main() {
+                Task<int> saved = SaveChangesAsync();
+                print(saved.Result);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("SaveChangesAsync helper should lower");
+    assert!(llvm_ir.contains("glitch_task_from_result_i32"));
+}
+
+#[test]
 fn lowers_attribute_controller_routes_to_owned_llvm_thunks() {
     let source = r#"
             using Glitching.AspNetCore;
@@ -1696,6 +1868,24 @@ fn emits_compatibility_warning_for_missing_members() {
 
     assert!(diagnostics.contains("warning GL3001"));
     assert!(diagnostics.contains("implement this member in a `.gl` package"));
+}
+
+#[test]
+fn emits_task_aware_compatibility_hint_for_missing_async_member() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            fn main() {
+                Task<int> value = ExternalFramework.LoadAsync();
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("compatibility warnings must not reject source");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3002"));
+    assert!(diagnostics.contains("Task.FromResult"));
 }
 
 #[test]
@@ -2312,6 +2502,39 @@ fn compiles_foreach_and_ienumerable_views() {
 }
 
 #[test]
+fn compiles_system_linq_ienumerable_surfaces() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Linq;
+
+            fn main() {
+                List<int> numbers = new List<int>();
+                numbers.Add(1);
+                numbers.Add(2);
+
+                IEnumerable<int> view = numbers;
+                print(Enumerable.Count(view));
+                print(Enumerable.Any(view));
+                print(Enumerable.First(view));
+
+                List<int> copy = Enumerable.ToList(view);
+                print(copy.Count);
+
+                int[] values = Enumerable.ToArray(view);
+                print(values.Length);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("Enumerable IEnumerable<T> surface should lower");
+    let bytecode =
+        compile_bytecode(source).expect("Enumerable IEnumerable<T> surface should emit bytecode");
+
+    assert!(llvm_ir.contains("%glitch.list"));
+    assert!(bytecode.contains("foreach_start"));
+    assert!(bytecode.contains("foreach_next"));
+}
+
+#[test]
 fn compiles_library_service_generic_mvc_shapes() {
     let source = r#"
             using System.Collections.Generic;
@@ -2543,6 +2766,76 @@ fn compiles_conduit_fixture_di_ef_and_mediatr_surface() {
 }
 
 #[test]
+fn compiles_typeof_marker_for_package_startup_helpers() {
+    let source = r#"
+            using AutoMapper;
+
+            class Program {
+            }
+
+            fn main() {
+                var cfg = new MapperConfigurationExpression();
+                cfg.AddMaps(typeof(Program));
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("typeof(Program) should lower for package markers");
+
+    assert!(!llvm_ir.is_empty());
+    assert!(llvm_ir.contains("AddMaps"));
+}
+
+#[test]
+fn compiles_typeof_reflection_surface_for_package_helpers() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Reflection;
+
+            class Book {
+                public string Title;
+                public ICollection<Book> Related;
+            }
+
+            fn main() {
+                var bookType = typeof(Book);
+                var properties = bookType.GetProperties();
+                var titleProperty = bookType.GetProperty("Title", BindingFlags.IgnoreCase | BindingFlags.Public | BindingFlags.Instance);
+                var compareToMethod = typeof(string).GetMethod("CompareTo", Type.EmptyTypes);
+                var collectionType = typeof(ICollection<>);
+            }
+        "#;
+
+    let llvm_ir =
+        compile_llvm_ir(source).expect("typeof reflection helpers should lower for package code");
+
+    assert!(!llvm_ir.is_empty());
+}
+
+#[test]
+fn resolves_bare_static_member_lookup_on_current_type() {
+    let source = r#"
+            class Demo {
+                public static int Answer() {
+                    return 42;
+                }
+
+                public static int Use() {
+                    return Answer;
+                }
+            }
+
+            fn main() {
+                print(Demo.Use());
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("bare static member lookup should lower");
+
+    assert!(llvm_ir.contains("Answer"));
+    assert!(llvm_ir.contains("Use"));
+}
+
+#[test]
 fn compiles_conduit_transaction_facade_surface() {
     let source = r#"
             using Microsoft.EntityFrameworkCore;
@@ -2695,6 +2988,33 @@ fn compiles_csharp_string_index_split_and_string_methods() {
 }
 
 #[test]
+fn synthesizes_generated_regex_partial_methods() {
+    let source = r#"
+            using System.Text.RegularExpressions;
+
+            public static partial class Slug {
+                public static string Clean(string input) {
+                    return InvalidCharsRegex().Replace(input, "");
+                }
+
+                [GeneratedRegex("[^a-z0-9\\s-]")]
+                private static partial Regex InvalidCharsRegex();
+            }
+
+            fn main() {
+                print(Slug.Clean("a!b?c"));
+            }
+        "#;
+
+    let output = compile_source_with_metadata(source).expect("generated regex should compile");
+    let diagnostics = output.diagnostics.join("\n");
+    let llvm_ir = compile_llvm_ir(source).expect("generated regex should lower to LLVM");
+
+    assert!(!diagnostics.contains("function 'InvalidCharsRegex' has no linked GL or LLVM implementation"));
+    assert!(llvm_ir.contains("InvalidCharsRegex"));
+}
+
+#[test]
 fn compiles_task_from_result_and_leak_report() {
     let source = r#"
             using System.Threading.Tasks;
@@ -2727,10 +3047,43 @@ fn compiles_task_when_all_and_completed_task_surface() {
             }
         "#;
 
-    let error = compile_llvm_ir(source)
-        .expect_err("Task.WhenAll and CompletedTask should fail on the LLVM path");
+    let llvm_ir = compile_llvm_ir(source).expect("Task.WhenAll and CompletedTask should compile on the LLVM path");
 
-    assert!(error.contains("field 'IsCompleted' target has no object layout"));
+    assert!(!llvm_ir.is_empty());
+}
+
+#[test]
+fn compiles_task_when_all_array_surface() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            fn main() {
+                Task first = Task.CompletedTask;
+                Task second = Task.CompletedTask;
+                Task[] tasks = new Task[] { first, second };
+                Task merged = Task.WhenAll(tasks);
+                print(merged.IsCompleted);
+            }
+        "#;
+
+    compile_llvm_ir(source).expect("Task[] WhenAll should lower");
+}
+
+#[test]
+fn compiles_task_when_all_generic_array_surface() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            fn main() {
+                Task<int> first = Task.FromResult(1);
+                Task<int> second = Task.FromResult(2);
+                Task<int>[] tasks = new Task<int>[] { first, second };
+                Task merged = Task.WhenAll(tasks);
+                print(merged.IsCompleted);
+            }
+        "#;
+
+    compile_llvm_ir(source).expect("Task<T>[] WhenAll should lower");
 }
 
 #[test]
@@ -2796,7 +3149,8 @@ fn package_linker_reports_missing_package_sources() {
     let error = compile_source_with_options(source, false, false)
         .expect_err("missing package import should fail immediately");
 
-    assert!(error.contains("package import 'Missing.Package' could not be resolved"));
+    assert!(error.contains("package import 'Missing.Package' at line 2 could not be resolved"));
+    assert!(error.contains("at line 2"));
 }
 
 #[test]
@@ -2830,6 +3184,27 @@ fn system_xunit_package_no_longer_emits_native_block_warning() {
     let diagnostics = output.diagnostics.join("\n");
 
     assert!(!diagnostics.contains("warning GL2004"));
+}
+
+#[test]
+fn auto_discovers_csharp_xunit_fact_methods_and_runs_them() {
+    let source = r#"
+            using Xunit;
+
+            public class SampleTests {
+                [Fact]
+                public void Expect_It_Works() {
+                    Assert.True(true);
+                }
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("C# xUnit [Fact] methods should auto-register and compile");
+    let llvm_ir = output.llvm_ir().expect("LLVM IR should be present");
+
+    assert!(llvm_ir.contains("XUnit_AddTest"));
+    assert!(llvm_ir.contains("RunAllTests"));
 }
 
 #[test]
@@ -2938,6 +3313,27 @@ fn borrow_checker_allows_use_after_returning_branch_move() {
 
     compile_source_with_options(source, true, false)
         .expect("returning branch should not poison join state");
+}
+
+#[test]
+fn borrow_checker_allows_use_after_returning_switch_arm_move() {
+    let source = r#"
+            fn main() {
+                string name = "Ada";
+                switch (1) {
+                    case 0: {
+                        string moved = move name;
+                        return;
+                    }
+                    default: {
+                    }
+                }
+                print(name);
+            }
+        "#;
+
+    compile_source_with_options(source, true, false)
+        .expect("returning switch arm should not poison join state");
 }
 
 #[test]

@@ -1,0 +1,115 @@
+package System.Text.RegularExpressions;
+
+class GeneratedRegexAttribute {
+    public string Pattern;
+
+    public GeneratedRegexAttribute(string pattern) {
+        this.Pattern = pattern;
+    }
+}
+
+class Regex {
+    public string Pattern;
+
+    public Regex() {
+        this.Pattern = "";
+    }
+
+    public Regex(string pattern) {
+        this.Pattern = pattern;
+    }
+
+    string Replace(string input, string replacement) {
+        return Regex_Replace_Native(this.Pattern, input, replacement);
+    }
+}
+
+native "
+#include <ctype.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int glitch_regex_is_whitespace(unsigned char value) {
+    return value == ' ' || value == '\\t' || value == '\\n' || value == '\\r' || value == '\\f' || value == '\\v';
+}
+
+static int glitch_regex_is_slug_char(unsigned char value) {
+    return (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') || value == ' ' || value == '-';
+}
+
+static char *glitch_regex_dup(const char *value) {
+    size_t len = value ? strlen(value) : 0;
+    char *result = (char *)malloc(len + 1);
+    if (!result) { abort(); }
+    if (len > 0) {
+        memcpy(result, value, len);
+    }
+    result[len] = '\\0';
+    return result;
+}
+
+static char *Regex_Replace_Native(const char *pattern, const char *input, const char *replacement) {
+    if (!input) {
+        return NULL;
+    }
+    if (!pattern) {
+        return glitch_regex_dup(input);
+    }
+
+    const char *effective = replacement ? replacement : "";
+    size_t len = strlen(input);
+
+    if (strcmp(pattern, \"[^a-z0-9\\\\s-]\") == 0) {
+        char *result = (char *)malloc(len + 1);
+        if (!result) { abort(); }
+        size_t write = 0;
+        for (size_t i = 0; i < len; i++) {
+            unsigned char ch = (unsigned char)input[i];
+            if (glitch_regex_is_slug_char(ch)) {
+                result[write++] = (char)ch;
+            }
+        }
+        result[write] = '\\0';
+        return result;
+    }
+
+    if (strcmp(pattern, \"\\\\s+\") == 0) {
+        char *result = (char *)malloc(len + 1);
+        if (!result) { abort(); }
+        size_t write = 0;
+        int in_whitespace = 0;
+        for (size_t i = 0; i < len; i++) {
+            unsigned char ch = (unsigned char)input[i];
+            if (glitch_regex_is_whitespace(ch)) {
+                if (!in_whitespace) {
+                    result[write++] = effective[0] ? effective[0] : ' ';
+                    in_whitespace = 1;
+                }
+            } else {
+                result[write++] = (char)ch;
+                in_whitespace = 0;
+            }
+        }
+        result[write] = '\\0';
+        return result;
+    }
+
+    if (strcmp(pattern, \"\\\\s\") == 0) {
+        char *result = (char *)malloc(len + 1);
+        if (!result) { abort(); }
+        size_t write = 0;
+        for (size_t i = 0; i < len; i++) {
+            unsigned char ch = (unsigned char)input[i];
+            if (glitch_regex_is_whitespace(ch)) {
+                result[write++] = effective[0] ? effective[0] : '-';
+            } else {
+                result[write++] = (char)ch;
+            }
+        }
+        result[write] = '\\0';
+        return result;
+    }
+
+    return glitch_regex_dup(input);
+}
+";

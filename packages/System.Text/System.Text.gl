@@ -1,0 +1,22 @@
+package System.Text;
+
+class Encoding {
+    static Encoding UTF8 {
+        get {
+            return new Encoding();
+        }
+    }
+
+    byte[] GetBytes(string text) {
+        if (text == null) {
+            return new byte[0];
+        }
+        byte[] bytes = new byte[text.Length];
+        int i = 0;
+        while (i < text.Length) {
+            bytes[i] = text[i];
+            i = i + 1;
+        }
+        return bytes;
+    }
+}

@@ -105,3 +105,40 @@ class Dictionary<K, V> : IDictionary<K, V> {
         return null;
     }
 }
+
+class HashSet<T> : IEnumerable<T>, IReadOnlyCollection<T> {
+    public List<T> Values;
+
+    HashSet() {
+        this.Values = new List<T>();
+    }
+
+    HashSet(IEnumerable<T> values) {
+        this.Values = new List<T>();
+        foreach (T value in values) {
+            if (!this.Values.Contains(value)) {
+                this.Values.Add(value);
+            }
+        }
+    }
+
+    void Add(T item) {
+        if (!this.Values.Contains(item)) {
+            this.Values.Add(item);
+        }
+    }
+
+    bool Contains(T item) {
+        return this.Values.Contains(item);
+    }
+
+    void Clear() {
+        this.Values.Clear();
+    }
+
+    int Count { get { return this.Values.Count; } }
+
+    IEnumerator<T> GetEnumerator() {
+        return this.Values.GetEnumerator();
+    }
+}

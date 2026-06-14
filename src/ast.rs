@@ -77,6 +77,7 @@ pub(crate) struct Function {
     pub(crate) attributes: Vec<Attribute>,
     pub(crate) is_async: bool,
     pub(crate) is_extern: bool,
+    pub(crate) is_static: bool,
     pub(crate) is_extension: bool,
     pub(crate) name: String,
     pub(crate) generic_params: Vec<GenericParam>,

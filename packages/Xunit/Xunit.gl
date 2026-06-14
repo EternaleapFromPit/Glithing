@@ -1,11 +1,10 @@
-// System.XUnit.gl - Core API for xUnit integration in Glang
+// Xunit.gl - C#-style xUnit compatibility package
 
-package System.XUnit;
+package Xunit;
 
 using System;
 using System.Collections.Generic;
 
-// Attribute markers (no runtime behavior; used for discovery)
 public class FactAttribute {}
 public class TheoryAttribute {}
 public class InlineDataAttribute {
@@ -13,7 +12,6 @@ public class InlineDataAttribute {
     public InlineDataAttribute(params object[] data) { Data = data; }
 }
 
-// Simple Assert helpers
 public static class Assert {
     public static void True(bool condition) {
         if (!condition) throw new AssertionFailedException("");
@@ -71,22 +69,8 @@ public class AssertionFailedException : Exception {
     public AssertionFailedException(string message) : base(message) {}
 }
 
-// Test case representation used by the native runner
-public class TestCase {
-    public string Name;
-    public string ClassName;
-    public Func<void> TestMethod;
-}
-
 extern void XUnit_AddTest(string className, string testName, Func<void> func);
 extern void XUnit_RunAllTests();
 
-// Public wrapper for registration
 public static void Register(string className, string testName, Func<void> test) => XUnit_AddTest(className, testName, test);
-
-// Macro to simplify registration of a fact method
-macro XUNIT_FACT(className, methodName) => XUnit_AddTest(#className, #methodName, () => new className().methodName());
-macro XUNIT_THEORY(className, methodName) => ;
-macro XUNIT_INLINE_DATA(className, methodName, val) => XUnit_AddTest(#className, #methodName, () => new className().methodName(val));
-
 public static void RunAllTests() => XUnit_RunAllTests();

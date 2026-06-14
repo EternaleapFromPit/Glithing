@@ -273,11 +273,11 @@ class ConfigurationManager {
     }
 
     T Get<T>() {
-        return null;
+        return default(T);
     }
 
     T GetValue<T>(string name) {
-        return null;
+        return default(T);
     }
 }
 
@@ -406,6 +406,10 @@ class CorsPolicyBuilder {
     }
 }
 
+delegate void CorsConfigure(CorsPolicyBuilder options);
+delegate void SwaggerOptionsConfigure(SwaggerOptions options);
+delegate void SwaggerUiOptionsConfigure(SwaggerUiOptions options);
+
 class SwaggerOptions {
     public string RouteTemplate;
 }
@@ -484,7 +488,7 @@ class WebApplication {
         this.Use("cors");
     }
 
-    void UseCors(CorsPolicyBuilder configure) {
+    void UseCors(CorsConfigure configure) {
         this.Use("cors");
     }
     
@@ -495,9 +499,8 @@ class WebApplication {
     void UseMiddleware<T>() {}
     void UseMiddleware<T>(object param) {}
     void UseSwagger() {}
-    void UseSwagger(SwaggerOptions configure) {}
-    void UseSwaggerUI(object configure) {}
-    void UseSwaggerUI(SwaggerUiOptions configure) {}
+    void UseSwagger(SwaggerOptionsConfigure configure) {}
+    void UseSwaggerUI(SwaggerUiOptionsConfigure configure) {}
     void UseSwaggerUI() {}
     void UseStaticFiles(object options) {}
     void UseStaticFiles() {}
@@ -627,13 +630,32 @@ class ModelError {
 
 class ModelStateEntry {
     public List<ModelError> Errors;
+
+    public ModelStateEntry() {
+        this.Errors = new List<ModelError>();
+    }
 }
 
 class ModelStateDictionary {
     public bool IsValid;
-    void AddModelError(string key, string message) {}
+    public Dictionary<string, ModelStateEntry> Entries;
+
+    public ModelStateDictionary() {
+        this.IsValid = true;
+        this.Entries = new Dictionary<string, ModelStateEntry>();
+    }
+
+    void AddModelError(string key, string message) {
+        this.IsValid = false;
+        ModelStateEntry entry = null;
+        if (!this.Entries.TryGetValue(key, out entry)) {
+            entry = new ModelStateEntry();
+            this.Entries.Add(key, entry);
+        }
+        entry.Errors.Add(new ModelError { ErrorMessage = message });
+    }
     Dictionary<string, ModelStateEntry> ToDictionary() {
-        return new Dictionary<string, ModelStateEntry>();
+        return this.Entries;
     }
 }
 
@@ -646,8 +668,8 @@ class ControllerBase {
     }
 
     object Ok(object value) { return value; }
-    object Ok() { return null; }
+    object Ok() { return ""; }
     object BadRequest(object error) { return error; }
-    object NotFound() { return null; }
+    object NotFound() { return "Not Found"; }
     object StatusCode(int code, object value) { return value; }
 }

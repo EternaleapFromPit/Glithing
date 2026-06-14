@@ -4,35 +4,154 @@ package System.Linq;
 // Delegate-based sequence operators are intentionally left out for now.
 
 public static class Enumerable {
-    public static int Count<TSource>(IEnumerable<TSource> source) {
+    public static int Count<TSource>(List<TSource> source) {
+        return source.Count;
+    }
+
+    public static int Count<TSource>(List<TSource> source, Func<TSource, bool> predicate) {
         int c = 0;
-        var enumerator = source.GetEnumerator();
-        while (enumerator.MoveNext()) c++;
+        int i = 0;
+        while (i < source.Count) {
+            var item = source[i];
+            if (predicate(item)) {
+                c = c + 1;
+            }
+            i = i + 1;
+        }
         return c;
     }
 
+    public static List<TSource> Where<TSource>(List<TSource> source, Func<TSource, bool> predicate) {
+        var list = new List<TSource>();
+        int i = 0;
+        while (i < source.Count) {
+            var item = source[i];
+            if (predicate(item)) {
+                list.Add(item);
+            }
+            i = i + 1;
+        }
+        return list;
+    }
+
+    public static List<TResult> Select<TSource, TResult>(
+        List<TSource> source,
+        Func<TSource, TResult> selector
+    ) {
+        var list = new List<TResult>();
+        int i = 0;
+        while (i < source.Count) {
+            var item = source[i];
+            list.Add(selector(item));
+            i = i + 1;
+        }
+        return list;
+    }
+
+    public static bool Any<TSource>(List<TSource> source) {
+        return source.Count > 0;
+    }
+
+    public static bool Any<TSource>(List<TSource> source, Func<TSource, bool> predicate) {
+        int i = 0;
+        while (i < source.Count) {
+            var item = source[i];
+            if (predicate(item)) {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    public static TSource First<TSource>(List<TSource> source) {
+        if (source.Count > 0) {
+            return source[0];
+        }
+        throw new InvalidOperationException("Sequence contains no elements");
+    }
+
+    public static TSource First<TSource>(List<TSource> source, Func<TSource, bool> predicate) {
+        int i = 0;
+        while (i < source.Count) {
+            var item = source[i];
+            if (predicate(item)) {
+                return item;
+            }
+            i = i + 1;
+        }
+        throw new InvalidOperationException("Sequence contains no matching elements");
+    }
+
+    public static TSource FirstOrDefault<TSource>(List<TSource> source) {
+        if (source.Count > 0) {
+            return source[0];
+        }
+        return default(TSource);
+    }
+
+    public static TSource FirstOrDefault<TSource>(
+        List<TSource> source,
+        Func<TSource, bool> predicate
+    ) {
+        int i = 0;
+        while (i < source.Count) {
+            var item = source[i];
+            if (predicate(item)) {
+                return item;
+            }
+            i = i + 1;
+        }
+        return default(TSource);
+    }
+
+    public static List<TSource> ToList<TSource>(List<TSource> source) {
+        var list = new List<TSource>();
+        int i = 0;
+        while (i < source.Count) {
+            list.Add(source[i]);
+            i = i + 1;
+        }
+        return list;
+    }
+
+    public static TSource[] ToArray<TSource>(List<TSource> source) {
+        return ToList(source).ToArray();
+    }
+
+    public static int Count<TSource>(IEnumerable<TSource> source) {
+        int count = 0;
+        foreach (TSource value in source) {
+            count = count + 1;
+        }
+        return count;
+    }
+
     public static TSource First<TSource>(IEnumerable<TSource> source) {
-        var enumerator = source.GetEnumerator();
-        if (enumerator.MoveNext()) return enumerator.Current;
+        foreach (TSource value in source) {
+            return value;
+        }
         throw new InvalidOperationException("Sequence contains no elements");
     }
 
     public static TSource FirstOrDefault<TSource>(IEnumerable<TSource> source) {
-        var enumerator = source.GetEnumerator();
-        if (enumerator.MoveNext()) return enumerator.Current;
+        foreach (TSource value in source) {
+            return value;
+        }
         return default(TSource);
     }
 
     public static bool Any<TSource>(IEnumerable<TSource> source) {
-        var enumerator = source.GetEnumerator();
-        return enumerator.MoveNext();
+        foreach (TSource value in source) {
+            return true;
+        }
+        return false;
     }
 
     public static List<TSource> ToList<TSource>(IEnumerable<TSource> source) {
         var list = new List<TSource>();
-        var enumerator = source.GetEnumerator();
-        while (enumerator.MoveNext()) {
-            list.Add(enumerator.Current);
+        foreach (TSource value in source) {
+            list.Add(value);
         }
         return list;
     }

@@ -1,6 +1,8 @@
 package MediatR;
 
+using Microsoft.Extensions.DependencyInjection;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 
 interface IRequest {
@@ -9,16 +11,37 @@ interface IRequest {
 interface IRequest<TResponse> {
 }
 
+delegate Task<TResponse> RequestHandlerDelegate<TResponse>();
+delegate Task RequestHandlerDelegate();
+
+interface IRequestHandler<TRequest> {
+    Task Handle(TRequest request, CancellationToken cancellationToken);
+}
+
+interface IRequestHandler<TRequest, TResponse> {
+    Task<TResponse> Handle(TRequest request, CancellationToken cancellationToken);
+}
+
 interface IPipelineBehavior<TRequest, TResponse> {
-    TResponse Handle(TRequest request);
 }
 
 interface IMediator {
+    IServiceProvider GetProvider();
     Task<TResponse> Send<TResponse>(IRequest<TResponse> request);
     Task Send(IRequest request);
 }
 
 class Mediator : IMediator {
+    public IServiceProvider Provider;
+
+    public Mediator(IServiceProvider provider) {
+        this.Provider = provider;
+    }
+
+    IServiceProvider GetProvider() {
+        return this.Provider;
+    }
+
     Task<TResponse> Send<TResponse>(IRequest<TResponse> request) {
         return new Task<TResponse>();
     }

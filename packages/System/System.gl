@@ -1,6 +1,7 @@
 package System;
 
 using System.Collections.Generic;
+using System.Reflection;
 
 class AppContext {
     public static string BaseDirectory = ".";
@@ -13,6 +14,77 @@ class Uri {
 class GC {
     static void SuppressFinalize(object obj) {}
 }
+
+class Buffer {
+    static void BlockCopy(byte[] src, int srcOffset, byte[] dst, int dstOffset, int count) {
+        int i = 0;
+        while (i < count) {
+            dst[dstOffset + i] = src[srcOffset + i];
+            i = i + 1;
+        }
+    }
+}
+
+native "
+#include <ctype.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int System_Int32_Parse_Native(const char *value) {
+    if (!value) {
+        return 0;
+    }
+    char *end = NULL;
+    long parsed = strtol(value, &end, 10);
+    while (end && *end && isspace((unsigned char)*end)) {
+        end++;
+    }
+    if (!end || *end != '\\0') {
+        return 0;
+    }
+    return (int)parsed;
+}
+
+static int System_Int32_TryParse_Native(const char *value, int *result) {
+    if (!result) {
+        return 0;
+    }
+    *result = 0;
+    if (!value) {
+        return 0;
+    }
+    char *end = NULL;
+    long parsed = strtol(value, &end, 10);
+    if (end == value) {
+        return 0;
+    }
+    while (end && *end && isspace((unsigned char)*end)) {
+        end++;
+    }
+    if (!end || *end != '\\0') {
+        return 0;
+    }
+    *result = (int)parsed;
+    return 1;
+}
+
+static double System_TimeSpan_FromMinutes_Native(double minutes) {
+    return minutes;
+}
+
+static double System_DateTime_Parse_TotalMinutes_Native(const char *value) {
+    if (!value) {
+        return 0.0;
+    }
+    char *end = NULL;
+    double hours = strtod(value, &end);
+    if (end && *end == ':') {
+        double mins = strtod(end + 1, NULL);
+        return hours * 60.0 + mins;
+    }
+    return hours;
+}
+";
 
 class Exception {
     public string Message;
@@ -51,7 +123,9 @@ class DateTime {
         }
     }
     
-    static DateTime Parse(string s) { return null; }
+    static DateTime Parse(string s) {
+        return new DateTime();
+    }
 }
 
 class DateTimeOffset {
@@ -66,7 +140,9 @@ class TimeSpan {
             return new TimeSpan(0, 0, 0, 0);
         }
     }
-    static TimeSpan FromMinutes(double minutes) { return null; }
+    static TimeSpan FromMinutes(double minutes) {
+        return new TimeSpan(0, 0, 0, 0);
+    }
     public TimeSpan(int h, int m, int s, int ms) {}
 }
 
@@ -76,15 +152,57 @@ class Enum {
     }
 }
 
+enum StringComparison {
+    Ordinal = 0,
+    OrdinalIgnoreCase = 1
+}
+
 class Type {
-    public static List<Type> EmptyTypes;
+    public static Type[] EmptyTypes;
     public bool IsGenericType;
     public string FullName;
+    public string GenericTypeDefinitionName;
+    public Type[] GenericArguments;
+    public PropertyInfo[] Properties;
     
-    Type GetGenericTypeDefinition() { return null; }
-    Type[] GetGenericArguments() { return null; }
-    object GetProperty(string name, object flags) { return null; }
-    object[] GetProperties() { return null; }
+    Type GetGenericTypeDefinition() {
+        Type definition = new Type();
+        definition.FullName = this.GenericTypeDefinitionName;
+        definition.GenericTypeDefinitionName = this.GenericTypeDefinitionName;
+        definition.IsGenericType = this.IsGenericType;
+        definition.GenericArguments = default(Type[]);
+        definition.Properties = default(PropertyInfo[]);
+        return definition;
+    }
+
+    Type[] GetGenericArguments() {
+        return this.GenericArguments;
+    }
+
+    MethodInfo GetMethod(string name, Type[] types) {
+        MethodInfo method = new MethodInfo();
+        method.Name = name;
+        return method;
+    }
+
+    PropertyInfo GetProperty(string name, object flags) {
+        if (this.Properties == null) {
+            return null;
+        }
+        int i = 0;
+        while (i < this.Properties.Length) {
+            var property = this.Properties[i];
+            if (property != null && property.Name == name) {
+                return property;
+            }
+            i = i + 1;
+        }
+        return null;
+    }
+
+    PropertyInfo[] GetProperties() {
+        return this.Properties;
+    }
 }
 
 class Array {
@@ -99,32 +217,57 @@ class PropertyInfo {
 }
 
 class string {
-    static bool IsNullOrEmpty(string value) { return false; }
-    static bool IsNullOrWhiteSpace(string value) { return false; }
+    static bool IsNullOrEmpty(string value) {
+        return value == null || value.Length == 0;
+    }
+    static bool IsNullOrWhiteSpace(string value) {
+        return value == null || value.Length == 0;
+    }
     string ToLower() { return this; }
+    string ToLowerInvariant() { return this; }
     string Substring(int start) { return this; }
     string[] Split(string separator) { return null; }
     string Replace(string old, string newStr) { return this; }
+    string Trim() { return this; }
+    bool StartsWith(string value, StringComparison comparison) { return false; }
+    bool Equals(string value, StringComparison comparison) { return false; }
 }
 
 class String {
-    static bool IsNullOrEmpty(string value) { return false; }
-    static bool IsNullOrWhiteSpace(string value) { return false; }
+    static bool IsNullOrEmpty(string value) {
+        return value == null || value.Length == 0;
+    }
+    static bool IsNullOrWhiteSpace(string value) {
+        return value == null || value.Length == 0;
+    }
     string ToLower() { return this; }
+    string ToLowerInvariant() { return this; }
     string Substring(int start) { return this; }
     string[] Split(string separator) { return null; }
     string Replace(string old, string newStr) { return this; }
+    string Trim() { return this; }
+    bool StartsWith(string value, StringComparison comparison) { return false; }
+    bool Equals(string value, StringComparison comparison) { return false; }
 }
 
 class bool {
-    static bool Parse(string value) { return false; }
+    static bool Parse(string value) {
+        if (value == "true") {
+            return true;
+        }
+        if (value == "false") {
+            return false;
+        }
+        throw new FormatException("Input string was not in a correct format.");
+    }
 }
 
 class int {
-    static int Parse(string value) { return 0; }
+    static int Parse(string value) {
+        return System_Int32_Parse_Native(value);
+    }
     static bool TryParse(string s, out int result) {
-        result = 0;
-        return false;
+        return System_Int32_TryParse_Native(s, out result);
     }
 }
 

@@ -1,0 +1,7 @@
+package Microsoft.EntityFrameworkCore.Storage;
+
+interface IDbContextTransaction {
+    void Commit();
+    void Rollback();
+    void Dispose();
+}

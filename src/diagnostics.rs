@@ -317,14 +317,12 @@ impl<'a> CompatibilityAnalyzer<'a> {
                             return;
                         }
                         if !self.symbols.contains(symbol) && !is_llvm_runtime_function(symbol) {
+                            let suggestion = missing_member_suggestion(name, &expr.ty);
                             self.emit(
                                 "GL3002",
                                 &format!("{name}("),
                                 format!("function '{name}' has no linked GL or LLVM implementation"),
-                                format!(
-                                    "add a package function with the same signature, for example `{}`",
-                                    framework_stub(name, &expr.ty)
-                                ),
+                                suggestion,
                             );
                         }
                     }
@@ -368,10 +366,7 @@ impl<'a> CompatibilityAnalyzer<'a> {
                                     "member '{name}' on {:?} has no linked implementation; LLVM emits a typed default",
                                     target.ty
                                 ),
-                                format!(
-                                    "implement this member in a `.gl` package, for example `{}`",
-                                    framework_stub(name, &expr.ty)
-                                ),
+                                missing_member_suggestion(name, &expr.ty),
                             );
                         }
                         self.visit_expr(target, emit_llvm);
@@ -664,11 +659,43 @@ pub(crate) fn type_syntax_display(ty: &TypeSyntax) -> String {
 }
 
 fn framework_stub(name: &str, return_type: &tir::IrType) -> String {
+    if let tir::IrType::Task(inner) = return_type {
+        if matches!(inner.as_ref(), tir::IrType::Void) {
+            return format!("Task {name}(/* parameters */) {{ return Task.CompletedTask; }}");
+        }
+        return format!(
+            "Task<{}> {name}(/* parameters */) {{ return Task.FromResult(default({})); }}",
+            ir_type_display(inner),
+            ir_type_display(inner)
+        );
+    }
     format!(
         "{} {name}(/* parameters */) {{ return {}; }}",
         ir_type_display(return_type),
         typed_default_description(return_type)
     )
+}
+
+fn missing_member_suggestion(name: &str, return_type: &tir::IrType) -> String {
+    let rewrite = if name.ends_with("Async") {
+        let task_hint = match return_type {
+            tir::IrType::Task(inner) if !matches!(inner.as_ref(), tir::IrType::Void) => format!(
+                "return Task.FromResult(default({}))",
+                ir_type_display(inner)
+            ),
+            tir::IrType::Task(_) => "return Task.CompletedTask".to_string(),
+            _ => "return Task.CompletedTask or Task.FromResult(default(T))".to_string(),
+        };
+        format!(
+            "add a package function with the same signature; async-style members usually want `{task_hint}`"
+        )
+    } else {
+        format!(
+            "implement this member in a `.gl` package, for example `{}`",
+            framework_stub(name, return_type)
+        )
+    };
+    rewrite
 }
 
 fn ir_type_display(ty: &tir::IrType) -> String {

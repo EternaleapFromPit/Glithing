@@ -20,7 +20,7 @@ fn link_package_sources_inner(
     visited: &mut Vec<String>,
     linked: &mut String,
 ) -> Result<(), String> {
-    for package_id in source_using_packages(source) {
+    for (line, package_id) in source_using_packages_with_locations(source) {
         if source_declares_namespace(source, &package_id) {
             continue;
         }
@@ -29,7 +29,7 @@ fn link_package_sources_inner(
         }
         let Some(path) = package_source_path(&package_id) else {
             return Err(format!(
-                "package import '{package_id}' could not be resolved to packages/{package_id}/{package_id}.gl or packages/{}/{}.gl",
+                "package import '{package_id}' at line {line} could not be resolved to packages/{package_id}/{package_id}.gl or packages/{}/{}.gl",
                 package_id.replace('.', "/"),
                 package_id
             ));
@@ -60,9 +60,10 @@ fn source_file_marker(path: &str) -> String {
     format!("// __FILE_PATH__: {path}\n")
 }
 
-pub(crate) fn source_using_packages(source: &str) -> Vec<String> {
+fn source_using_packages_with_locations(source: &str) -> Vec<(usize, String)> {
     let mut packages = Vec::<String>::new();
-    for raw_line in source.lines() {
+    let mut with_locations = Vec::<(usize, String)>::new();
+    for (line_number, raw_line) in source.lines().enumerate() {
         let line = raw_line.trim();
         let rest = line
             .strip_prefix("using ")
@@ -77,17 +78,14 @@ pub(crate) fn source_using_packages(source: &str) -> Vec<String> {
         if package_id.is_empty() || packages.iter().any(|existing| existing == &package_id) {
             continue;
         }
-        packages.push(package_id);
+        packages.push(package_id.clone());
+        with_locations.push((line_number + 1, package_id));
     }
-    packages
+    with_locations
 }
 
 fn canonical_package_id(package_id: &str) -> String {
-    if package_id == "Microsoft.AspNetCore"
-        || package_id.starts_with("Microsoft.AspNetCore.")
-        || package_id == "Microsoft.Extensions.Hosting"
-        || package_id.starts_with("Microsoft.Extensions.Hosting.")
-    {
+    if package_id == "Microsoft.AspNetCore" || package_id == "Microsoft.Extensions.Hosting" {
         return "Glitching.AspNetCore".to_string();
     }
     package_id.to_string()
