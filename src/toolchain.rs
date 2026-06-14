@@ -1,30 +1,37 @@
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 pub(crate) fn emit_llvm_bitcode(llvm_ir: &str, output_path: &str) -> Result<(), String> {
     let ll_path = format!("{output_path}.ll.tmp");
     fs::write(&ll_path, llvm_ir).map_err(|e| format!("failed to write temporary LLVM IR: {e}"))?;
     let result = if let Some(llvm_as) = find_llvm_tool("llvm-as") {
-        Command::new(llvm_as)
-            .arg(&ll_path)
-            .arg("-o")
-            .arg(output_path)
-            .output()
-            .map_err(|e| format!("failed to run llvm-as: {e}"))
+        run_llvm_tool(
+            &llvm_as,
+            &[
+                OsString::from(&ll_path),
+                OsString::from("-o"),
+                OsString::from(output_path),
+            ],
+            "llvm-as",
+        )
     } else {
         let clang = require_llvm_tool("clang")?;
-        Command::new(clang)
-            .arg("-x")
-            .arg("ir")
-            .arg("-c")
-            .arg("-emit-llvm")
-            .arg(&ll_path)
-            .arg("-o")
-            .arg(output_path)
-            .output()
-            .map_err(|e| format!("failed to run clang for LLVM bitcode emission: {e}"))
+        run_llvm_tool(
+            &clang,
+            &[
+                OsString::from("-x"),
+                OsString::from("ir"),
+                OsString::from("-c"),
+                OsString::from("-emit-llvm"),
+                OsString::from(&ll_path),
+                OsString::from("-o"),
+                OsString::from(output_path),
+            ],
+            "clang for LLVM bitcode emission",
+        )
     };
     let _ = fs::remove_file(&ll_path);
     let output = result?;
@@ -40,47 +47,53 @@ pub(crate) fn emit_llvm_bitcode(llvm_ir: &str, output_path: &str) -> Result<(), 
 
 pub(crate) fn emit_native_executable(
     llvm_ir: &str,
-    native_sources: &[PathBuf],
     output_path: &str,
 ) -> Result<(), String> {
     let ll_path = format!("{output_path}.ll.tmp");
     fs::write(&ll_path, llvm_ir).map_err(|e| format!("failed to write temporary LLVM IR: {e}"))?;
     let clang = require_llvm_tool("clang")?;
-    let mut command = Command::new(clang);
-    command
-        .arg("-O3")
-        .arg("-x")
-        .arg("ir")
-        .arg(&ll_path);
-    if !native_sources.is_empty() {
-        command.arg("-x").arg("none");
-        for src in native_sources {
-            command.arg(src);
-        }
-    }
-    command.arg("-o").arg(output_path);
+    let mut args = vec![
+        OsString::from("-O3"),
+        OsString::from("-x"),
+        OsString::from("ir"),
+        OsString::from(&ll_path),
+    ];
+    args.push(OsString::from("-o"));
+    args.push(OsString::from(output_path));
     let links_rust_runtime = llvm_ir.contains("call void @GlitchRestHost_Run(")
         || llvm_ir.contains("System_IO_File_ReadAllText")
         || llvm_ir.contains("System_IO_File_WriteAllText");
     if links_rust_runtime {
-        command.arg("-x").arg("none").arg(find_runtime_library()?);
+        args.push(OsString::from("-x"));
+        args.push(OsString::from("none"));
+        args.push(find_runtime_library()?.into_os_string());
     }
     if cfg!(windows) {
-        command.arg("-lws2_32");
+        args.push(OsString::from("-lws2_32"));
         if links_rust_runtime {
             for library in ["kernel32", "ntdll", "userenv", "dbghelp"] {
-                command.arg(format!("-l{library}"));
+                args.push(OsString::from(format!("-l{library}")));
             }
-            command.arg("-Xlinker").arg("/defaultlib:msvcrt");
+            args.push(OsString::from("-Xlinker"));
+            args.push(OsString::from("/defaultlib:msvcrt"));
         }
+        let mut command = Command::new(&clang);
+        command.args(&args);
         configure_windows_linker_environment(&mut command)?;
         configure_windows_compiler_environment(&mut command)?;
+        let result = run_command_with_fallback(command, &clang, &args, "clang");
+        let _ = fs::remove_file(&ll_path);
+        let output = result?;
+        if output.status.success() {
+            return Ok(());
+        }
+        return Err(format!(
+            "clang failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
-    let result = command
-        .output()
-        .map_err(|e| format!("failed to run clang: {e}"));
     let _ = fs::remove_file(&ll_path);
-    let output = result?;
+    let output = run_llvm_tool(&clang, &args, "clang")?;
     if output.status.success() {
         Ok(())
     } else {
@@ -89,6 +102,72 @@ pub(crate) fn emit_native_executable(
             String::from_utf8_lossy(&output.stderr)
         ))
     }
+}
+
+fn run_llvm_tool(
+    tool: &Path,
+    args: &[OsString],
+    context: &str,
+) -> Result<Output, String> {
+    let mut command = Command::new(tool);
+    command.args(args);
+    match command.output() {
+        Ok(output) => Ok(output),
+        Err(err) if cfg!(windows) && err.raw_os_error() == Some(5) => {
+            run_windows_shell_fallback(tool, args, context)
+        }
+        Err(err) => Err(format!("failed to run {context}: {err}")),
+    }
+}
+
+fn run_command_with_fallback(
+    mut command: Command,
+    tool: &Path,
+    args: &[OsString],
+    context: &str,
+) -> Result<Output, String> {
+    match command.output() {
+        Ok(output) => Ok(output),
+        Err(err) if cfg!(windows) && err.raw_os_error() == Some(5) => {
+            run_windows_shell_fallback(tool, args, context)
+        }
+        Err(err) => Err(format!("failed to run {context}: {err}")),
+    }
+}
+
+fn run_windows_shell_fallback(
+    tool: &Path,
+    args: &[OsString],
+    context: &str,
+) -> Result<Output, String> {
+    let command_line = build_powershell_command(tool, args);
+    Command::new("powershell.exe")
+        .arg("-NoLogo")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(command_line)
+        .output()
+        .map_err(|err| format!("failed to run {context} via PowerShell fallback: {err}"))
+}
+
+fn build_powershell_command(tool: &Path, args: &[OsString]) -> String {
+    let mut script = String::from("& ");
+    script.push_str(&quote_powershell_single(tool));
+    for arg in args {
+        script.push(' ');
+        script.push_str(&quote_powershell_single_os(arg));
+    }
+    script
+}
+
+fn quote_powershell_single(value: &Path) -> String {
+    quote_powershell_single_os(value.as_os_str())
+}
+
+fn quote_powershell_single_os(value: &std::ffi::OsStr) -> String {
+    let text = value.to_string_lossy().replace('\'', "''");
+    format!("'{}'", text)
 }
 
 fn find_runtime_library() -> Result<PathBuf, String> {

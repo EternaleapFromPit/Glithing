@@ -622,29 +622,91 @@ fn compiles_named_and_default_arguments() {
 }
 
 #[test]
-fn compiles_extension_method_calls() {
+fn compiles_extension_method_calls_from_loaded_package() {
+    let source = r#"
+            using Test.Extensions;
+
+            fn main() {
+                Counter counter = new Counter { Value = 7 };
+                int score = counter.CountPlusOne();
+                print(score);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("extension methods from loaded packages should lower to LLVM");
+
+    assert!(llvm_ir.contains("CountPlusOne__g0__ext"));
+}
+
+#[test]
+fn rejects_extension_methods_without_this_receiver() {
     let source = r#"
             class Counter {
-                public int Value;
+                int Value;
             }
 
-            int ScorePlus(this Counter counter, int bonus = 1) {
-                return counter.Value + bonus;
+            extension Counter {
+                int CountPlusOne(Counter counter) {
+                    return counter.Value + 1;
+                }
+            }
+        "#;
+
+    let error = compile_source_with_options(source, true, false)
+        .expect_err("extension methods without an explicit receiver should fail");
+
+    assert!(
+        error.contains("extension methods must declare an explicit `this` receiver parameter")
+    );
+}
+
+#[test]
+fn resolves_instance_methods_before_extension_methods() {
+    let source = r#"
+            using Test.Extensions;
+
+            class Counter {
+                int Value;
+
+                int CountPlusOne() {
+                    return 100;
+                }
             }
 
             fn main() {
                 Counter counter = new Counter { Value = 7 };
-                int score = counter.ScorePlus(bonus: 5);
-                int defaulted = counter.ScorePlus();
+                int score = counter.CountPlusOne();
                 print(score);
-                print(defaulted);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("instance methods should still lower alongside imported extensions");
+
+    let instance_count = llvm_ir.matches("CountPlusOne__g0__overload(").count();
+    let extension_count = llvm_ir.matches("CountPlusOne__g0__ext__overload(").count();
+
+    assert!(instance_count > extension_count);
+}
+
+#[test]
+fn rejects_ambiguous_extension_method_calls_from_multiple_packages() {
+    let source = r#"
+            using Test.Extensions;
+            using Test.Extensions.Alt;
+
+            fn main() {
+                Counter counter = new Counter { Value = 7 };
+                int score = counter.CountPlusOne();
+                print(score);
             }
         "#;
 
     let error = compile_llvm_ir(source)
-        .expect_err("extension methods should fail on the LLVM path");
+        .expect_err("ambiguous extension methods should fail");
 
-    assert!(error.contains("expected 2 arguments but got 1"));
+    assert!(error.contains("ambiguous overload resolution"));
 }
 
 #[test]
@@ -705,10 +767,11 @@ fn compiles_expanded_params_scalar_arrays() {
             }
         "#;
 
-    let error = compile_llvm_ir(source)
-        .expect_err("expanded params arguments should fail on the LLVM path");
+    let llvm_ir =
+        compile_llvm_ir(source).expect("expanded params arguments should lower on the LLVM path");
 
-    assert!(error.contains("expected 1 arguments but got 3"));
+    assert!(llvm_ir.contains("define i32 @First("));
+    assert!(llvm_ir.contains("call ptr @glitch_calloc"));
 }
 
 #[test]
@@ -1981,7 +2044,7 @@ fn lowers_rc_int_layout_in_llvm() {
 }
 
 #[test]
-fn warns_on_lambda_without_executable_closure_lowering_in_c_path() {
+fn warns_on_lambda_without_executable_closure_lowering_in_non_llvm_path() {
     let source = r#"
             class Runner {
                 public Func<int, int> Worker;
@@ -2004,8 +2067,8 @@ fn warns_on_lambda_without_executable_closure_lowering_in_c_path() {
             }
         "#;
 
-    let output = compile_source_with_options(source, false, true)
-        .expect("lambda sample should compile with a compatibility warning on the C path");
+    let output = compile_source_with_options(source, false, false)
+        .expect("lambda sample should compile with a compatibility warning on the non-LLVM path");
     let diagnostics = output.diagnostics.join("\n");
 
     assert!(diagnostics.contains("warning GL3005"));
@@ -2427,6 +2490,177 @@ fn compiles_datetime_constructor_temporal_methods_in_framework_calls() {
 }
 
 #[test]
+fn compiles_conduit_fixture_di_ef_and_mediatr_surface() {
+    let source = r#"
+            using MediatR;
+            using Microsoft.EntityFrameworkCore;
+            using Microsoft.Extensions.DependencyInjection;
+            using System.Linq;
+            using System.Threading.Tasks;
+
+            class DemoContext : DbContext {
+                public DbSet<string> Things;
+
+                public DemoContext(DbContextOptions options) : base(options) {}
+            }
+
+            class DemoRequest : IRequest<string> {}
+
+            class DemoMediator : IMediator {
+                Task<string> Send<TResponse>(IRequest<TResponse> request) {
+                    return new Task<string>();
+                }
+
+                Task Send(IRequest request) {
+                    return new Task();
+                }
+            }
+
+            fn main() {
+                var services = new ServiceCollection();
+                services.AddLogging();
+
+                var builder = new DbContextOptionsBuilder();
+                builder.UseInMemoryDatabase("conduit.db");
+
+                DemoContext context = new DemoContext(builder.Options);
+                var provider = services.BuildServiceProvider();
+                var scopeFactory = provider.GetRequiredService<IServiceScopeFactory>();
+
+                var match = context.Things.Where(x => x == "demo").SingleOrDefaultAsync();
+                print(builder.Options.ConnectionString);
+                print(match);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("Conduit fixture DI/EF/MediatR surface should compile");
+    let llvm_ir = output.llvm_ir().expect("LLVM IR should be present");
+
+    assert!(!llvm_ir.is_empty());
+    assert!(llvm_ir.contains("UseInMemoryDatabase"));
+    assert!(llvm_ir.contains("SingleOrDefaultAsync"));
+}
+
+#[test]
+fn compiles_conduit_transaction_facade_surface() {
+    let source = r#"
+            using Microsoft.EntityFrameworkCore;
+            using System.Data;
+
+            class DemoContext : DbContext {
+                public DemoContext(DbContextOptions options) : base(options) {}
+
+                public void RunTransaction() {
+                    if (!this.Database.IsInMemory()) {
+                        var tx = this.Database.BeginTransaction(IsolationLevel.ReadCommitted);
+                        tx.Commit();
+                        tx.Dispose();
+                    }
+                }
+            }
+
+            fn main() {
+                var builder = new DbContextOptionsBuilder();
+                builder.UseInMemoryDatabase("conduit.db");
+                DemoContext context = new DemoContext(builder.Options);
+                context.Database.EnsureCreated();
+                context.RunTransaction();
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("Conduit EF transaction surface should compile");
+
+    assert!(!llvm_ir.is_empty());
+    assert!(llvm_ir.contains("EnsureCreated"));
+    assert!(llvm_ir.contains("BeginTransaction"));
+}
+
+#[test]
+fn compiles_swagger_openapi_startup_surface() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+            using Microsoft.OpenApi.Models;
+            using System;
+            using System.Collections.Generic;
+
+            fn main() {
+                var services = new ServiceCollection();
+                services.AddSwaggerGen(x =>
+                {
+                    x.AddSecurityDefinition(
+                        "Bearer",
+                        new OpenApiSecurityScheme
+                        {
+                            In = ParameterLocation.Header,
+                            Description = "Please insert JWT with Bearer into field",
+                            Name = "Authorization",
+                            Type = SecuritySchemeType.ApiKey,
+                            BearerFormat = "JWT",
+                        }
+                    );
+
+                    x.SupportNonNullableReferenceTypes();
+
+                    x.AddSecurityRequirement(
+                        new OpenApiSecurityRequirement
+                        {
+                            {
+                                new OpenApiSecurityScheme
+                                {
+                                    Reference = new OpenApiReference
+                                    {
+                                        Type = ReferenceType.SecurityScheme,
+                                        Id = "Bearer",
+                                    },
+                                },
+                                Array.Empty<string>()
+                            },
+                        }
+                    );
+
+                    x.SwaggerDoc("v1", new OpenApiInfo { Title = "RealWorld API", Version = "v1" });
+                    x.CustomSchemaIds(y => y.FullName);
+                    x.DocInclusionPredicate((_, _) => true);
+                    x.TagActionsBy(y => new List<string> { y.GroupName ?? throw new InvalidOperationException() });
+                });
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("Swagger/OpenAPI startup surface should compile");
+    let llvm_ir = output.llvm_ir().expect("LLVM IR should be present");
+
+    assert!(!llvm_ir.is_empty());
+}
+
+#[test]
+fn compiles_efcore_inmemory_provider_surface() {
+    let source = r#"
+            using Microsoft.EntityFrameworkCore;
+            using Microsoft.EntityFrameworkCore.InMemory;
+
+            class DemoContext : DbContext {
+                public DemoContext(DbContextOptions options) : base(options) {}
+            }
+
+            fn main() {
+                var root = new InMemoryDatabaseRoot();
+                var builder = new DbContextOptionsBuilder();
+                builder.UseInMemoryDatabase("demo");
+                builder.UseInMemoryDatabase("demo", root);
+
+                DemoContext context = new DemoContext(builder.Options);
+                context.Database.EnsureCreated();
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("EF Core InMemory provider surface should compile");
+
+    assert!(!llvm_ir.is_empty());
+}
+
+#[test]
 fn compiles_csharp_string_index_split_and_string_methods() {
     let source = r#"
             fn main() {
@@ -2547,6 +2781,55 @@ fn diagnostics_report_linked_file_path_for_marked_sources() {
 
     assert!(diagnostics.contains("packages/Foo/Foo.gl"));
     assert!(diagnostics.contains("warning GL3007"));
+}
+
+#[test]
+fn package_linker_reports_missing_package_sources() {
+    let source = r#"
+            using Missing.Package;
+
+            fn main() {
+                print(1);
+            }
+        "#;
+
+    let error = compile_source_with_options(source, false, false)
+        .expect_err("missing package import should fail immediately");
+
+    assert!(error.contains("package import 'Missing.Package' could not be resolved"));
+}
+
+#[test]
+fn system_xunit_package_does_not_pull_native_c_sources() {
+    let source = r#"
+            using System.XUnit;
+
+            fn main() {
+                print(1);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, false, false)
+        .expect("System.XUnit package should still link");
+
+    assert!(!output.diagnostics.iter().any(|d| d.contains("GL2004")));
+}
+
+#[test]
+fn system_xunit_package_no_longer_emits_native_block_warning() {
+    let source = r#"
+            using System.XUnit;
+
+            fn main() {
+                print(1);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, false, false)
+        .expect("System.XUnit package should compile without native-block warnings");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(!diagnostics.contains("warning GL2004"));
 }
 
 #[test]

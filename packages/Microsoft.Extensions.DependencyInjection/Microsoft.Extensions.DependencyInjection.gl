@@ -9,6 +9,9 @@ using AutoMapper;
 using FluentValidation;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.OpenApi.Models;
+using System.Collections.Generic;
+using System;
 
 interface IServiceProvider {
     T GetRequiredService<T>();
@@ -18,8 +21,29 @@ interface IServiceProvider {
 }
 
 class DbContextOptionsBuilder {
-    void UseSqlite(string connectionString) {}
-    void UseSqlServer(string connectionString) {}
+    public DbContextOptions Options;
+
+    public DbContextOptionsBuilder() {
+        this.Options = null;
+    }
+
+    void UseSqlite(string connectionString) {
+        if (this.Options != null) {
+            this.Options.ConnectionString = connectionString;
+        }
+    }
+
+    void UseSqlServer(string connectionString) {
+        if (this.Options != null) {
+            this.Options.ConnectionString = connectionString;
+        }
+    }
+
+    void UseInMemoryDatabase(string connectionString) {
+        if (this.Options != null) {
+            this.Options.ConnectionString = "inmemory";
+        }
+    }
 }
 
 class LocalizationOptions {
@@ -70,7 +94,26 @@ class MediatRServiceConfiguration {
     void RegisterServicesFromAssembly(object assembly) {}
 }
 
-class ServiceProvider : IServiceProvider {
+delegate void SwaggerGenConfigure(SwaggerGenOptions options);
+delegate string SwaggerSchemaIdSelector(System.Type type);
+delegate bool SwaggerDocInclusionPredicate(string documentName, SwaggerActionDescriptor action);
+delegate List<string> SwaggerTagActionsBySelector(SwaggerActionDescriptor action);
+
+class SwaggerActionDescriptor {
+    public string GroupName;
+}
+
+class SwaggerGenOptions {
+    void AddSecurityDefinition(string name, OpenApiSecurityScheme scheme) {}
+    void SupportNonNullableReferenceTypes() {}
+    void AddSecurityRequirement(OpenApiSecurityRequirement requirement) {}
+    void SwaggerDoc(string documentName, OpenApiInfo info) {}
+    void CustomSchemaIds(SwaggerSchemaIdSelector selector) {}
+    void DocInclusionPredicate(SwaggerDocInclusionPredicate predicate) {}
+    void TagActionsBy(SwaggerTagActionsBySelector selector) {}
+}
+
+class ServiceProvider : IServiceProvider, IServiceScopeFactory {
     public string Message;
 
     public ServiceProvider(string message) {
@@ -96,6 +139,10 @@ class ServiceProvider : IServiceProvider {
 
 interface IServiceScope {
     IServiceProvider ServiceProvider { get; }
+}
+
+interface IServiceScopeFactory {
+    IServiceScope CreateScope();
 }
 
 class ServiceScope : IServiceScope {
@@ -149,13 +196,14 @@ class IServiceCollection {
     void Configure(object configure) {}
     void AddApiVersioning(object configure) {}
     void AddVersionedApiExplorer(object configure) {}
-    void AddSwaggerGen(object configure) {}
+    void AddSwaggerGen(SwaggerGenConfigure configure) {}
     void AddMemoryCache() {}
     void AddHttpContextAccessor() {}
     void AddEndpointsApiExplorer() {}
     void AddLibraryApiVersionConfiguration(object version) {}
     void AddAndConfigureSwagger(object configuration, string path, bool enabled) {}
     void AddOptions() {}
+    void AddLogging() {}
     void AddMediatR(MediatRServiceConfiguration configure) {}
     void AddValidatorsFromAssemblyContaining<T>() {}
     void AddDbContext<T>(DbContextOptionsBuilder configure) {}
@@ -189,6 +237,8 @@ class ServiceCollection : IServiceCollection {
     public ServiceCollection() {
         this.Message = "";
     }
+
+    void AddSwaggerGen(SwaggerGenConfigure configure) {}
 }
 
 native "/*

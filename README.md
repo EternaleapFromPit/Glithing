@@ -53,7 +53,7 @@ Current implemented subset:
 - reference-counted dynamic LLVM strings with deterministic release
 - typed `try` / `catch` / `finally` exception propagation in LLVM
 - default CLI output builds a native executable when no explicit output is requested
-- NuGet package emission is temporarily disabled until the package format is redesigned around the LLVM-native pipeline
+- NuGet package emission produces LLVM-native assets and linked source metadata
 - source-level packages with `package Name;` and `native "C source";`
 
 `var x = value;` is accepted as a conversion-friendly spelling for `let mut x = value;`.
@@ -187,7 +187,7 @@ cargo run -- examples\llvm_simple.gl --emit-exe out.exe
 .\out.exe
 ```
 
-LLVM-only commands do not use the C emitter. On Windows, the compiler searches
+LLVM-only commands use the native LLVM toolchain. On Windows, the compiler searches
 `PATH`, `GLITCH_LLVM_BIN`, and `C:\Program Files\LLVM\bin`. It also discovers installed
 Visual Studio 2022 MSVC and Windows SDK libraries for native linking.
 
@@ -230,7 +230,7 @@ Build the standalone `System.Threading.Tasks` package from Glitching-lang source
 cargo run -- stdlib\System.Threading.Tasks.gl --emit-nuget System.Threading.Tasks.0.1.0.nupkg --package-version 0.1.0
 ```
 
-Package emission is currently disabled pending a redesign that packages LLVM-native assets or a build-time compiler hook.
+Package emission writes LLVM IR plus linked source metadata into the `.nupkg`.
 
 Expected rejected examples:
 

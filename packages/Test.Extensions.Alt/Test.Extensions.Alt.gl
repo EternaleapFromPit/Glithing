@@ -1,0 +1,11 @@
+package Test.Extensions.Alt;
+
+class Counter {
+    int Value;
+}
+
+extension Counter {
+    int CountPlusOne(this Counter counter) {
+        return counter.Value + 2;
+    }
+}

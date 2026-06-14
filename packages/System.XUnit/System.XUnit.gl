@@ -38,12 +38,6 @@ public class TestCase {
     public Func<void> TestMethod;
 }
 
-// Native runner entry point (implemented in Rust by the compiler runtime)
-native "
-void XUnit_AddTest(const char* class_name, const char* test_name, void (*fn)());
-void XUnit_RunAllTests();
-"
-
 extern void XUnit_AddTest(string className, string testName, Func<void> func);
 extern void XUnit_RunAllTests();
 

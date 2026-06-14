@@ -125,7 +125,8 @@ class MSSqlServerSink {
 
 // Extension method that integrates the sink into Serilog's fluent API.
 extension LoggerConfiguration {
-    LoggerConfiguration WriteToMSSqlServer(string connectionString,
+    LoggerConfiguration WriteToMSSqlServer(this LoggerConfiguration self,
+                                         string connectionString,
                                          MSSqlServerSinkOptions options,
                                          LogEventLevel restrictedToMinimumLevel,
                                          ColumnOptions columnOptions) {
@@ -136,7 +137,7 @@ extension LoggerConfiguration {
         var sink = new MSSqlServerSink(options);
         // Register the sink – in this minimal runtime we simply store it in a global list.
         SerilogGlobalSinkRegistry.RegisterSink(sink);
-        return this;
+        return self;
     }
 }
 

@@ -1,0 +1,50 @@
+package Microsoft.OpenApi.Models;
+
+enum ParameterLocation {
+    Header = 0,
+    Query = 1,
+    Path = 2,
+    Cookie = 3
+}
+
+enum SecuritySchemeType {
+    ApiKey = 0,
+    Http = 1,
+    OAuth2 = 2,
+    OpenIdConnect = 3
+}
+
+enum ReferenceType {
+    SecurityScheme = 0,
+    Schema = 1,
+    Parameter = 2,
+    RequestBody = 3,
+    Response = 4
+}
+
+class OpenApiReference {
+    public ReferenceType Type;
+    public string Id;
+}
+
+class OpenApiSecurityScheme {
+    public ParameterLocation In;
+    public string Description;
+    public string Name;
+    public SecuritySchemeType Type;
+    public string BearerFormat;
+    public OpenApiReference Reference;
+}
+
+class OpenApiSecurityRequirement {
+    void Add(OpenApiSecurityScheme scheme, string[] scopes) {}
+}
+
+class OpenApiInfo {
+    public string Title;
+    public string Version;
+}
+
+native "/*
+Microsoft.OpenApi.Models surface for Glitching.
+*/";

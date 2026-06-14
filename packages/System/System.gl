@@ -27,6 +27,16 @@ class ArgumentException : Exception {
     }
 }
 
+class InvalidOperationException : Exception {
+    public InvalidOperationException() {
+        this.Message = "";
+    }
+
+    public InvalidOperationException(string message) {
+        this.Message = message;
+    }
+}
+
 class FormatException : Exception {
     public FormatException(string message) {
         this.Message = message;
@@ -69,11 +79,18 @@ class Enum {
 class Type {
     public static List<Type> EmptyTypes;
     public bool IsGenericType;
+    public string FullName;
     
     Type GetGenericTypeDefinition() { return null; }
     Type[] GetGenericArguments() { return null; }
     object GetProperty(string name, object flags) { return null; }
     object[] GetProperties() { return null; }
+}
+
+class Array {
+    static T[] Empty<T>() {
+        return default(T[]);
+    }
 }
 
 class PropertyInfo {

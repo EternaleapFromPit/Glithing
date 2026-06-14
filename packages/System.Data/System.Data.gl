@@ -5,3 +5,14 @@ enum SqlDbType {
     Int = 1,
     // Add other needed members as required.
 }
+
+enum IsolationLevel {
+    ReadCommitted = 0,
+    Serializable = 1
+}
+
+interface IDbContextTransaction {
+    void Commit();
+    void Rollback();
+    void Dispose();
+}

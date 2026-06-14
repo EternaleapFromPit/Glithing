@@ -90,7 +90,7 @@ pub fn run_cli() -> Result<(), String> {
         emit_llvm_bitcode(compiled.llvm_ir()?, path)?;
     }
     if let Some(path) = &exe_output {
-        emit_native_executable(compiled.llvm_ir()?, &compiled.native_sources, path)?;
+        emit_native_executable(compiled.llvm_ir()?, path)?;
     }
     if let Some(path) = &leak_report_output {
         fs::write(&path, &compiled.leak_report)
@@ -110,7 +110,7 @@ pub fn run_cli() -> Result<(), String> {
         )?;
     }
     if let Some(path) = default_exe_output {
-        emit_native_executable(compiled.llvm_ir()?, &compiled.native_sources, path.to_string_lossy().as_ref())?;
+        emit_native_executable(compiled.llvm_ir()?, path.to_string_lossy().as_ref())?;
     }
     Ok(())
 }
@@ -215,7 +215,6 @@ struct CompileOutput {
     llvm_ir: Option<String>,
     leak_report: String,
     diagnostics: Vec<String>,
-    native_sources: Vec<PathBuf>,
     linked_source: String,
     #[allow(dead_code)]
     package_id: Option<String>,
@@ -257,13 +256,11 @@ fn compile_source_with_options(
     } else {
         None
     };
-    let native_sources = linker::find_package_native_sources(&linked_source);
     Ok(CompileOutput {
         bytecode,
         llvm_ir,
         leak_report,
         diagnostics,
-        native_sources,
         linked_source,
         package_id: program.package_id.clone(),
     })

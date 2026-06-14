@@ -27,6 +27,7 @@ pub(crate) struct EnumVariant {
 #[derive(Debug, Clone)]
 pub(crate) struct TypeDef {
     pub(crate) kind: TypeKind,
+    pub(crate) is_extension: bool,
     pub(crate) namespace: Vec<String>,
     pub(crate) attributes: Vec<Attribute>,
     pub(crate) name: String,
@@ -76,6 +77,7 @@ pub(crate) struct Function {
     pub(crate) attributes: Vec<Attribute>,
     pub(crate) is_async: bool,
     pub(crate) is_extern: bool,
+    pub(crate) is_extension: bool,
     pub(crate) name: String,
     pub(crate) generic_params: Vec<GenericParam>,
     pub(crate) params: Vec<Param>,

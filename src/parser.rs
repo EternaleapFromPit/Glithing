@@ -62,6 +62,7 @@ impl Parser {
                     attributes: Vec::new(),
                     is_async: false,
                     is_extern: false,
+                    is_extension: false,
                     name: "main".to_string(),
                     generic_params: Vec::new(),
                     params: vec![Param {
@@ -175,6 +176,11 @@ impl Parser {
                 }
             } else if self.current_ident_is("type") {
                 self.parse_type_alias()?; 
+            } else if self.current_ident_is("extension") {
+                program.types.push(self.parse_extension_def(
+                    current_namespace.clone(),
+                    attributes,
+                )?);
             } else if self.at(&TokenKind::Ref)
                 || self.at(&TokenKind::Struct)
                 || self.at(&TokenKind::Class)
@@ -219,6 +225,7 @@ impl Parser {
                 attributes: Vec::new(),
                 is_async: false,
                 is_extern: false,
+                is_extension: false,
                 name: "main".to_string(),
                 generic_params: Vec::new(),
                 params: vec![Param {
@@ -471,6 +478,7 @@ impl Parser {
         if is_record && self.match_kind(&TokenKind::Semi) {
             return Ok(TypeDef {
                 kind,
+                is_extension: false,
                 namespace,
                 attributes,
                 name,
@@ -615,6 +623,7 @@ impl Parser {
                     attributes: member_attributes,
                     is_async: member_modifiers.is_async,
                     is_extern: member_modifiers.is_extern,
+                    is_extension: false,
                     name,
                     generic_params,
                     params,
@@ -629,6 +638,7 @@ impl Parser {
                     attributes: member_attributes,
                     is_async: false,
                     is_extern: false,
+                    is_extension: false,
                     name: property_getter_name(&name),
                     generic_params: Vec::new(),
                     params: Vec::new(),
@@ -653,6 +663,7 @@ impl Parser {
         self.expect(TokenKind::RBrace)?;
         Ok(TypeDef {
             kind,
+            is_extension: false,
             namespace,
             attributes,
             name,
@@ -660,6 +671,82 @@ impl Parser {
             bases,
             fields,
             constructors,
+            methods,
+        })
+    }
+
+    fn parse_extension_def(
+        &mut self,
+        current_namespace: Vec<String>,
+        attributes: Vec<Attribute>,
+    ) -> Result<TypeDef, String> {
+        self.expect_ident()?;
+        let target_parts = {
+            let raw_parts = self.parse_qualified_name()?;
+            self.resolve_type_path(raw_parts)
+        };
+        if target_parts.is_empty() {
+            return Err(self.error_here("expected extension target type"));
+        }
+        let (namespace, name) = if target_parts.len() == 1 {
+            (current_namespace, target_parts[0].clone())
+        } else {
+            (
+                target_parts[..target_parts.len() - 1].to_vec(),
+                target_parts[target_parts.len() - 1].clone(),
+            )
+        };
+        self.expect(TokenKind::LBrace)?;
+        let mut methods = Vec::new();
+        let qualified_target = if namespace.is_empty() {
+            name.clone()
+        } else {
+            format!("{}.{}", namespace.join("."), name)
+        };
+        while !self.at(&TokenKind::RBrace) {
+            if self.at(&TokenKind::Hash) {
+                self.skip_preprocessor_directive();
+                continue;
+            }
+            let member_attributes = self.parse_attributes()?;
+            let member_modifiers = self.parse_modifiers();
+            let mut method = self.parse_function(
+                namespace.clone(),
+                member_attributes,
+                member_modifiers.is_async,
+                member_modifiers.is_extern,
+            )?;
+            let Some(first_param) = method.params.first() else {
+                return Err(self.error_here(
+                    "extension methods must declare an explicit `this` receiver parameter",
+                ));
+            };
+            if first_param.modifier != ParamModifier::This {
+                return Err(self.error_here(
+                    "extension methods must declare an explicit `this` receiver parameter",
+                ));
+            }
+            let receiver_name = type_syntax_name(&first_param.ty);
+            if receiver_name != name && receiver_name != qualified_target {
+                return Err(self.error_here(&format!(
+                    "extension receiver type '{}' does not match target '{}'",
+                    receiver_name, qualified_target
+                )));
+            }
+            method.is_extension = true;
+            methods.push(method);
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(TypeDef {
+            kind: TypeKind::Class,
+            is_extension: true,
+            namespace,
+            attributes,
+            name,
+            generic_params: Vec::new(),
+            bases: Vec::new(),
+            fields: Vec::new(),
+            constructors: Vec::new(),
             methods,
         })
     }
@@ -739,6 +826,7 @@ impl Parser {
             attributes,
             is_async,
             is_extern,
+            is_extension: false,
             name,
             generic_params,
             params,
@@ -3007,7 +3095,12 @@ fn merge_type_declarations(types: Vec<TypeDef>) -> Vec<TypeDef> {
         let key = (ty.namespace.clone(), ty.name.clone());
         if let Some(index) = indices.get(&key).copied() {
             let existing = &mut merged[index];
-            if existing.kind == ty.kind {
+            let can_merge = existing.kind == ty.kind || existing.is_extension || ty.is_extension;
+            if can_merge {
+                if existing.is_extension && !ty.is_extension {
+                    existing.kind = ty.kind;
+                    existing.is_extension = false;
+                }
                 existing.attributes.append(&mut ty.attributes);
                 for base in ty.bases {
                     if !existing.bases.contains(&base) {

@@ -73,6 +73,7 @@ pub(crate) struct TypedType {
     pub(crate) namespace: Vec<String>,
     pub(crate) generic_params: Vec<String>,
     pub(crate) symbol_id: usize,
+    pub(crate) is_extension: bool,
     pub(crate) kind: TypeKind,
     pub(crate) bases: Vec<String>,
     pub(crate) fields: Vec<TypedBinding>,
@@ -332,6 +333,7 @@ pub(crate) struct EndpointParameterBinding {
 struct FunctionSignature {
     params: Vec<IrType>,
     param_ownerships: Vec<Ownership>,
+    params_element_type: Option<IrType>,
     return_type: IrType,
     return_ownership: Ownership,
     symbol: String,
@@ -359,6 +361,7 @@ struct TypeEnv {
     delegates: HashMap<String, DelegateSignature>,
     functions: HashMap<String, Vec<FunctionSignature>>,
     methods: HashMap<(String, String), Vec<FunctionSignature>>,
+    extension_methods: HashMap<(String, String), Vec<FunctionSignature>>,
     constructors: HashMap<String, Vec<FunctionSignature>>,
     fields: HashMap<(String, String), FieldSignature>,
     field_order: HashMap<String, Vec<(String, FieldSignature)>>,
@@ -654,16 +657,21 @@ fn populate_method_signatures(program: &Program, env: &mut TypeEnv) {
             };
             let return_type = type_syntax_to_ir(&method.return_type, env);
             let return_ownership = ownership_for_declared_type_syntax(&method.return_type, env);
-            env.methods
-                .entry((ty.name.clone(), method.name.clone()))
-                .or_default()
-                .push(FunctionSignature {
-                    params,
-                    param_ownerships,
-                    return_type,
-                    return_ownership,
-                    symbol,
-                });
+            let params_element_type = params_element_type(&method.params, env);
+            let key = (ty.name.clone(), method.name.clone());
+            let signature = FunctionSignature {
+                params,
+                param_ownerships,
+                params_element_type,
+                return_type,
+                return_ownership,
+                symbol,
+            };
+            if method.is_extension || ty.is_extension {
+                env.extension_methods.entry(key).or_default().push(signature);
+            } else {
+                env.methods.entry(key).or_default().push(signature);
+            }
         }
     }
 }
@@ -705,12 +713,14 @@ fn populate_constructor_signatures(program: &Program, env: &mut TypeEnv) {
             } else {
                 base
             };
+            let params_element_type = params_element_type(&constructor.params, env);
             env.constructors
                 .entry(ty.name.clone())
                 .or_default()
                 .push(FunctionSignature {
                     params,
                     param_ownerships,
+                    params_element_type,
                     return_type: IrType::Void,
                     return_ownership: Ownership::Copy,
                     symbol,
@@ -842,6 +852,30 @@ impl TypeEnv {
         Ok(None)
     }
 
+    fn resolve_extension_method_call(
+        &self,
+        type_name: &str,
+        method_name: &str,
+        receiver: &TypedExpr,
+        args: &[TypedExpr],
+    ) -> Result<Option<&FunctionSignature>, String> {
+        let Some(signatures) = self
+            .extension_methods
+            .get(&(type_name.to_string(), method_name.to_string()))
+        else {
+            return Ok(None);
+        };
+        let mut combined = Vec::with_capacity(args.len() + 1);
+        combined.push(receiver.clone());
+        combined.extend(args.iter().cloned());
+        resolve_call_signature(
+            signatures,
+            &combined,
+            |expected, arg| ir_conversion_rank(expected, arg, self),
+            || format!("extension call to '{}.{}'", type_name, method_name),
+        )
+    }
+
     fn resolve_constructor(
         &self,
         type_name: &str,
@@ -953,19 +987,52 @@ where
 {
     let mut applicable = Vec::<(&FunctionSignature, Vec<u16>)>::new();
     for signature in signatures {
-        if signature.params.len() != args.len() {
-            continue;
+        if signature.params.len() == args.len() {
+            if let Some(ranks) = signature
+                .params
+                .iter()
+                .zip(args.iter())
+                .map(|(expected, arg)| rank(expected, arg))
+                .collect::<Option<Vec<_>>>()
+            {
+                applicable.push((signature, ranks));
+                continue;
+            }
         }
-        let Some(ranks) = signature
-            .params
-            .iter()
-            .zip(args.iter())
-            .map(|(expected, arg)| rank(expected, arg))
-            .collect::<Option<Vec<_>>>()
-        else {
+        let Some(params_element_type) = &signature.params_element_type else {
             continue;
         };
-        applicable.push((signature, ranks));
+        let fixed_len = signature.params.len().saturating_sub(1);
+        if args.len() < fixed_len {
+            continue;
+        }
+        let mut ranks = Vec::new();
+        let mut applicable_signature = true;
+        for (expected, arg) in signature
+            .params
+            .iter()
+            .take(fixed_len)
+            .zip(args.iter().take(fixed_len))
+        {
+            let Some(rank_value) = rank(expected, arg) else {
+                applicable_signature = false;
+                break;
+            };
+            ranks.push(rank_value);
+        }
+        if !applicable_signature {
+            continue;
+        }
+        for arg in args.iter().skip(fixed_len) {
+            let Some(rank_value) = rank(params_element_type, arg) else {
+                applicable_signature = false;
+                break;
+            };
+            ranks.push(rank_value);
+        }
+        if applicable_signature {
+            applicable.push((signature, ranks));
+        }
     }
 
     if applicable.is_empty() {
@@ -2294,29 +2361,42 @@ fn checked_temp(ty: IrType) -> CheckedExpr {
 }
 
 fn function_signature(function: &Function, env: &TypeEnv, overloaded: bool) -> FunctionSignature {
-    let params = function
-        .params
-        .iter()
-        .map(|param| type_syntax_to_ir(&param.ty, env))
-        .collect::<Vec<_>>();
-    let param_ownerships = function
-        .params
-        .iter()
-        .map(|param| ownership_for_declared_type_syntax(&param.ty, env))
-        .collect::<Vec<_>>();
-    FunctionSignature {
-        symbol: if overloaded {
-            overloaded_function_symbol(&qualified_function_symbol_name(
-                &function.namespace,
-                &function.name,
+            let params = function
+                .params
+                .iter()
+                .map(|param| type_syntax_to_ir(&param.ty, env))
+                .collect::<Vec<_>>();
+            let param_ownerships = function
+                .params
+                .iter()
+                .map(|param| ownership_for_declared_type_syntax(&param.ty, env))
+                .collect::<Vec<_>>();
+            let params_element_type = params_element_type(&function.params, env);
+            FunctionSignature {
+                symbol: if overloaded {
+                    overloaded_function_symbol(&qualified_function_symbol_name(
+                        &function.namespace,
+                        &function.name,
             ), &params)
         } else {
             qualified_function_symbol_name(&function.namespace, &function.name)
-        },
-        params,
-        param_ownerships,
-        return_type: type_syntax_to_ir(&function.return_type, env),
-        return_ownership: ownership_for_declared_type_syntax(&function.return_type, env),
+                },
+                params,
+                param_ownerships,
+                params_element_type,
+                return_type: type_syntax_to_ir(&function.return_type, env),
+                return_ownership: ownership_for_declared_type_syntax(&function.return_type, env),
+            }
+}
+
+fn params_element_type(params: &[Param], env: &TypeEnv) -> Option<IrType> {
+    let last = params.last()?;
+    if !last.is_params {
+        return None;
+    }
+    match type_syntax_to_ir(&last.ty, env) {
+        IrType::Array(inner) => Some(*inner),
+        other => Some(other),
     }
 }
 
@@ -2392,6 +2472,11 @@ fn type_method_symbol(ty: &TypeDef, type_id: usize, method: &Function, env: &Typ
         sanitize_ir_symbol(&method.name),
         method.generic_params.len()
     );
+    let base = if method.is_extension {
+        format!("{base}__ext")
+    } else {
+        base
+    };
     if overloaded {
         if suffix.is_empty() {
             format!("{base}__overload")
@@ -3173,6 +3258,7 @@ fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Result<TypedType
                 attributes: constructor.attributes.clone(),
                 is_async: false,
                 is_extern: false,
+                is_extension: false,
                 name: ty.name.clone(),
                 generic_params: Vec::new(),
                 params: constructor.params.clone(),
@@ -3191,10 +3277,15 @@ fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Result<TypedType
         .methods
         .iter()
         .map(|method| {
+            let implicit_params: &[TypedBinding] = if method.is_extension {
+                &[]
+            } else {
+                std::slice::from_ref(&this_binding)
+            };
             lower_function(
                 method,
                 env,
-                std::slice::from_ref(&this_binding),
+                implicit_params,
                 Some(type_method_symbol(ty, symbol_id, method, env)),
             )
         })
@@ -3208,6 +3299,7 @@ fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Result<TypedType
             .map(|param| param.name.clone())
             .collect(),
         symbol_id,
+        is_extension: ty.is_extension,
         kind: ty.kind,
         bases: ty.bases.clone(),
         fields,
@@ -3708,7 +3800,21 @@ fn lower_stmt(
 fn find_expected_types(candidates: &[FunctionSignature], args: &[Expr]) -> Vec<Option<IrType>> {
     let mut expected = vec![None; args.len()];
     for sig in candidates {
-        if sig.params.len() == args.len() {
+        if let Some(element_ty) = &sig.params_element_type {
+            let fixed_len = sig.params.len().saturating_sub(1);
+            if args.len() >= fixed_len {
+                for (i, param_ty) in sig.params.iter().take(fixed_len).enumerate() {
+                    if expected[i].is_none() {
+                        expected[i] = Some(param_ty.clone());
+                    }
+                }
+                for i in fixed_len..args.len() {
+                    if expected[i].is_none() {
+                        expected[i] = Some(element_ty.clone());
+                    }
+                }
+            }
+        } else if sig.params.len() == args.len() {
             for (i, param_ty) in sig.params.iter().enumerate() {
                 if expected[i].is_none() {
                     expected[i] = Some(param_ty.clone());
@@ -3891,6 +3997,40 @@ fn lower_call_args(
         lowered.push(typed_arg);
     }
     Ok(lowered)
+}
+
+fn pack_params_args(
+    signature: &FunctionSignature,
+    args: Vec<TypedExpr>,
+) -> Vec<TypedExpr> {
+    let Some(element_ty) = &signature.params_element_type else {
+        return args;
+    };
+    let fixed_len = signature.params.len().saturating_sub(1);
+    if args.len() == signature.params.len()
+        && signature
+            .params
+            .last()
+            .is_some_and(|expected| ir_arg_matches(expected, args.last().map(|arg| &arg.ty).unwrap()))
+    {
+        return args;
+    }
+    if args.len() < fixed_len {
+        return args;
+    }
+    let mut packed = args[..fixed_len].to_vec();
+    let tail = args[fixed_len..].to_vec();
+    let array_ty = IrType::Array(Box::new(element_ty.clone()));
+    packed.push(typed_expr_with_ownership(
+        TypedExprKind::NewArray {
+            element_type: element_ty.clone(),
+            length: None,
+            values: tail,
+        },
+        array_ty,
+        Ownership::Owned,
+    ));
+    packed
 }
 
 fn lower_typed_expr(
@@ -4153,6 +4293,13 @@ fn lower_typed_expr_with_expected(
             let expected_types = find_expected_types(&candidates, args);
             let args = lower_call_args(args, &expected_types, env, scopes)?;
             let (ty, ownership, symbol, resolution) = resolve_method_call(env, &target, name, &args)?;
+            let args = if let Some(signature) =
+                candidates.iter().find(|signature| signature.symbol == symbol)
+            {
+                pack_params_args(signature, args)
+            } else {
+                args
+            };
             typed_expr_with_ownership(
                 TypedExprKind::Call(TypedCall {
                     kind: TypedCallKind::Method {
@@ -4195,6 +4342,11 @@ fn lower_typed_expr_with_expected(
             let expected_types = find_expected_types(&candidates, args);
             let args = lower_call_args(args, &expected_types, env, scopes)?;
             let signature = env.resolve_function_call(name, &args)?;
+            let args = if let Some(signature) = signature.as_ref() {
+                pack_params_args(signature, args)
+            } else {
+                args
+            };
             let ty = signature
                 .as_ref()
                 .map(|signature| signature.return_type.clone())
@@ -4250,9 +4402,13 @@ fn lower_typed_expr_with_expected(
                     Ownership::Copy,
                 ));
             }
-            let constructor = env
-                .resolve_constructor_call(type_name, &args)?
-                .map(|signature| signature.symbol.clone());
+            let constructor_signature = env.resolve_constructor_call(type_name, &args)?;
+            let args = if let Some(signature) = constructor_signature.as_ref() {
+                pack_params_args(signature, args)
+            } else {
+                args
+            };
+            let constructor = constructor_signature.map(|signature| signature.symbol.clone());
             let fields = fields
                 .iter()
                 .map(|field| {
@@ -5055,6 +5211,15 @@ fn resolve_method_call(
                     signature.symbol.clone(),
                     CallResolution::InstanceMethod,
                 ))
+            } else if let Some(signature) =
+                env.resolve_extension_method_call(type_name, name, target, args)?
+            {
+                Ok((
+                    signature.return_type.clone(),
+                    signature.return_ownership.clone(),
+                    signature.symbol.clone(),
+                    CallResolution::InstanceMethod,
+                ))
             } else {
                 Ok((
                     IrType::Unknown(name.to_string()),
@@ -5138,6 +5303,15 @@ fn resolve_method_call(
             method_name,
         ) => {
             if let Some(signature) = env.resolve_method_call(type_name, method_name, args)? {
+                Ok((
+                    signature.return_type.clone(),
+                    signature.return_ownership.clone(),
+                    signature.symbol.clone(),
+                    CallResolution::InstanceMethod,
+                ))
+            } else if let Some(signature) =
+                env.resolve_extension_method_call(type_name, method_name, target, args)?
+            {
                 Ok((
                     signature.return_type.clone(),
                     signature.return_ownership.clone(),

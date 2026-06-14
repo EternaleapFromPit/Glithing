@@ -28,7 +28,6 @@ pub fn run() -> Result<(), String> {
 
     crate::toolchain::emit_native_executable(
         &llvm_ir,
-        &compiled.native_sources,
         output_exe
             .to_str()
             .ok_or_else(|| format!("output path is not valid UTF-8: {}", output_exe.display()))?,

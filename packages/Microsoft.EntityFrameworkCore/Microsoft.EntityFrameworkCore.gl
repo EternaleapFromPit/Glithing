@@ -3,6 +3,14 @@ package Microsoft.EntityFrameworkCore;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
+class DbContextOptions {
+    public string ConnectionString;
+
+    public DbContextOptions() {
+        this.ConnectionString = "";
+    }
+}
+
 class DbContextOptions<TContext> {
     public string ConnectionString;
 
@@ -47,9 +55,30 @@ class DebugView {
 }
 
 class DatabaseFacade {
+    public string ConnectionString;
+
+    public DatabaseFacade() {
+        this.ConnectionString = "";
+    }
+
+    public DatabaseFacade(string connectionString) {
+        this.ConnectionString = connectionString;
+    }
+
+    bool EnsureCreated() { return true; }
     bool EnsureDeleted() { return false; }
+    bool IsInMemory() { return this.ConnectionString == "inmemory"; }
+    IDbContextTransaction BeginTransaction(object isolationLevel) {
+        return new DatabaseTransaction();
+    }
     void Migrate() {}
     int ExecuteSqlRaw(string sql, object parameters) { return 0; }
+}
+
+class DatabaseTransaction : IDbContextTransaction {
+    void Commit() {}
+    void Rollback() {}
+    void Dispose() {}
 }
 
 enum EntityState {
@@ -80,7 +109,7 @@ class DbContext {
         this.IsDisposed = false;
         this.TrackedEntities = new List<string>();
         this.Provider = new SqlProvider("sql", connectionString);
-        this.Database = new DatabaseFacade();
+        this.Database = new DatabaseFacade(connectionString);
         this.ChangeTracker = new ChangeTracker();
     }
 
@@ -90,6 +119,15 @@ class DbContext {
         this.TrackedEntities = new List<string>();
         this.Provider = new SqlProvider("sql", "");
         this.Database = new DatabaseFacade();
+        this.ChangeTracker = new ChangeTracker();
+    }
+
+    public DbContext(DbContextOptions options) {
+        this.ConnectionString = options.ConnectionString;
+        this.IsDisposed = false;
+        this.TrackedEntities = new List<string>();
+        this.Provider = new SqlProvider("sql", this.ConnectionString);
+        this.Database = new DatabaseFacade(this.ConnectionString);
         this.ChangeTracker = new ChangeTracker();
     }
 
@@ -328,6 +366,8 @@ object FirstOrDefault(object target) { return target; }
 object FirstOrDefault(object target, object predicate) { return target; }
 object FirstOrDefaultAsync(object target) { return target; }
 object FirstOrDefaultAsync(object target, object predicate) { return target; }
+object SingleOrDefaultAsync(object target) { return target; }
+object SingleOrDefaultAsync(object target, object predicate) { return target; }
 object SaveChangesAsync() { return null; }
 object SaveChangesAsync(object target) { return target; }
 object AddRangeAsync(object target, object entities) { return target; }

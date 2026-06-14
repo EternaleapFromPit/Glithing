@@ -21,11 +21,18 @@ fn link_package_sources_inner(
     linked: &mut String,
 ) -> Result<(), String> {
     for package_id in source_using_packages(source) {
+        if source_declares_namespace(source, &package_id) {
+            continue;
+        }
         if visited.contains(&package_id) {
             continue;
         }
         let Some(path) = package_source_path(&package_id) else {
-            continue;
+            return Err(format!(
+                "package import '{package_id}' could not be resolved to packages/{package_id}/{package_id}.gl or packages/{}/{}.gl",
+                package_id.replace('.', "/"),
+                package_id
+            ));
         };
         visited.push(package_id.clone());
         let package_source = fs::read_to_string(&path).map_err(|e| {
@@ -41,6 +48,12 @@ fn link_package_sources_inner(
         linked.push_str("\n__FILE_BOUNDARY__;\n");
     }
     Ok(())
+}
+
+fn source_declares_namespace(source: &str, package_id: &str) -> bool {
+    let namespace = format!("namespace {package_id}");
+    let package = format!("package {package_id}");
+    source.contains(&namespace) || source.contains(&package)
 }
 
 fn source_file_marker(path: &str) -> String {
@@ -95,32 +108,4 @@ pub(crate) fn package_source_path(package_id: &str) -> Option<PathBuf> {
         return Some(nested);
     }
     None
-}
-
-pub(crate) fn find_package_native_sources(linked_source: &str) -> Vec<PathBuf> {
-    let mut native_files = Vec::new();
-    let packages = source_using_packages(linked_source);
-    for package_id in packages {
-        if package_id == "System.XUnit" {
-            continue;
-        }
-        if let Some(source_path) = package_source_path(&package_id) {
-            if let Some(parent) = source_path.parent() {
-                let native_dir = parent.join("native");
-                if native_dir.is_dir() {
-                    if let Ok(entries) = fs::read_dir(native_dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.is_file()
-                                && path.extension().and_then(|e| e.to_str()) == Some("c")
-                            {
-                                native_files.push(path);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    native_files
 }

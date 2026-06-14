@@ -1,12 +1,33 @@
 package MediatR;
 
 using System.Reflection;
+using System.Threading.Tasks;
+
+interface IRequest {
+}
+
+interface IRequest<TResponse> {
+}
 
 interface IPipelineBehavior<TRequest, TResponse> {
     TResponse Handle(TRequest request);
 }
 
+interface IMediator {
+    Task<TResponse> Send<TResponse>(IRequest<TResponse> request);
+    Task Send(IRequest request);
+}
+
+class Mediator : IMediator {
+    Task<TResponse> Send<TResponse>(IRequest<TResponse> request) {
+        return new Task<TResponse>();
+    }
+
+    Task Send(IRequest request) {
+        return new Task();
+    }
+}
+
 class MediatRServiceConfiguration {
     void RegisterServicesFromAssembly(Assembly assembly) {}
 }
-

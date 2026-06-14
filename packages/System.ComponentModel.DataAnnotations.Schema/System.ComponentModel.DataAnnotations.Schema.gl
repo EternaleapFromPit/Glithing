@@ -1,0 +1,4 @@
+package System.ComponentModel.DataAnnotations.Schema;
+
+class NotMapped {
+}
