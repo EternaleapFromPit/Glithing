@@ -1,0 +1,14 @@
+package System.Reflection;
+
+class Assembly {
+    static Assembly GetExecutingAssembly() {
+        return new Assembly();
+    }
+
+    string FullName {
+        get {
+            return "Assembly";
+        }
+    }
+}
+

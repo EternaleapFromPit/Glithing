@@ -230,7 +230,7 @@ Build the standalone `System.Threading.Tasks` package from Glitching-lang source
 cargo run -- stdlib\System.Threading.Tasks.gl --emit-nuget System.Threading.Tasks.0.1.0.nupkg --package-version 0.1.0
 ```
 
-Package emission is currently disabled pending a redesign that packages LLVM-native assets or a build-time compiler hook instead of generated C source.
+Package emission is currently disabled pending a redesign that packages LLVM-native assets or a build-time compiler hook.
 
 Expected rejected examples:
 

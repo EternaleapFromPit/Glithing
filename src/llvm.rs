@@ -200,7 +200,7 @@ impl LlvmEmitter {
         emitter.emit_drop_glue();
         let mut emitted_symbols = HashSet::new();
         for ty in &program.types {
-            if ty.kind == TypeKind::Interface {
+            if ty.kind == TypeKind::Interface && ty.methods.iter().all(|method| method.body.is_empty()) {
                 continue;
             }
             for constructor in &ty.constructors {

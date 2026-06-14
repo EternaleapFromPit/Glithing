@@ -35,13 +35,27 @@ class FormatException : Exception {
 
 class DateTime {
     public double TotalMinutes;
-    public DateTime UtcNow;
+    static DateTime UtcNow {
+        get {
+            return new DateTime();
+        }
+    }
     
     static DateTime Parse(string s) { return null; }
 }
 
+class DateTimeOffset {
+    public DateTimeOffset(DateTime value) {}
+    long ToUnixTimeSeconds() { return 0; }
+}
+
 class TimeSpan {
     public double TotalMinutes;
+    static TimeSpan Zero {
+        get {
+            return new TimeSpan(0, 0, 0, 0);
+        }
+    }
     static TimeSpan FromMinutes(double minutes) { return null; }
     public TimeSpan(int h, int m, int s, int ms) {}
 }

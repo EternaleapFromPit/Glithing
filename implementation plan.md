@@ -81,6 +81,13 @@ The current boundary is:
    - Prefer real lowering where the runtime model is already present; otherwise keep unsupported members as diagnostics with explicit rewrite guidance instead of opaque nulls.
 
    **Tests:** compile the RealWorld sample without GL3001/GL3003/GL3004 warnings for these specific paths, and add focused smoke tests for DI registration, MVC pipeline wiring, CORS, Swagger, JSON serialization, and logging setup.
+11. Add a deterministic native-host smoke harness for the RealWorld sample.
+   - Start the native binary.
+   - Wait for the HTTP port to bind.
+   - Probe `GET /api/articles` and `GET /swagger/v1/swagger.json`.
+   - Fail fast with captured stdout/stderr when startup or HTTP reachability regresses.
+
+   **Tests:** one harness test that builds the sample, launches it on a free port, probes the two endpoints, and shuts the process down cleanly.
 
 ## Notes
 

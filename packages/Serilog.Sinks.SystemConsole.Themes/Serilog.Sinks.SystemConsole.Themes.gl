@@ -1,0 +1,10 @@
+package Serilog.Sinks.SystemConsole.Themes;
+
+class AnsiConsoleTheme {
+    static AnsiConsoleTheme Code {
+        get {
+            return new AnsiConsoleTheme();
+        }
+    }
+}
+

@@ -1,16 +1,16 @@
 mod ast;
 mod borrowck;
 mod bytecode;
-#[cfg(test)]
-mod codegen;
 mod cycles;
 mod diagnostics;
 mod leak;
 mod lexer;
 mod linker;
+mod nuget;
 mod llvm;
 mod parser;
 mod runtime;
+pub mod realworld_smoke;
 mod xunit_runner;
 mod tir;
 mod toolchain;
@@ -23,12 +23,11 @@ use std::path::{Path, PathBuf};
 use ast::*;
 use borrowck::BorrowChecker;
 use bytecode::BytecodeEmitter;
-#[cfg(test)]
-use codegen::Codegen;
 use diagnostics::CompatibilityAnalyzer;
 use leak::LeakAnalyzer;
 use lexer::Lexer;
 use linker::{link_package_sources, strip_utf8_bom};
+use nuget::{emit_nuget_package, NugetPackageSpec};
 use llvm::LlvmEmitter;
 use parser::Parser;
 use tir::TypedProgram;
@@ -46,6 +45,8 @@ pub fn run_cli() -> Result<(), String> {
     let mut exe_output = None;
     let mut leak_report_output = None;
     let mut nuget_output = None;
+    let mut package_id = None;
+    let mut package_version = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--emit-bytecode" => bytecode_output = args.next(),
@@ -54,14 +55,14 @@ pub fn run_cli() -> Result<(), String> {
             "--emit-exe" => exe_output = args.next(),
             "--emit-leak-report" => leak_report_output = args.next(),
             "--emit-nuget" => nuget_output = args.next(),
-            "--package-id" | "--package-version" => {
-                args.next();
-            }
+            "--package-id" => package_id = args.next(),
+            "--package-version" => package_version = args.next(),
             other => return Err(format!("unknown argument '{other}'")),
         }
     }
     let source = read_input_source(&input)?;
-    let wants_llvm = llvm_ir_output.is_some() || llvm_bc_output.is_some() || exe_output.is_some();
+    let wants_llvm =
+        llvm_ir_output.is_some() || llvm_bc_output.is_some() || exe_output.is_some() || nuget_output.is_some();
     let has_explicit_output = bytecode_output.is_some()
         || llvm_ir_output.is_some()
         || llvm_bc_output.is_some()
@@ -96,14 +97,31 @@ pub fn run_cli() -> Result<(), String> {
             .map_err(|e| format!("failed to write {path}: {e}"))?;
     }
     if let Some(path) = &nuget_output {
-        return Err(format!(
-            "NuGet package emission is temporarily disabled until the package format is redesigned without the legacy C backend: {path}"
-        ));
+        let package_id = package_id.unwrap_or_else(|| default_package_id(&input));
+        let package_version = package_version.unwrap_or_else(|| "0.1.0".to_string());
+        emit_nuget_package(
+            NugetPackageSpec {
+                package_id: &package_id,
+                version: &package_version,
+                linked_source: &compiled.linked_source,
+                llvm_ir: compiled.llvm_ir()?,
+            },
+            path,
+        )?;
     }
     if let Some(path) = default_exe_output {
         emit_native_executable(compiled.llvm_ir()?, &compiled.native_sources, path.to_string_lossy().as_ref())?;
     }
     Ok(())
+}
+
+fn default_package_id(input: &str) -> String {
+    let path = Path::new(input);
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "Glitching.Package".to_string())
 }
 
 fn default_executable_output_path(input: &str) -> PathBuf {
@@ -166,11 +184,6 @@ fn collect_source_files(path: &Path, output: &mut Vec<PathBuf>) -> Result<(), St
 }
 
 #[cfg(test)]
-fn compile_source(source: &str) -> Result<String, String> {
-    Ok(compile_source_with_metadata(source)?.c()?.to_string())
-}
-
-#[cfg(test)]
 fn compile_bytecode(source: &str) -> Result<String, String> {
     Ok(compile_source_with_metadata(source)?.bytecode)
 }
@@ -196,26 +209,19 @@ fn compile_ownership_summary(source: &str) -> Result<String, String> {
     Ok(typed.ownership_summary())
 }
 
+#[derive(Debug)]
 struct CompileOutput {
-    #[cfg(test)]
-    c: Option<String>,
     bytecode: String,
     llvm_ir: Option<String>,
     leak_report: String,
     diagnostics: Vec<String>,
     native_sources: Vec<PathBuf>,
+    linked_source: String,
     #[allow(dead_code)]
     package_id: Option<String>,
 }
 
 impl CompileOutput {
-    #[cfg(test)]
-    fn c(&self) -> Result<&str, String> {
-        self.c
-            .as_deref()
-            .ok_or_else(|| "C output was not requested".to_string())
-    }
-
     fn llvm_ir(&self) -> Result<&str, String> {
         self.llvm_ir
             .as_deref()
@@ -225,15 +231,14 @@ impl CompileOutput {
 
 #[cfg(test)]
 fn compile_source_with_metadata(source: &str) -> Result<CompileOutput, String> {
-    compile_source_with_options(source, false, true)
+    compile_source_with_options(source, false, false)
 }
 
 fn compile_source_with_options(
     source: &str,
     emit_llvm: bool,
-    emit_c: bool,
+    _emit_c: bool,
 ) -> Result<CompileOutput, String> {
-    let _ = emit_c;
     let linked_source = link_package_sources(strip_utf8_bom(source))?;
     let _ = fs::write("target/linked_source.gl", &linked_source);
     let tokens = Lexer::new(&linked_source).tokenize()?;
@@ -252,21 +257,14 @@ fn compile_source_with_options(
     } else {
         None
     };
-    #[cfg(test)]
-    let c = if emit_c {
-        Some(Codegen::new(&program, &typed).emit_program(&program)?)
-    } else {
-        None
-    };
     let native_sources = linker::find_package_native_sources(&linked_source);
     Ok(CompileOutput {
-        #[cfg(test)]
-        c,
         bytecode,
         llvm_ir,
         leak_report,
         diagnostics,
         native_sources,
+        linked_source,
         package_id: program.package_id.clone(),
     })
 }

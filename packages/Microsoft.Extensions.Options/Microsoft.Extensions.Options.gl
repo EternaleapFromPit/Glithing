@@ -1,0 +1,10 @@
+package Microsoft.Extensions.Options;
+
+interface IOptions<T> {
+    T Value { get; }
+}
+
+class Options<T> : IOptions<T> {
+    public T Value;
+}
+

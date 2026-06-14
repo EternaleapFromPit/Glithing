@@ -1,5 +1,11 @@
 package System.Text.Json;
 
+using System.Text.Json.Serialization;
+
+class JsonSerializerOptions {
+    public JsonIgnoreCondition DefaultIgnoreCondition;
+}
+
 native "
 static char * JsonSerializer_Serialize_Native(const char *value) {
     if (!value) { return NULL; }

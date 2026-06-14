@@ -43,6 +43,7 @@ class ConsoleLogger<T> : ILogger<T> {
 interface ILoggerFactory {
     ILogger CreateLogger(string categoryName);
     void AddProvider(ILoggerProvider provider);
+    void AddSerilog(string logger);
 }
 
 interface ILoggerProvider {
@@ -57,4 +58,6 @@ class LoggerFactory : ILoggerFactory {
     }
 
     void AddProvider(ILoggerProvider provider) {}
+
+    void AddSerilog(string logger) {}
 }

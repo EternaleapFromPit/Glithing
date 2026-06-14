@@ -1,0 +1,43 @@
+package Microsoft.IdentityModel.Tokens;
+
+class SymmetricSecurityKey {
+    public string Key;
+
+    public SymmetricSecurityKey(string key) {
+        this.Key = key;
+    }
+
+    public SymmetricSecurityKey(byte[] key) {
+        this.Key = "";
+    }
+}
+
+class SigningCredentials {
+    public SymmetricSecurityKey Key;
+    public string Algorithm;
+
+    public SigningCredentials(SymmetricSecurityKey key, string algorithm) {
+        this.Key = key;
+        this.Algorithm = algorithm;
+    }
+}
+
+class TokenValidationParameters {
+    public bool ValidateIssuerSigningKey;
+    public bool ValidateIssuer;
+    public bool ValidateAudience;
+    public bool RequireExpirationTime;
+    public bool ValidateLifetime;
+    public string ValidAudience;
+    public string ValidIssuer;
+    public SymmetricSecurityKey IssuerSigningKey;
+    public System.TimeSpan ClockSkew;
+}
+
+class SecurityAlgorithms {
+    static string HmacSha256 {
+        get {
+            return "HmacSha256";
+        }
+    }
+}

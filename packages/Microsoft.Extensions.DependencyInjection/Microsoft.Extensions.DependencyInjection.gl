@@ -1,10 +1,73 @@
 package Microsoft.Extensions.DependencyInjection;
 
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using MediatR;
+using Microsoft.IdentityModel.Tokens;
+using AutoMapper;
+using FluentValidation;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
 interface IServiceProvider {
     T GetRequiredService<T>();
     string GetRequiredService(string name);
     T GetService<T>();
     IServiceScope CreateScope();
+}
+
+class DbContextOptionsBuilder {
+    void UseSqlite(string connectionString) {}
+    void UseSqlServer(string connectionString) {}
+}
+
+class LocalizationOptions {
+    public string ResourcesPath;
+}
+
+class CorsPolicyBuilder {
+    CorsPolicyBuilder AllowAnyOrigin() { return new CorsPolicyBuilder(); }
+    CorsPolicyBuilder AllowAnyHeader() { return new CorsPolicyBuilder(); }
+    CorsPolicyBuilder AllowAnyMethod() { return new CorsPolicyBuilder(); }
+}
+
+class MvcConventions {
+    void Add(object convention) {}
+}
+
+class MvcFilterCollection {
+    void Add<T>() {}
+}
+
+class MvcJsonOptions {
+    public JsonSerializerOptions JsonSerializerOptions;
+
+    public MvcJsonOptions() {
+        this.JsonSerializerOptions = new JsonSerializerOptions();
+    }
+}
+
+class MvcOptions {
+    public MvcConventions Conventions;
+    public MvcFilterCollection Filters;
+    public bool EnableEndpointRouting;
+
+    public MvcOptions() {
+        this.Conventions = new MvcConventions();
+        this.Filters = new MvcFilterCollection();
+        this.EnableEndpointRouting = true;
+    }
+}
+
+class AuthenticationBuilder {
+    AuthenticationBuilder AddJwtBearer(JwtBearerOptions configure) {
+        return new AuthenticationBuilder();
+    }
+}
+
+class MediatRServiceConfiguration {
+    void RegisterServicesFromAssembly(object assembly) {}
 }
 
 class ServiceProvider : IServiceProvider {
@@ -15,7 +78,7 @@ class ServiceProvider : IServiceProvider {
     }
 
     T GetRequiredService<T>() {
-        return null;
+        return new LoggerFactory();
     }
 
     string GetRequiredService(string name) {
@@ -44,7 +107,7 @@ class ServiceScope : IServiceScope {
 }
 
 class MvcBuilder {
-    MvcBuilder AddJsonOptions(object configure) {
+    MvcBuilder AddJsonOptions(MvcJsonOptions configure) {
         return new MvcBuilder();
     }
 
@@ -52,46 +115,23 @@ class MvcBuilder {
         return new MvcBuilder();
     }
 
-    MvcBuilder AddJwtBearer(string scheme, object configure) {
+    MvcBuilder AddJwtBearer(JwtBearerOptions configure) {
         return new MvcBuilder();
     }
 
     MvcBuilder AddAuthentication() {
         return new MvcBuilder();
     }
+
+    MvcBuilder AddAuthentication(string scheme) {
+        return new MvcBuilder();
+    }
 }
 
-interface IServiceCollection {
-    void AddSingleton(object value);
-    void AddSingleton(string value);
-    void AddSingleton(string key, string value);
-    void AddTransient<TService, TImplementation>();
-    void AddScoped(object serviceType, object implementationType);
-    void AddScoped<TService, TImplementation>();
-    
-    void Configure(object configure);
-    void AddApiVersioning(object configure);
-    void AddVersionedApiExplorer(object configure);
-    void AddSwaggerGen(object configure);
-    void AddMemoryCache();
-    void AddHttpContextAccessor();
-    void AddEndpointsApiExplorer();
-    void AddLibraryApiVersionConfiguration(object version);
-    void AddAndConfigureSwagger(object configuration, string path, bool enabled);
-    void AddDbContextPool<T>(object configure);
-    void AddAutoMapper(object marker);
-    void AddRepositories();
-    void AddDataServices();
-    void AddCors(object configure);
-    
-    object AddControllers(object configure);
-    object AddAuthentication();
-}
-
-class ServiceCollection : IServiceCollection {
+class IServiceCollection {
     public string Message;
 
-    public ServiceCollection() {
+    public IServiceCollection() {
         this.Message = "";
     }
 
@@ -115,22 +155,39 @@ class ServiceCollection : IServiceCollection {
     void AddEndpointsApiExplorer() {}
     void AddLibraryApiVersionConfiguration(object version) {}
     void AddAndConfigureSwagger(object configuration, string path, bool enabled) {}
+    void AddOptions() {}
+    void AddMediatR(MediatRServiceConfiguration configure) {}
+    void AddValidatorsFromAssemblyContaining<T>() {}
+    void AddDbContext<T>(DbContextOptionsBuilder configure) {}
     void AddDbContextPool<T>(object configure) {}
+    void AddLocalization(LocalizationOptions configure) {}
+    void AddCors() {}
+    void AddCors(CorsPolicyBuilder configure) {}
     void AddAutoMapper(object marker) {}
+    void AddAutoMapper(MapperConfigurationExpression marker) {}
     void AddRepositories() {}
     void AddDataServices() {}
-    void AddCors(object configure) {}
-
-    object AddControllers(object configure) {
+    MvcBuilder AddMvc(MvcOptions configure) {
         return new MvcBuilder();
     }
-
-    object AddAuthentication() {
+    MvcBuilder AddControllers(object configure) {
         return new MvcBuilder();
+    }
+    AuthenticationBuilder AddAuthentication() {
+        return new AuthenticationBuilder();
+    }
+    AuthenticationBuilder AddAuthentication(string scheme) {
+        return new AuthenticationBuilder();
     }
 
     ServiceProvider BuildServiceProvider() {
         return new ServiceProvider(this.Message);
+    }
+}
+
+class ServiceCollection : IServiceCollection {
+    public ServiceCollection() {
+        this.Message = "";
     }
 }
 

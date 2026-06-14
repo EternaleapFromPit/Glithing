@@ -1,0 +1,38 @@
+package FluentValidation;
+
+interface IValidator<T> {
+    bool Validate(T value);
+}
+
+class ValidationFailure {
+    public string ErrorMessage;
+}
+
+class ValidationContext<T> {
+    public T InstanceToValidate;
+}
+
+class RuleBuilder<T, TProperty> {
+    RuleBuilder<T, TProperty> NotNull() { return new RuleBuilder<T, TProperty>(); }
+    RuleBuilder<T, TProperty> NotEmpty() { return new RuleBuilder<T, TProperty>(); }
+    RuleBuilder<T, TProperty> SetValidator(object validator) { return new RuleBuilder<T, TProperty>(); }
+    RuleBuilder<T, TProperty> EmailAddress() { return new RuleBuilder<T, TProperty>(); }
+    RuleBuilder<T, TProperty> MinimumLength(int length) { return new RuleBuilder<T, TProperty>(); }
+    RuleBuilder<T, TProperty> MaximumLength(int length) { return new RuleBuilder<T, TProperty>(); }
+    RuleBuilder<T, TProperty> Length(int min, int max) { return new RuleBuilder<T, TProperty>(); }
+    RuleBuilder<T, TProperty> Matches(string pattern) { return new RuleBuilder<T, TProperty>(); }
+    RuleBuilder<T, TProperty> Equal(TProperty value) { return new RuleBuilder<T, TProperty>(); }
+    RuleBuilder<T, TProperty> NotEqual(TProperty value) { return new RuleBuilder<T, TProperty>(); }
+    RuleBuilder<T, TProperty> Must(object predicate) { return new RuleBuilder<T, TProperty>(); }
+    RuleBuilder<T, TProperty> WithMessage(string message) { return new RuleBuilder<T, TProperty>(); }
+}
+
+class AbstractValidator<T> {
+    RuleBuilder<T, object> RuleFor(object expression) {
+        return new RuleBuilder<T, object>();
+    }
+
+    RuleBuilder<T, object> RuleForEach(object expression) {
+        return new RuleBuilder<T, object>();
+    }
+}

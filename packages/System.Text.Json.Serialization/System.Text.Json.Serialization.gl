@@ -1,0 +1,8 @@
+package System.Text.Json.Serialization;
+
+enum JsonIgnoreCondition {
+    Never,
+    WhenWritingDefault,
+    WhenWritingNull
+}
+

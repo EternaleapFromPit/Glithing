@@ -1,0 +1,12 @@
+package MediatR;
+
+using System.Reflection;
+
+interface IPipelineBehavior<TRequest, TResponse> {
+    TResponse Handle(TRequest request);
+}
+
+class MediatRServiceConfiguration {
+    void RegisterServicesFromAssembly(Assembly assembly) {}
+}
+

@@ -1,0 +1,28 @@
+package System.Security.Claims;
+
+class ClaimValueTypes {
+    static string Integer64 {
+        get {
+            return "Integer64";
+        }
+    }
+}
+
+class Claim {
+    public string Type;
+    public string Value;
+    public string ValueType;
+
+    public Claim(string type, string value) {
+        this.Type = type;
+        this.Value = value;
+        this.ValueType = "";
+    }
+
+    public Claim(string type, string value, string valueType) {
+        this.Type = type;
+        this.Value = value;
+        this.ValueType = valueType;
+    }
+}
+

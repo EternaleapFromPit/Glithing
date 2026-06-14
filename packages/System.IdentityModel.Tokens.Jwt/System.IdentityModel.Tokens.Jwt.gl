@@ -1,0 +1,48 @@
+package System.IdentityModel.Tokens.Jwt;
+
+using Microsoft.IdentityModel.Tokens;
+
+class JwtSecurityToken {
+    public string Raw;
+
+    public JwtSecurityToken() {
+        this.Raw = "";
+    }
+
+    public JwtSecurityToken(
+        string issuer,
+        string audience,
+        object claims,
+        object notBefore,
+        object expires,
+        SigningCredentials signingCredentials
+    ) {
+        this.Raw = "";
+    }
+}
+
+class JwtSecurityTokenHandler {
+    string WriteToken(JwtSecurityToken token) {
+        return token.Raw;
+    }
+}
+
+class JwtRegisteredClaimNames {
+    static string Sub {
+        get {
+            return "sub";
+        }
+    }
+
+    static string Jti {
+        get {
+            return "jti";
+        }
+    }
+
+    static string Iat {
+        get {
+            return "iat";
+        }
+    }
+}

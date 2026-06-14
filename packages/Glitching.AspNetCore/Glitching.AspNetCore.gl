@@ -18,6 +18,11 @@ struct WebApplication;
 static char * WebApplication_Handle(struct WebApplication * self, char * method, char * path, char * body);
 typedef char *(*GlitchEndpointHandler)(void);
 typedef char *(*GlitchMiddlewareHandler)(char *);
+#ifdef _WIN32
+typedef SOCKET glitch_socket_t;
+#else
+typedef int glitch_socket_t;
+#endif
 
 struct GlitchEndpointHandlerEntry {
     struct WebApplication *app;
@@ -144,19 +149,19 @@ static void GlitchMiddlewareHandlers_RemoveApp(struct WebApplication *app) {
     GlitchMiddlewareHandlers_len = write;
 }
 
-static void GlitchRestHost_close_socket(int fd) {
+static void GlitchRestHost_close_socket(glitch_socket_t fd) {
 #ifdef _WIN32
-    closesocket((SOCKET)fd);
+    closesocket(fd);
 #else
     close(fd);
 #endif
 }
 
-static int GlitchRestHost_send_all(int fd, const char *data, int len) {
+static int GlitchRestHost_send_all(glitch_socket_t fd, const char *data, int len) {
     int sent = 0;
     while (sent < len) {
 #ifdef _WIN32
-        int n = send((SOCKET)fd, data + sent, len - sent, 0);
+        int n = send(fd, data + sent, len - sent, 0);
 #else
         int n = (int)send(fd, data + sent, (size_t)(len - sent), 0);
 #endif
@@ -166,16 +171,29 @@ static int GlitchRestHost_send_all(int fd, const char *data, int len) {
     return 1;
 }
 
+static int GlitchRestHost_read_env_int(const char *name, int fallback) {
+    const char *value = getenv(name);
+    if (!value || !*value) {
+        return fallback;
+    }
+    int parsed = atoi(value);
+    return parsed > 0 ? parsed : fallback;
+}
+
 static void GlitchRestHost_Run(struct WebApplication *app, int port, int max_requests) {
 #ifdef _WIN32
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { fprintf(stderr, \"WSAStartup failed\\n\"); return; }
 #endif
-    int server_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    glitch_socket_t server_fd = socket(AF_INET, SOCK_STREAM, 0);
+#ifdef _WIN32
+    if (server_fd == INVALID_SOCKET) { fprintf(stderr, \"socket failed\\n\"); return; }
+#else
     if (server_fd < 0) { fprintf(stderr, \"socket failed\\n\"); return; }
+#endif
     int opt = 1;
 #ifdef _WIN32
-    setsockopt((SOCKET)server_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
 #else
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 #endif
@@ -194,13 +212,22 @@ static void GlitchRestHost_Run(struct WebApplication *app, int port, int max_req
         GlitchRestHost_close_socket(server_fd);
         return;
     }
+    fprintf(stderr, \"Glitching HTTP host listening on port %d\\n\", port);
+    fprintf(stderr, \"Glitching HTTP host entering accept loop\\n\");
+    fflush(stderr);
     int handled = 0;
     while (max_requests <= 0 || handled < max_requests) {
-        int client_fd = (int)accept(server_fd, NULL, NULL);
+        glitch_socket_t client_fd = accept(server_fd, NULL, NULL);
+#ifdef _WIN32
+        if (client_fd == INVALID_SOCKET) { continue; }
+#else
         if (client_fd < 0) { continue; }
+#endif
+        fprintf(stderr, \"Glitching HTTP host accepted request\\n\");
+        fflush(stderr);
         char buffer[4096];
 #ifdef _WIN32
-        int read_len = recv((SOCKET)client_fd, buffer, sizeof(buffer) - 1, 0);
+        int read_len = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 #else
         int read_len = (int)recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 #endif
@@ -365,6 +392,31 @@ class HttpContextAccessor : IHttpContextAccessor {
     public HttpContext HttpContext;
 }
 
+class CorsPolicyBuilder {
+    CorsPolicyBuilder AllowAnyOrigin() {
+        return new CorsPolicyBuilder();
+    }
+
+    CorsPolicyBuilder AllowAnyHeader() {
+        return new CorsPolicyBuilder();
+    }
+
+    CorsPolicyBuilder AllowAnyMethod() {
+        return new CorsPolicyBuilder();
+    }
+}
+
+class SwaggerOptions {
+    public string RouteTemplate;
+}
+
+class SwaggerUiOptions {
+    void SwaggerEndpoint(string url, string name) {}
+}
+
+class CorsMiddlewareOptions {
+}
+
 class Endpoint {
     public string Method;
     public string Path;
@@ -431,6 +483,10 @@ class WebApplication {
     void UseCors(string policy) {
         this.Use("cors");
     }
+
+    void UseCors(CorsPolicyBuilder configure) {
+        this.Use("cors");
+    }
     
     void UseCors() {
         this.Use("cors");
@@ -439,7 +495,9 @@ class WebApplication {
     void UseMiddleware<T>() {}
     void UseMiddleware<T>(object param) {}
     void UseSwagger() {}
+    void UseSwagger(SwaggerOptions configure) {}
     void UseSwaggerUI(object configure) {}
+    void UseSwaggerUI(SwaggerUiOptions configure) {}
     void UseSwaggerUI() {}
     void UseStaticFiles(object options) {}
     void UseStaticFiles() {}
@@ -490,11 +548,15 @@ class WebApplication {
     }
 
     void Run(int port) {
-        GlitchRestHost_Run(this, port, 0);
+        GlitchRestHost_Run(this, port, GlitchRestHost_read_env_int("GLITCH_HTTP_MAX_REQUESTS", 0));
     }
 
     void Run() {
-        GlitchRestHost_Run(this, 5000, 0);
+        GlitchRestHost_Run(
+            this,
+            GlitchRestHost_read_env_int("GLITCH_HTTP_PORT", 5000),
+            GlitchRestHost_read_env_int("GLITCH_HTTP_MAX_REQUESTS", 0)
+        );
     }
 
     void RunOnce(int port) {
