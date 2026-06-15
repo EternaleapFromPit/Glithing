@@ -76,6 +76,8 @@ The current boundary is:
 - The EF Core InMemory provider slice is implemented and covered by tests.
 - `System.Threading.Tasks` now exposes `Task.IsCompleted` on the LLVM path, and the fixed-arity `Task.WhenAll` path remains green.
 - Package extension-method support is implemented with explicit `this` receivers and ambiguity checks.
+- The RealWorld sample now has package surfaces for `Microsoft.AspNetCore.Authorization`, `Microsoft.AspNetCore.Mvc`, `Microsoft.AspNetCore.Mvc.Filters`, `Microsoft.AspNetCore.Mvc.ApplicationModels`, `Microsoft.AspNetCore.Http`, and `Microsoft.AspNetCore.Builder`, which closes the first compile-time package gaps discovered while trying to build the sample.
+- Open generic `typeof(IPipelineBehavior<,>)` style syntax now parses as an open-arity placeholder instead of failing immediately, which lets the sample's DI registrations reach semantic resolution.
 - `System.Linq.Enumerable` now has working `IEnumerable<T>` overloads for `Count`, `Any`, `First`, `FirstOrDefault`, `ToList`, and `ToArray` instead of returning placeholder defaults.
 - `System.Array.Empty<T>()` is present on the current core-library surface, and `bool.Parse` plus the `string` null helpers now compile without breaking unrelated package loads.
 - `int.Parse`, `int.TryParse`, `DateTime.Parse`, and `TimeSpan.FromMinutes` are now available on the current `System` surface without breaking unrelated package loads.
@@ -83,6 +85,7 @@ The current boundary is:
 - `HashSet<T>` is now available as a package-backed collection surface built on the existing list runtime path.
 - `System.Text.Encoding.UTF8.GetBytes` now compiles on the current text-encoding surface and handles null input explicitly.
 - Generated regex partial methods used by the ASP.NET sample now synthesize a real `Regex` construction, and the `System.Text.RegularExpressions` surface has a working narrow replace helper for the slug use case.
+- nullable value-type syntax now emits an explicit diagnostic instead of being silently treated as a reference-nullability hint
 - `System.Type` now lowers as a real reflection token with `GetMethod`, `GetProperty`, `GetProperties`, `GetGenericArguments`, and `GetGenericTypeDefinition` support for the current package-backed reflection slice, including open generic names such as `ICollection<>`.
 - Borrow-check joins now ignore early-return branches so safe post-`if` and post-`switch` code is not poisoned by a branch that exits the function.
 - Loop-aware ownership joins now preserve the state at `break` / `continue` exits instead of flattening them into the loop base state, so loop-exiting branches no longer lose the ownership effects that occurred before the exit.
@@ -100,6 +103,10 @@ The current boundary is:
 3. Replace any remaining compatibility stubs with real lowering or real diagnostics, especially in package surfaces that still return typed defaults as placeholders.
 4. Expand framework compatibility in small, test-driven slices where the runtime model already exists, and keep unsupported members on explicit diagnostics with rewrite guidance.
 5. Add additional sample/runtime acceptance work only where a concrete blocker remains after the current compile gates.
+6. Add a real `Nullable<T>` lowering path, lifted conversions, and value-type boxing/unboxing support for the supported scalar and struct subset; until then, keep value-type `T?` uses on explicit diagnostics.
+7. Add the missing `Microsoft.AspNetCore.Authorization` package surface so controller-level `[Authorize]` attributes in the RealWorld sample and similar ASP.NET code can resolve during package import.
+8. Restore full project-graph execution for the RealWorld sample and its integration tests so `Conduit` and `Conduit.IntegrationTests` can be compiled together without manual bundle surgery.
+9. Add a native entrypoint synthesis path for top-level program files and test assemblies; native `--emit-exe` currently reaches the linker but still fails because the compiled LLVM module does not export `main`.
 
 ## C# Standard v7 Gap Analysis
 
@@ -135,6 +142,10 @@ These standard sections depend on raw memory access or GC-style runtime behavior
 ### Plan implication
 
 The next safe expansion path is to continue implementing the language and framework slices listed above, while keeping the unsafe/GC-dependent sections as explicit diagnostics or limited compatibility shims instead of silent lowering.
+
+The current RealWorld blocker is now concrete: the sample still needs a real project/package graph for `Conduit.*` namespaces, and the native pipeline still needs an emitted entrypoint for top-level programs and xUnit assemblies before `--emit-exe` can produce something runnable.
+
+The nullable value-type and boxing/unboxing slice is still open. The compiler now warns on value-type `T?`, but `Nullable<T>`, lifted conversions, and value-type boxing/unboxing still need a real runtime/type-system implementation before they can be called supported.
 
 ### Unsupported syntax policy
 
@@ -198,6 +209,15 @@ Rewrite guidance should be specific and actionable:
 13. The task-like package surface now exposes the common awaiter/result helpers directly, and those awaiter methods move the underlying wrapper instead of borrowing it unsafely.
    - `Task`, `Task<T>`, `ValueTask`, and `ValueTask<T>` now expose `GetAwaiter()` and `GetResult()` where the current async/task lowering expects them.
    - Covered by regression tests that compile direct package-surface calls to `GetResult()` and `GetAwaiter().GetResult()` on `Task<T>` and `ValueTask<T>`.
+14. `List<T>.GetEnumerator()` now returns a real package enumerator backed by a borrowed view of the list.
+   - The enumerator uses the existing ownership wrappers so `foreach`-style traversal can read the live list without taking ownership of it.
+   - Covered by a regression test that calls `GetEnumerator()`, `MoveNext()`, and `Current` directly on a concrete list.
+15. The compatibility analyzer no longer flags the package-defined list enumerator as an opaque heap layout when it appears in the current collection surface.
+   - This keeps the new enumerator slice from re-triggering the generic-layout warning path used for genuine unknown allocations.
+   - Covered indirectly by the existing `Rc<T>` compatibility regression tests remaining warning-free after the collection update.
+16. Nullable value types now produce an explicit warning with rewrite guidance instead of being silently erased to the underlying reference-or-scalar type.
+   - The analyzer now catches `T?` when `T` is a value type and points at the `Nullable<T>` / lifted-conversion gap directly.
+   - Covered by a regression test that asserts the warning for `Point?`.
 
 ## Notes
 

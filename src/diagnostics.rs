@@ -400,7 +400,7 @@ impl<'a> CompatibilityAnalyzer<'a> {
                 fields,
                 ..
             } => {
-                if type_name.starts_with("Rc_") {
+                if type_name.starts_with("Rc_") || type_name.starts_with("ListEnumerator") {
                     for arg in args {
                         self.visit_expr(arg, emit_llvm);
                     }

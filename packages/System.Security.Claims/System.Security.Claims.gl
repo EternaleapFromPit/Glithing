@@ -8,6 +8,32 @@ class ClaimValueTypes {
     }
 }
 
+class ClaimTypes {
+    static string NameIdentifier {
+        get {
+            return "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier";
+        }
+    }
+
+    static string Name {
+        get {
+            return "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name";
+        }
+    }
+
+    static string Email {
+        get {
+            return "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress";
+        }
+    }
+
+    static string Role {
+        get {
+            return "http://schemas.microsoft.com/ws/2008/06/identity/claims/role";
+        }
+    }
+}
+
 class Claim {
     public string Type;
     public string Value;
@@ -26,3 +52,49 @@ class Claim {
     }
 }
 
+class ClaimsIdentity {
+    public List<Claim> Claims;
+    public string AuthenticationType;
+
+    public ClaimsIdentity() {
+        this.Claims = new List<Claim>();
+        this.AuthenticationType = "";
+    }
+
+    public ClaimsIdentity(Claim[] claims) {
+        this.Claims = new List<Claim>();
+        this.AuthenticationType = "";
+        int i = 0;
+        while (i < claims.Length) {
+            this.Claims.Add(claims[i]);
+            i++;
+        }
+    }
+
+    Claim FindFirst(string type) {
+        int i = 0;
+        while (i < this.Claims.Count) {
+            Claim claim = this.Claims[i];
+            if (claim.Type == type) {
+                return claim;
+            }
+            i++;
+        }
+        return null;
+    }
+}
+
+class ClaimsPrincipal {
+    public ClaimsIdentity Identity;
+    public List<Claim> Claims;
+
+    public ClaimsPrincipal() {
+        this.Identity = new ClaimsIdentity();
+        this.Claims = this.Identity.Claims;
+    }
+
+    public ClaimsPrincipal(ClaimsIdentity identity) {
+        this.Identity = identity;
+        this.Claims = identity != null ? identity.Claims : new List<Claim>();
+    }
+}

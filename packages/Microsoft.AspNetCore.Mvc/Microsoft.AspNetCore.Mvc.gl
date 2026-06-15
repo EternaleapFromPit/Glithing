@@ -1,0 +1,85 @@
+package Microsoft.AspNetCore.Mvc;
+
+using Glitching.AspNetCore;
+using Microsoft.AspNetCore.Mvc.Filters;
+
+class Controller : ControllerBase {
+}
+
+class RouteAttribute {
+    public string Template;
+
+    public RouteAttribute() {
+        this.Template = "";
+    }
+
+    public RouteAttribute(string template) {
+        this.Template = template;
+    }
+}
+
+class HttpGetAttribute {
+    public string Template;
+
+    public HttpGetAttribute() {
+        this.Template = "";
+    }
+
+    public HttpGetAttribute(string template) {
+        this.Template = template;
+    }
+}
+
+class HttpPostAttribute {
+    public string Template;
+
+    public HttpPostAttribute() {
+        this.Template = "";
+    }
+
+    public HttpPostAttribute(string template) {
+        this.Template = template;
+    }
+}
+
+class HttpPutAttribute {
+    public string Template;
+
+    public HttpPutAttribute() {
+        this.Template = "";
+    }
+
+    public HttpPutAttribute(string template) {
+        this.Template = template;
+    }
+}
+
+class HttpDeleteAttribute {
+    public string Template;
+
+    public HttpDeleteAttribute() {
+        this.Template = "";
+    }
+
+    public HttpDeleteAttribute(string template) {
+        this.Template = template;
+    }
+}
+
+class FromQueryAttribute {
+    public FromQueryAttribute() {}
+}
+
+class FromBodyAttribute {
+    public FromBodyAttribute() {}
+}
+
+class ContentResult {
+    public string Content;
+    public string ContentType;
+
+    public ContentResult() {
+        this.Content = "";
+        this.ContentType = "";
+    }
+}

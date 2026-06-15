@@ -1,5 +1,7 @@
 package System.Collections.Generic;
 
+using System.Ownership;
+
 public interface IEnumerable<T> {
     IEnumerator<T> GetEnumerator();
 }
@@ -54,8 +56,6 @@ public struct KeyValuePair<K, V> {
 }
 
 class List<T> : IList<T>, IReadOnlyList<T> {
-    native "";
-
     List() {}
 
     T[] ToArray() {
@@ -73,13 +73,11 @@ class List<T> : IList<T>, IReadOnlyList<T> {
     int Count { get { return 0; } }
 
     IEnumerator<T> GetEnumerator() {
-        return null;
+        return new ListEnumerator<T> { Source = make_view(this), Index = -1 };
     }
 }
 
 class Dictionary<K, V> : IDictionary<K, V> {
-    native "";
-
     Dictionary() {}
 
     void Add(K key, V value) {}
@@ -104,6 +102,28 @@ class Dictionary<K, V> : IDictionary<K, V> {
     IEnumerator<KeyValuePair<K, V>> GetEnumerator() {
         return null;
     }
+}
+
+class ListEnumerator<T> : IEnumerator<T> {
+    public view<List<T>> Source;
+    public int Index;
+
+    T Current {
+        get {
+            return this.Source[this.Index];
+        }
+    }
+
+    bool MoveNext() {
+        this.Index = this.Index + 1;
+        return this.Index < this.Source.Count;
+    }
+
+    void Reset() {
+        this.Index = -1;
+    }
+
+    void Dispose() {}
 }
 
 class HashSet<T> : IEnumerable<T>, IReadOnlyCollection<T> {

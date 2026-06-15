@@ -1,0 +1,26 @@
+using System.Collections.Generic;
+
+int Compute() {
+    List<int> values = new List<int>();
+    Dictionary<int, int> map = new Dictionary<int, int>();
+    int total = 0;
+    int i = 0;
+    while (i < 20000) {
+        values.Add(i);
+        map.Add(i, i + 1);
+        total = total + i;
+        i = i + 1;
+    }
+
+    i = 0;
+    while (i < 20000) {
+        if (map.ContainsKey(i)) {
+            total = total + 1;
+        }
+        i = i + 1;
+    }
+
+    return total + values.Count + map.Count;
+}
+
+print(Compute());

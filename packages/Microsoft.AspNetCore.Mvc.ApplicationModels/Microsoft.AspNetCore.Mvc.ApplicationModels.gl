@@ -1,0 +1,25 @@
+package Microsoft.AspNetCore.Mvc.ApplicationModels;
+
+using System.Collections.Generic;
+
+class ApiExplorerModel {
+    public string GroupName;
+
+    public ApiExplorerModel() {
+        this.GroupName = "";
+    }
+}
+
+class ControllerModel {
+    public List<object> Attributes;
+    public ApiExplorerModel ApiExplorer;
+
+    public ControllerModel() {
+        this.Attributes = new List<object>();
+        this.ApiExplorer = new ApiExplorerModel();
+    }
+}
+
+interface IControllerModelConvention {
+    void Apply(ControllerModel controller);
+}

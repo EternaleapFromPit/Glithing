@@ -50,6 +50,7 @@ pub(crate) enum IrType {
     Enumerable(Box<IrType>),
     Thread,
     Task(Box<IrType>),
+    Nullable(Box<IrType>),
     Function {
         params: Vec<IrType>,
         return_type: Box<IrType>,
@@ -190,6 +191,7 @@ pub(crate) enum TypedExprKind {
     Var(String),
     FunctionSymbol(String),
     Move(String),
+    NullableSome(Box<TypedExpr>),
     ArrayLiteral(Vec<TypedExpr>),
     NewArray {
         element_type: IrType,
@@ -1013,7 +1015,19 @@ where
     C: Fn() -> String,
 {
     let mut applicable = Vec::<(&FunctionSignature, Vec<u16>)>::new();
+    let mut seen = HashSet::<String>::new();
     for signature in signatures {
+        let key = format!(
+            "{:?}|{:?}|{:?}|{:?}|{}",
+            signature.params,
+            signature.params_element_type,
+            signature.return_type,
+            signature.return_ownership,
+            signature.is_static
+        );
+        if !seen.insert(key) {
+            continue;
+        }
         if signature.params.len() == args.len() {
             if let Some(ranks) = signature
                 .params
@@ -1409,6 +1423,9 @@ fn summarize_typed_stmts(stmts: &[TypedStmt], indent: &str, out: &mut String) {
 
 fn summarize_typed_expr(expr: &TypedExpr, indent: &str, out: &mut String) {
     match &expr.kind {
+        TypedExprKind::NullableSome(value) => {
+            summarize_typed_expr(value, indent, out);
+        }
         TypedExprKind::Call(call) => {
             match &call.kind {
                 TypedCallKind::Function { name, symbol } => out.push_str(&format!(
@@ -2829,6 +2846,7 @@ pub(crate) fn ir_symbol_suffix(ty: &IrType) -> String {
             format!("dict_{}_{}", ir_symbol_suffix(key), ir_symbol_suffix(value))
         }
         IrType::Enumerable(inner) => format!("ienumerable_{}", ir_symbol_suffix(inner)),
+        IrType::Nullable(inner) => format!("nullable_{}", ir_symbol_suffix(inner)),
         IrType::Thread => "thread".to_string(),
         IrType::Task(inner) => format!("task_{}", ir_symbol_suffix(inner)),
         IrType::Function { params, return_type } => {
@@ -3026,6 +3044,9 @@ fn collect_generic_call_instantiations_expr(
     output: &mut Vec<GenericInstantiation>,
 ) {
     match &expr.kind {
+        TypedExprKind::NullableSome(value) => {
+            collect_generic_call_instantiations_expr(value, generic_symbols, output);
+        }
         TypedExprKind::ArrayLiteral(values) => {
             for value in values {
                 collect_generic_call_instantiations_expr(value, generic_symbols, output);
@@ -5278,7 +5299,37 @@ fn lower_typed_expr_with_expected(
             }
         }
     };
-    Ok(typed)
+    Ok(coerce_for_expected_type(typed, expected))
+}
+
+fn coerce_for_expected_type(mut typed: TypedExpr, expected: Option<&IrType>) -> TypedExpr {
+    let Some(expected) = expected else {
+        return typed;
+    };
+    match expected {
+        IrType::Nullable(inner) => {
+            if matches!(typed.ty, IrType::Nullable(_)) {
+                return typed;
+            }
+            if matches!(typed.ty, IrType::Unknown(ref name) if name == "null") {
+                typed.ty = expected.clone();
+                typed.ownership = Ownership::Shared;
+                typed.drop_kind = drop_kind_for_type(expected, &typed.ownership);
+                return typed;
+            }
+            if is_nullable_value_type(inner) && ir_arg_matches(inner, &typed.ty) {
+                let wrapped = TypedExpr {
+                    kind: TypedExprKind::NullableSome(Box::new(typed)),
+                    ty: expected.clone(),
+                    ownership: Ownership::Shared,
+                    drop_kind: drop_kind_for_type(expected, &Ownership::Shared),
+                };
+                return wrapped;
+            }
+            typed
+        }
+        _ => typed,
+    }
 }
 
 fn lower_expr(
@@ -5853,12 +5904,17 @@ fn type_object_expr_from_ir_impl(ty: &IrType, env: &TypeEnv, include_members: bo
             | IrType::Dictionary(_, _)
             | IrType::Enumerable(_)
             | IrType::Task(_)
+            | IrType::Nullable(_)
             | IrType::Function { .. }
     );
     let generic_arguments = type_object_generic_arguments_from_ir(ty, env);
     let base_type = type_object_base_type_from_ir(ty, env);
     let element_type = match ty {
-        IrType::Array(inner) | IrType::List(inner) | IrType::Enumerable(inner) | IrType::Task(inner) => {
+        IrType::Array(inner)
+        | IrType::List(inner)
+        | IrType::Enumerable(inner)
+        | IrType::Task(inner)
+        | IrType::Nullable(inner) => {
             Some(type_object_expr_from_ir_shallow(inner, env))
         }
         _ => None,
@@ -5937,6 +5993,7 @@ fn type_object_expr_from_ir_impl(ty: &IrType, env: &TypeEnv, include_members: bo
                         TypedExprKind::Bool(matches!(
                             ty,
                             IrType::Struct(_)
+                                | IrType::Nullable(_)
                                 | IrType::Bool
                                 | IrType::Byte
                                 | IrType::Short
@@ -6385,6 +6442,7 @@ fn type_object_full_name_from_ir(ty: &IrType) -> String {
             }
         ),
         IrType::Weak(inner) => format!("weakref<{}>", type_object_full_name_from_ir(inner)),
+        IrType::Nullable(inner) => format!("{}?", type_object_full_name_from_ir(inner)),
     }
 }
 
@@ -6394,6 +6452,7 @@ fn type_object_generic_definition_name_from_ir(ty: &IrType) -> String {
         IrType::Dictionary(_, _) => "Dictionary<,>".to_string(),
         IrType::Enumerable(_) => "ICollection<>".to_string(),
         IrType::Task(_) => "Task<>".to_string(),
+        IrType::Nullable(_) => "Nullable<>".to_string(),
         IrType::Function { params, return_type } => {
             let placeholders = std::iter::repeat("")
                 .take(params.len() + if matches!(return_type.as_ref(), IrType::Void) { 0 } else { 1 })
@@ -6410,6 +6469,7 @@ fn type_object_generic_arguments_from_ir(ty: &IrType, env: &TypeEnv) -> Vec<Type
         IrType::List(inner)
         | IrType::Enumerable(inner)
         | IrType::Task(inner)
+        | IrType::Nullable(inner)
         | IrType::Weak(inner) => vec![type_object_expr_from_ir_shallow(inner, env)],
         IrType::Dictionary(key, value) => vec![
             type_object_expr_from_ir_shallow(key, env),
@@ -6786,6 +6846,9 @@ fn type_syntax_to_ir_with_subst(
         }
         TypeSyntax::Named(name) => {
             if let Some(replacement) = subst.get(name) {
+                if matches!(replacement, TypeSyntax::Named(replacement_name) if replacement_name == name) {
+                    return IrType::Unknown(name.clone());
+                }
                 return type_syntax_to_ir_with_subst(replacement, env, subst);
             }
             if let Some(signature) = env.delegates.get(name) {
@@ -6843,6 +6906,9 @@ fn type_syntax_to_ir_with_subst(
         }
         TypeSyntax::GenericNamed { name, args } => {
             if let Some(replacement) = subst.get(name) {
+                if matches!(replacement, TypeSyntax::Named(replacement_name) if replacement_name == name) {
+                    return IrType::Unknown(format!("{name}<>"));
+                }
                 return type_syntax_to_ir_with_subst(replacement, env, subst);
             }
             if let Some(signature) = env.delegates.get(name) {
@@ -6895,9 +6961,32 @@ fn type_syntax_to_ir_with_subst(
         TypeSyntax::Task(inner) => {
             IrType::Task(Box::new(type_syntax_to_ir_with_subst(inner, env, subst)))
         }
-        TypeSyntax::Nullable(inner) => type_syntax_to_ir_with_subst(inner, env, subst),
+        TypeSyntax::Nullable(inner) => {
+            let inner = type_syntax_to_ir_with_subst(inner, env, subst);
+            if is_nullable_value_type(&inner) {
+                IrType::Nullable(Box::new(inner))
+            } else {
+                inner
+            }
+        }
         TypeSyntax::Void => IrType::Void,
     }
+}
+
+fn is_nullable_value_type(ty: &IrType) -> bool {
+    matches!(
+        ty,
+        IrType::Bool
+            | IrType::Byte
+            | IrType::Short
+            | IrType::Int
+            | IrType::Long
+            | IrType::UInt
+            | IrType::Double
+            | IrType::Decimal
+            | IrType::Struct(_)
+            | IrType::Unknown(_)
+    )
 }
 
 fn ownership_for_declared_type_syntax(ty: &TypeSyntax, env: &TypeEnv) -> Ownership {
@@ -6967,7 +7056,7 @@ fn delegate_signature_to_ir(
         let replacement = args
             .get(index)
             .cloned()
-            .unwrap_or_else(|| TypeSyntax::Named(generic_name.clone()));
+            .unwrap_or_else(|| TypeSyntax::Named(format!("__open_generic_{generic_name}")));
         subst.insert(generic_name.clone(), replacement);
     }
     let params = signature
@@ -7007,7 +7096,7 @@ pub(crate) fn ownership_for_type(ty: &IrType) -> Ownership {
         | IrType::Decimal
         | IrType::Void
         | IrType::Weak(_) => Ownership::Copy,
-        IrType::Function { .. } => Ownership::Shared,
+        IrType::Function { .. } | IrType::Nullable(_) => Ownership::Shared,
         IrType::Ref(_) => Ownership::Borrowed,
         IrType::Enumerable(_) => Ownership::View,
         IrType::Class(_) | IrType::Interface(_) => Ownership::Shared,
@@ -7030,7 +7119,7 @@ pub(crate) fn drop_kind_for_type(ty: &IrType, ownership: &Ownership) -> DropKind
         Ownership::View => DropKind::ViewOnly,
         Ownership::Moved => DropKind::None,
         Ownership::Shared => match ty {
-            IrType::Class(_) | IrType::Interface(_) => DropKind::DropClass,
+            IrType::Class(_) | IrType::Interface(_) | IrType::Nullable(_) => DropKind::DropClass,
             IrType::Function { .. } => DropKind::DropDelegate,
             _ => DropKind::None,
         },

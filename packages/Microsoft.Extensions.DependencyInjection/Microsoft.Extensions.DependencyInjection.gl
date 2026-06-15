@@ -206,6 +206,7 @@ class IServiceCollection {
         this.Message = value;
     }
     void AddTransient<TService, TImplementation>() {}
+    void AddTransient(object serviceType, object implementationType) {}
     void AddScoped(object serviceType, object implementationType) {}
     void AddScoped<TService, TImplementation>() {}
 

@@ -2536,11 +2536,26 @@ impl Parser {
             return Ok(args);
         }
         loop {
+            if self.at(&TokenKind::Comma) {
+                args.push(TypeSyntax::Void);
+                self.advance();
+                if self.at(&TokenKind::Greater) {
+                    args.push(TypeSyntax::Void);
+                    self.advance();
+                    break;
+                }
+                continue;
+            }
             let ty = self.parse_type_syntax()?.ok_or_else(|| {
                 self.error_here(&format!("expected type argument for {type_name}"))
             })?;
             args.push(ty);
             if self.match_kind(&TokenKind::Comma) {
+                if self.at(&TokenKind::Greater) {
+                    args.push(TypeSyntax::Void);
+                    self.advance();
+                    break;
+                }
                 continue;
             }
             self.expect(TokenKind::Greater)?;

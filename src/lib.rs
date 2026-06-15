@@ -16,6 +16,7 @@ mod tir;
 mod toolchain;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -75,7 +76,7 @@ pub fn run_cli() -> Result<(), String> {
         Some(default_executable_output_path(&input))
     };
     let wants_llvm = wants_llvm || default_exe_output.is_some();
-    let compiled = compile_source_with_options(&source, wants_llvm, false)?;
+    let compiled = run_on_large_stack(move || compile_source_with_options(&source, wants_llvm, false))?;
     for diagnostic in &compiled.diagnostics {
         eprintln!("{diagnostic}");
     }
@@ -135,6 +136,13 @@ fn default_executable_output_path(input: &str) -> PathBuf {
 
 fn read_input_source(input: &str) -> Result<String, String> {
     let path = Path::new(input);
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("csproj"))
+    {
+        return read_project_source(path);
+    }
     if path.is_dir() {
         let mut files = Vec::new();
         collect_source_files(path, &mut files)?;
@@ -155,6 +163,96 @@ fn read_input_source(input: &str) -> Result<String, String> {
         path.display(),
         strip_utf8_bom(&text)
     ))
+}
+
+fn run_on_large_stack<T, F>(f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let builder = std::thread::Builder::new().stack_size(1024 * 1024 * 1024);
+    let handle = builder
+        .spawn(f)
+        .map_err(|e| format!("failed to spawn compilation thread: {e}"))?;
+    handle
+        .join()
+        .map_err(|_| "compilation thread panicked".to_string())?
+}
+
+fn read_project_source(project_path: &Path) -> Result<String, String> {
+    let mut files = Vec::new();
+    let mut visited_projects = HashSet::<PathBuf>::new();
+    collect_project_source_files(project_path, &mut visited_projects, &mut files)?;
+    files.sort();
+    files.dedup();
+    let mut source = String::new();
+    for file in files {
+        let text = fs::read_to_string(&file)
+            .map_err(|e| format!("failed to read {}: {e}", file.display()))?;
+        source.push_str(&format!("// __FILE_PATH__: {}\n", file.display()));
+        source.push_str(strip_utf8_bom(&text));
+        source.push_str("\n__FILE_BOUNDARY__;\n");
+    }
+    Ok(source)
+}
+
+fn collect_project_source_files(
+    project_path: &Path,
+    visited_projects: &mut HashSet<PathBuf>,
+    output: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let canonical = fs::canonicalize(project_path)
+        .map_err(|e| format!("failed to resolve project {}: {e}", project_path.display()))?;
+    if !visited_projects.insert(canonical.clone()) {
+        return Ok(());
+    }
+
+    let project_dir = canonical.parent().ok_or_else(|| {
+        format!(
+            "project {} does not have a parent directory",
+            canonical.display()
+        )
+    })?;
+    collect_source_files(project_dir, output)?;
+
+    let project_text = fs::read_to_string(&canonical)
+        .map_err(|e| format!("failed to read project {}: {e}", canonical.display()))?;
+    for reference in extract_project_references(&project_text) {
+        let reference_path = project_dir.join(reference);
+        if reference_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("csproj"))
+        {
+            collect_project_source_files(&reference_path, visited_projects, output)?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_project_references(project_text: &str) -> Vec<PathBuf> {
+    let mut references = Vec::new();
+    for line in project_text.lines() {
+        let line = line.trim();
+        if !line.contains("<ProjectReference") {
+            continue;
+        }
+        if let Some(include) = extract_xml_include_attr(line) {
+            references.push(PathBuf::from(include));
+        }
+    }
+    references
+}
+
+fn extract_xml_include_attr(line: &str) -> Option<String> {
+    for key in ["Include=\"", "Include='"] {
+        if let Some(start) = line.find(key) {
+            let rest = &line[start + key.len()..];
+            let end = rest.find(['"', '\'']).unwrap_or(rest.len());
+            return Some(rest[..end].to_string());
+        }
+    }
+    None
 }
 
 fn collect_source_files(path: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -193,6 +291,16 @@ fn compile_llvm_ir(source: &str) -> Result<String, String> {
     Ok(compile_source_with_options(source, true, false)?
         .llvm_ir()?
         .to_string())
+}
+
+#[cfg(test)]
+fn compile_llvm_ir_from_path(input: &str) -> Result<String, String> {
+    let source = read_input_source(input)?;
+    run_on_large_stack(move || {
+        Ok(compile_source_with_options(&source, true, false)?
+            .llvm_ir()?
+            .to_string())
+    })
 }
 
 #[cfg(test)]

@@ -110,6 +110,7 @@ pub(crate) struct LlvmEmitter {
     specialized_symbols: HashMap<(String, Vec<IrType>), String>,
     specialized_functions: Vec<TypedFunction>,
     object_types: HashMap<String, LlObjectType>,
+    nullable_layouts: HashSet<String>,
     endpoint_handlers: Vec<EndpointHandlerBinding>,
     drop_order: Vec<String>,
     tmp: usize,
@@ -141,6 +142,7 @@ impl LlvmEmitter {
             specialized_symbols: HashMap::new(),
             specialized_functions: Vec::new(),
             object_types: HashMap::new(),
+            nullable_layouts: HashSet::new(),
             endpoint_handlers: program.endpoint_handlers.clone(),
             drop_order: Vec::new(),
             tmp: 0,
@@ -458,6 +460,119 @@ impl LlvmEmitter {
         );
     }
 
+    fn nullable_type_name(inner: &IrType) -> String {
+        format!("Nullable_{}", ir_symbol_suffix(inner))
+    }
+
+    fn ensure_nullable_object_type(&mut self, inner: &IrType) -> String {
+        let type_name = Self::nullable_type_name(inner);
+        if self.nullable_layouts.insert(type_name.clone()) {
+            let payload_ty = llvm_ir_type(inner).as_ir().to_string();
+            self.type_defs.push(format!(
+                "%{} = type {{ i64, ptr, i1, {} }}\n",
+                llvm_object_name(&type_name),
+                payload_ty
+            ));
+            let mut fields = HashMap::new();
+            fields.insert(
+                "HasValue".to_string(),
+                LlField {
+                    index: 2,
+                    ty: IrType::Bool,
+                    drop_kind: DropKind::None,
+                },
+            );
+            fields.insert(
+                "Value".to_string(),
+                LlField {
+                    index: 3,
+                    ty: inner.clone(),
+                    drop_kind: drop_kind_for_type(inner, &Ownership::Owned),
+                },
+            );
+            self.object_types.insert(
+                type_name.clone(),
+                LlObjectType {
+                    name: type_name.clone(),
+                    kind: TypeKind::Class,
+                    bases: Vec::new(),
+                    fields,
+                    constructor: None,
+                    constructor_params: vec![inner.clone()],
+                },
+            );
+            let llvm_name = llvm_object_name(&type_name);
+            let retain_name = retain_symbol(&type_name);
+            let drop_name = drop_symbol(&type_name);
+            self.globals.push(format!(
+                "define void @{retain_name}(ptr %object) {{\nentry:\n  %is_null = icmp eq ptr %object, null\n  br i1 %is_null, label %done, label %retain\nretain:\n  %rc_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 0\n  %rc = load i64, ptr %rc_ptr\n  %next = add i64 %rc, 1\n  store i64 %next, ptr %rc_ptr\n  br label %done\ndone:\n  ret void\n}}\n\n"
+            ));
+            self.globals.push(format!(
+                "define void @{drop_name}(ptr %object) {{\nentry:\n  %is_null = icmp eq ptr %object, null\n  br i1 %is_null, label %done, label %release\nrelease:\n  %rc_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 0\n  %rc = load i64, ptr %rc_ptr\n  %next = sub i64 %rc, 1\n  %destroy = icmp eq i64 %next, 0\n  br i1 %destroy, label %destroy_object, label %keep\ndestroy_object:\n  call void @glitch_free(ptr %object)\n  br label %done\nkeep:\n  store i64 %next, ptr %rc_ptr\n  br label %done\ndone:\n  ret void\n}}\n\n"
+            ));
+        }
+        type_name
+    }
+
+    fn boxed_scalar_type_name(ty: &IrType) -> Option<String> {
+        match ty {
+            IrType::Bool
+            | IrType::Byte
+            | IrType::Short
+            | IrType::Int
+            | IrType::Long
+            | IrType::UInt
+            | IrType::Double
+            | IrType::Decimal => Some(format!("Box_{}", ir_symbol_suffix(ty))),
+            _ => None,
+        }
+    }
+
+    fn ensure_boxed_scalar_object_type(&mut self, ty: &IrType) -> Option<String> {
+        let type_name = Self::boxed_scalar_type_name(ty)?;
+        if !self.object_types.contains_key(&type_name) {
+            self.type_defs.push(format!(
+                "%{} = type {{ i64, ptr, {} }}\n",
+                llvm_object_name(&type_name),
+                llvm_ir_type(ty).as_ir()
+            ));
+            let mut fields = HashMap::new();
+            fields.insert(
+                "Value".to_string(),
+                LlField {
+                    index: 2,
+                    ty: ty.clone(),
+                    drop_kind: drop_kind_for_type(ty, &Ownership::Owned),
+                },
+            );
+            self.object_types.insert(
+                type_name.clone(),
+                LlObjectType {
+                    name: type_name.clone(),
+                    kind: TypeKind::Class,
+                    bases: Vec::new(),
+                    fields,
+                    constructor: None,
+                    constructor_params: Vec::new(),
+                },
+            );
+            let llvm_name = llvm_object_name(&type_name);
+            let retain_name = retain_symbol(&type_name);
+            let drop_name = drop_symbol(&type_name);
+            let destroy_name = destroy_symbol(&type_name);
+            self.globals.push(format!(
+                "define void @{retain_name}(ptr %object) {{\nentry:\n  %is_null = icmp eq ptr %object, null\n  br i1 %is_null, label %done, label %retain\nretain:\n  %rc_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 0\n  %rc = load i64, ptr %rc_ptr\n  %next = add i64 %rc, 1\n  store i64 %next, ptr %rc_ptr\n  br label %done\ndone:\n  ret void\n}}\n\n"
+            ));
+            self.globals.push(format!(
+                "define void @{drop_name}(ptr %object) {{\nentry:\n  %is_null = icmp eq ptr %object, null\n  br i1 %is_null, label %done, label %release\nrelease:\n  %rc_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 0\n  %rc = load i64, ptr %rc_ptr\n  %next = sub i64 %rc, 1\n  %destroy = icmp eq i64 %next, 0\n  br i1 %destroy, label %destroy_object, label %keep\ndestroy_object:\n  call void @glitch_free(ptr %object)\n  br label %done\nkeep:\n  store i64 %next, ptr %rc_ptr\n  br label %done\ndone:\n  ret void\n}}\n\n"
+            ));
+            self.globals.push(format!(
+                "define void @{destroy_name}(ptr %object) {{\nentry:\n  ret void\n}}\n\n"
+            ));
+        }
+        Some(type_name)
+    }
+
     fn register_generic_specializations(
         &mut self,
         program: &TypedProgram,
@@ -514,6 +629,18 @@ impl LlvmEmitter {
             let llvm_name = llvm_object_name(&object.name);
             let retain_name = retain_symbol(&object.name);
             let drop_name = drop_symbol(&object.name);
+            if object.name.starts_with("Nullable_") {
+                self.body.push_str(&format!(
+                    "define void @{retain_name}(ptr %object) {{\nentry:\n  %is_null = icmp eq ptr %object, null\n  br i1 %is_null, label %done, label %retain\nretain:\n  %rc_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 0\n  %rc = load i64, ptr %rc_ptr\n  %next = add i64 %rc, 1\n  store i64 %next, ptr %rc_ptr\n  br label %done\ndone:\n  ret void\n}}\n\n"
+                ));
+                self.body.push_str(&format!(
+                    "define void @{drop_name}(ptr %object) {{\nentry:\n  %is_null = icmp eq ptr %object, null\n  br i1 %is_null, label %done, label %release\nrelease:\n  %rc_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 0\n  %rc = load i64, ptr %rc_ptr\n  %next = sub i64 %rc, 1\n  %destroy = icmp eq i64 %next, 0\n  br i1 %destroy, label %destroy_object, label %keep\ndestroy_object:\n  %has_value_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 2\n  %has_value = load i1, ptr %has_value_ptr\n  br i1 %has_value, label %drop_value, label %done\ndrop_value:\n"
+                ));
+                self.emit_nullable_payload_drop(&object, &llvm_name);
+                self.body
+                    .push_str("  call void @glitch_free(ptr %object)\n  br label %done\nkeep:\n  store i64 %next, ptr %rc_ptr\n  br label %done\ndone:\n  ret void\n}\n\n");
+                continue;
+            }
             if matches!(object.kind, TypeKind::Class | TypeKind::Interface) {
                 let destroy_name = destroy_symbol(&object.name);
                 self.body.push_str(&format!(
@@ -554,6 +681,19 @@ impl LlvmEmitter {
                 self.emit_collection_drop_value(&field.ty, &value_name);
                 continue;
             }
+            if let IrType::Nullable(inner) = &field.ty {
+                let ptr_name = format!("%field_{}_ptr", field.index);
+                let value_name = format!("%field_{}", field.index);
+                self.body.push_str(&format!(
+                    "  {ptr_name} = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 {}\n  {value_name} = load ptr, ptr {ptr_name}\n",
+                    field.index
+                ));
+                let type_name = LlvmEmitter::nullable_type_name(inner);
+                if self.object_types.contains_key(&type_name) {
+                    self.emit_drop(&type_name, &value_name);
+                }
+                continue;
+            }
             if matches!(field.drop_kind, DropKind::Free) && matches!(field.ty, IrType::Array(_)) {
                 let ptr_name = format!("%field_{}_ptr", field.index);
                 let value_name = format!("%field_{}", field.index);
@@ -582,6 +722,13 @@ impl LlvmEmitter {
                 ));
                 continue;
             }
+            if matches!(&field.ty, IrType::Unknown(name) if name == "object") {
+                self.body.push_str(&format!(
+                    "  %field_{}_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 {}\n  %field_{} = load ptr, ptr %field_{}_ptr\n  call void @glitch_box_release(ptr %field_{})\n",
+                    field.index, field.index, field.index, field.index, field.index
+                ));
+                continue;
+            }
             let Some(type_name) = object_type_name(&field.ty) else {
                 continue;
             };
@@ -604,6 +751,92 @@ impl LlvmEmitter {
         }
     }
 
+    fn emit_nullable_payload_drop(&mut self, object: &LlObjectType, llvm_name: &str) {
+        let Some(field) = object.fields.get("Value").cloned() else {
+            return;
+        };
+        if matches!(field.drop_kind, DropKind::DropCollection) {
+            let ptr_name = "%nullable_value_ptr";
+            let value_name = "%nullable_value";
+            self.body.push_str(&format!(
+                "  {ptr_name} = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 {}\n  {value_name} = load ptr, ptr {ptr_name}\n",
+                field.index
+            ));
+            self.emit_collection_drop_value(&field.ty, value_name);
+            return;
+        }
+        if matches!(field.drop_kind, DropKind::Free) && matches!(field.ty, IrType::Array(_)) {
+            let ptr_name = "%nullable_value_ptr";
+            let value_name = "%nullable_value";
+            self.body.push_str(&format!(
+                "  {ptr_name} = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 {}\n  {value_name} = load ptr, ptr {ptr_name}\n",
+                field.index
+            ));
+            if let IrType::Array(element) = &field.ty {
+                self.emit_array_drop_value(value_name, element);
+            }
+            return;
+        }
+        if matches!(field.drop_kind, DropKind::Free) && is_string_like_type(&field.ty) {
+            self.body.push_str(&format!(
+                "  %nullable_value_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 {}\n  %nullable_value = load ptr, ptr %nullable_value_ptr\n  call void @glitch_string_release(ptr %nullable_value)\n",
+                field.index
+            ));
+            return;
+        }
+        if matches!(field.drop_kind, DropKind::DropDelegate) {
+            self.body.push_str(&format!(
+                "  %nullable_value_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 {}\n  %nullable_value = load ptr, ptr %nullable_value_ptr\n  call void @glitch_delegate_release(ptr %nullable_value)\n",
+                field.index
+            ));
+            return;
+        }
+        if matches!(field.drop_kind, DropKind::DropClass | DropKind::DropStruct) {
+            if let Some(type_name) = object_type_name(&field.ty) {
+                if self.object_types.contains_key(type_name) {
+                    let drop_name = drop_symbol(&self.object_types[type_name].name);
+                    self.body.push_str(&format!(
+                        "  %nullable_value_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 {}\n  %nullable_value = load ptr, ptr %nullable_value_ptr\n  call void @{}(ptr %nullable_value)\n",
+                        field.index,
+                        drop_name
+                    ));
+                }
+            }
+        }
+    }
+
+    fn emit_boxed_scalar_value(&mut self, value: LlValue, ty: &IrType) -> Result<LlValue, String> {
+        let Some(type_name) = self.ensure_boxed_scalar_object_type(ty) else {
+            return Err(format!(
+                "LLVM backend: unsupported boxing target for type {:?}",
+                ty
+            ));
+        };
+        let llvm_name = llvm_object_name(&type_name);
+        let size_ptr = self.tmp();
+        let size = self.tmp();
+        let object = self.tmp();
+        self.body.push_str(&format!(
+            "  {size_ptr} = getelementptr %{llvm_name}, ptr null, i32 1\n  {size} = ptrtoint ptr {size_ptr} to i64\n  {object} = call ptr @glitch_calloc(i64 1, i64 {size})\n"
+        ));
+        let rc_ptr = self.tmp();
+        let drop_ptr = self.tmp();
+        self.body.push_str(&format!(
+            "  {rc_ptr} = getelementptr inbounds %{llvm_name}, ptr {object}, i32 0, i32 0\n  store i64 1, ptr {rc_ptr}\n  {drop_ptr} = getelementptr inbounds %{llvm_name}, ptr {object}, i32 0, i32 1\n  store ptr @{}, ptr {drop_ptr}\n",
+            destroy_symbol(&type_name)
+        ));
+        let payload_ptr = self.tmp();
+        self.body.push_str(&format!(
+            "  {payload_ptr} = getelementptr inbounds %{llvm_name}, ptr {object}, i32 0, i32 2\n  store {} {}, ptr {payload_ptr}\n",
+            llvm_ir_type(ty).as_ir(),
+            value.value
+        ));
+        Ok(LlValue {
+            value: object,
+            ty: LlType::Ptr,
+        })
+    }
+
     pub(crate) fn emit_program(program: &Program) -> Result<String, String> {
         let mut emitter = Self {
             type_defs: vec![
@@ -619,6 +852,7 @@ impl LlvmEmitter {
             specialized_symbols: HashMap::new(),
             specialized_functions: Vec::new(),
             object_types: HashMap::new(),
+            nullable_layouts: HashSet::new(),
             endpoint_handlers: Vec::new(),
             drop_order: Vec::new(),
             tmp: 0,
@@ -1551,6 +1785,35 @@ impl LlvmEmitter {
                 value: self.string_global(value),
                 ty: LlType::Ptr,
             }),
+            TypedExprKind::NullableSome(value) => {
+                let inner = self.emit_typed_expr(value)?;
+                let IrType::Nullable(payload_ty) = &expr.ty else {
+                    return Err("LLVM TIR backend: NullableSome requires nullable target type".to_string());
+                };
+                let nullable_name = Self::nullable_type_name(payload_ty);
+                let _ = self.ensure_nullable_object_type(payload_ty);
+                let llvm_name = llvm_object_name(&nullable_name);
+                let size_ptr = self.tmp();
+                let size = self.tmp();
+                let object = self.tmp();
+                self.body.push_str(&format!(
+                    "  {size_ptr} = getelementptr %{llvm_name}, ptr null, i32 1\n  {size} = ptrtoint ptr {size_ptr} to i64\n  {object} = call ptr @glitch_calloc(i64 1, i64 {size})\n"
+                ));
+                let rc_ptr = self.tmp();
+                let has_value_ptr = self.tmp();
+                let value_ptr = self.tmp();
+                let inner_ty = llvm_ir_type(payload_ty);
+                let inner_value = self.cast_value(inner, &inner_ty)?;
+                self.body.push_str(&format!(
+                    "  {rc_ptr} = getelementptr inbounds %{llvm_name}, ptr {object}, i32 0, i32 0\n  store i64 1, ptr {rc_ptr}\n  {has_value_ptr} = getelementptr inbounds %{llvm_name}, ptr {object}, i32 0, i32 2\n  store i1 true, ptr {has_value_ptr}\n  {value_ptr} = getelementptr inbounds %{llvm_name}, ptr {object}, i32 0, i32 3\n  store {} {}, ptr {value_ptr}\n",
+                    inner_ty.as_ir(),
+                    inner_value.value
+                ));
+                Ok(LlValue {
+                    value: object,
+                    ty: LlType::Ptr,
+                })
+            }
             TypedExprKind::Var(name) => {
                 if self.object_types.contains_key(name) {
                     return Ok(LlValue {
@@ -1663,6 +1926,47 @@ impl LlvmEmitter {
                     }
                     if name == "Message" && matches!(target.ty, IrType::Exception) {
                         return self.emit_typed_expr(target);
+                    }
+                    if let IrType::Nullable(inner) = &target.ty {
+                        let nullable_name = Self::nullable_type_name(inner);
+                        let _ = self.ensure_nullable_object_type(inner);
+                        if name == "HasValue" {
+                            let nullable = self.emit_typed_expr(target)?;
+                            let has_value_ptr = self.tmp();
+                            let has_value = self.tmp();
+                            self.body.push_str(&format!(
+                                "  {has_value_ptr} = getelementptr inbounds %{}, ptr {}, i32 0, i32 2\n  {has_value} = load i1, ptr {has_value_ptr}\n",
+                                llvm_object_name(&nullable_name),
+                                nullable.value
+                            ));
+                            return Ok(LlValue {
+                                value: has_value,
+                                ty: LlType::I1,
+                            });
+                        }
+                        if matches!(name.as_str(), "Value" | "GetValueOrDefault") {
+                            let nullable = self.emit_typed_expr(target)?;
+                            let is_null = self.tmp();
+                            let value_ptr = self.tmp();
+                            let value = self.tmp();
+                            let result = self.tmp();
+                            let payload_ty = llvm_ir_type(inner);
+                            self.body.push_str(&format!(
+                                "  {is_null} = icmp eq ptr {}, null\n  {value_ptr} = getelementptr inbounds %{}, ptr {}, i32 0, i32 3\n  {value} = load {}, ptr {value_ptr}\n  {result} = select i1 {is_null}, {} {}, {} {}\n",
+                                nullable.value,
+                                llvm_object_name(&nullable_name),
+                                nullable.value,
+                                payload_ty.as_ir(),
+                                payload_ty.as_ir(),
+                                payload_ty.default_value(),
+                                payload_ty.as_ir(),
+                                value
+                            ));
+                            return Ok(LlValue {
+                                value: result,
+                                ty: payload_ty,
+                            });
+                        }
                     }
                     if name == "Count"
                         && matches!(target.ty, IrType::List(_) | IrType::Dictionary(_, _))
@@ -4215,6 +4519,7 @@ impl LlvmEmitter {
         if &value.ty == target {
             return Ok(value);
         }
+        let value_ty = value.ty.clone();
         if value.ty.is_integer() && target.is_integer() {
             let tmp = self.tmp();
             let op = if integer_bits(&value.ty) < integer_bits(target) {
@@ -4257,10 +4562,15 @@ impl LlvmEmitter {
                 ty: LlType::Double,
             });
         }
-        if target == &LlType::Ptr && (value.ty.is_integer() || value.ty == LlType::Double) {
-            return Ok(LlValue {
-                value: "null".to_string(),
-                ty: LlType::Ptr,
+        if target == &LlType::Ptr && (value_ty.is_integer() || value_ty == LlType::Double) {
+            return self.emit_boxed_scalar_value(value, &match value_ty {
+                LlType::I1 => IrType::Bool,
+                LlType::I8 => IrType::Byte,
+                LlType::I16 => IrType::Short,
+                LlType::I32 => IrType::Int,
+                LlType::I64 => IrType::Long,
+                LlType::Double => IrType::Double,
+                _ => IrType::Unknown("boxed".to_string()),
             });
         }
         Err(format!(
@@ -4360,6 +4670,7 @@ fn llvm_ir_type(ty: &IrType) -> LlType {
         | IrType::List(_)
         | IrType::Dictionary(_, _)
         | IrType::Enumerable(_)
+        | IrType::Nullable(_)
         | IrType::Thread
         | IrType::Task(_)
         | IrType::Function { .. }
@@ -4372,6 +4683,7 @@ fn object_type_name(ty: &IrType) -> Option<&str> {
     match ty {
         IrType::Struct(name) | IrType::Class(name) | IrType::Interface(name) => Some(name),
         IrType::Ref(inner) => object_type_name(inner),
+        IrType::Nullable(inner) => object_type_name(inner),
         _ => None,
     }
 }
@@ -4722,6 +5034,9 @@ fn specialize_typed_expr(expr: TypedExpr, subst: &HashMap<String, IrType>) -> Ty
             params,
             body: Box::new(specialize_typed_expr(*body, subst)),
         },
+        TypedExprKind::NullableSome(value) => {
+            TypedExprKind::NullableSome(Box::new(specialize_typed_expr(*value, subst)))
+        }
         TypedExprKind::Conditional {
             condition,
             when_true,
@@ -4786,6 +5101,7 @@ fn substitute_ir_type(ty: &IrType, subst: &HashMap<String, IrType>) -> IrType {
         ),
         IrType::Enumerable(inner) => IrType::Enumerable(Box::new(substitute_ir_type(inner, subst))),
         IrType::Task(inner) => IrType::Task(Box::new(substitute_ir_type(inner, subst))),
+        IrType::Nullable(inner) => IrType::Nullable(Box::new(substitute_ir_type(inner, subst))),
         IrType::Function { params, return_type } => IrType::Function {
             params: params.iter().map(|param| substitute_ir_type(param, subst)).collect(),
             return_type: Box::new(substitute_ir_type(return_type, subst)),
@@ -4915,6 +5231,7 @@ fn collect_rc_expr(expr: &TypedExpr, out: &mut HashSet<String>) {
         }
     }
     match &expr.kind {
+        TypedExprKind::NullableSome(value) => collect_rc_expr(value, out),
         TypedExprKind::ArrayLiteral(values) => {
             for value in values {
                 collect_rc_expr(value, out);
@@ -4997,6 +5314,7 @@ fn collect_rc_type(ty: &IrType, out: &mut HashSet<String>) {
         | IrType::List(inner)
         | IrType::Enumerable(inner)
         | IrType::Task(inner)
+        | IrType::Nullable(inner)
         | IrType::Weak(inner) => collect_rc_type(inner, out),
         IrType::Dictionary(key, value) => {
             collect_rc_type(key, out);
@@ -5236,6 +5554,9 @@ fn collect_free_vars_expr(
         }
         TypedExprKind::Field { target, .. } | TypedExprKind::Await(target) => {
             collect_free_vars_expr(target, lambda_params, scope, seen, out);
+        }
+        TypedExprKind::NullableSome(value) => {
+            collect_free_vars_expr(value, lambda_params, scope, seen, out);
         }
         TypedExprKind::IsPattern { expr, .. } => {
             collect_free_vars_expr(expr, lambda_params, scope, seen, out);

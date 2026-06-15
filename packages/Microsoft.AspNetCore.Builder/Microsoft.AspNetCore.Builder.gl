@@ -1,0 +1,93 @@
+package Microsoft.AspNetCore.Builder;
+
+using Microsoft.Extensions.DependencyInjection;
+
+delegate void CorsConfigure(CorsPolicyBuilder options);
+delegate void SwaggerOptionsConfigure(SwaggerOptions options);
+delegate void SwaggerUiOptionsConfigure(SwaggerUiOptions options);
+
+class CorsPolicyBuilder {
+    CorsPolicyBuilder AllowAnyOrigin() {
+        return new CorsPolicyBuilder();
+    }
+
+    CorsPolicyBuilder AllowAnyHeader() {
+        return new CorsPolicyBuilder();
+    }
+
+    CorsPolicyBuilder AllowAnyMethod() {
+        return new CorsPolicyBuilder();
+    }
+}
+
+class SwaggerOptions {
+    public string RouteTemplate;
+
+    public SwaggerOptions() {
+        this.RouteTemplate = "";
+    }
+}
+
+class SwaggerUiOptions {
+    public string SwaggerEndpointUrl;
+    public string SwaggerEndpointName;
+
+    public SwaggerUiOptions() {
+        this.SwaggerEndpointUrl = "";
+        this.SwaggerEndpointName = "";
+    }
+
+    void SwaggerEndpoint(string url, string name) {
+        this.SwaggerEndpointUrl = url;
+        this.SwaggerEndpointName = name;
+    }
+}
+
+class WebApplicationBuilder {
+    public ServiceCollection Services;
+
+    public WebApplicationBuilder() {
+        this.Services = new ServiceCollection();
+    }
+
+    WebApplication Build() {
+        return new WebApplication();
+    }
+}
+
+class WebApplication {
+    public ServiceProvider Services;
+
+    public WebApplication() {
+        this.Services = new ServiceProvider("");
+    }
+
+    static WebApplicationBuilder CreateBuilder(string[] args) {
+        return new WebApplicationBuilder();
+    }
+
+    void UseMiddleware<T>() {}
+    void UseMiddleware<T>(object arg) {}
+    void UseCors() {}
+    void UseCors(CorsConfigure configure) {
+        configure(new CorsPolicyBuilder());
+    }
+    void UseAuthentication() {}
+    void UseMvc() {}
+    void UseSwagger() {}
+    void UseSwagger(SwaggerOptionsConfigure configure) {
+        configure(new SwaggerOptions());
+    }
+    void UseSwaggerUI() {}
+    void UseSwaggerUI(SwaggerUiOptionsConfigure configure) {
+        configure(new SwaggerUiOptions());
+    }
+    void UseHttpsRedirection() {}
+    void UseStaticFiles() {}
+    void UseStaticFiles(object options) {}
+    void UseRouting() {}
+    void UseEndpoints() {}
+    void MapControllers() {}
+    void Run() {}
+    void Run(int port) {}
+}

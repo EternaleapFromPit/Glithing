@@ -23,6 +23,7 @@ Current implemented subset:
 - object initializers with `new Type { Field = value }`
 - field access with `value.Field`
 - `List<int>` with `new List<int>()`, `.Add(value)`, and indexing
+- `List<T>.GetEnumerator()` on the supported list surface, which makes `foreach`-style traversal on concrete lists and list-backed views work in the current runtime model
 - `Dictionary<string, int>` with `new Dictionary<string, int>()`, `.Add(key, value)`, and indexing
 - `HashSet<string>` with `new HashSet<string>()`, `.Add(value)`, `.Contains(value)`, and `.Clear()`
 - `System.Collections.Generic.List<int>` and `System.Collections.Generic.Dictionary<string, int>`, including `using` aliases
@@ -70,6 +71,8 @@ Current implemented subset:
 - source-level packages with `package Name;` and `native "C source";`
 
 `var x = value;` is accepted as a conversion-friendly spelling for `let mut x = value;`.
+
+Nullable reference syntax is parsed, but nullable value types (`T?` on structs/scalars), lifted conversions, and value-type boxing/unboxing are not implemented yet. The compiler emits explicit diagnostics with rewrite guidance for those cases.
 
 Supported C#-compatibility examples:
 

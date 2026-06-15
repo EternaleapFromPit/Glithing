@@ -1,0 +1,19 @@
+using System.Collections.Generic;
+
+int Compute() {
+    List<int> values = new List<int>();
+    int total = 0;
+    int i = 0;
+    while (i < 50000) {
+        int? maybe = i;
+        if (maybe.HasValue) {
+            total = total + maybe.Value;
+        }
+
+        values.Add(total);
+        i = i + 1;
+    }
+    return total;
+}
+
+print(Compute());

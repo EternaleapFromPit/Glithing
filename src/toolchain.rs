@@ -80,6 +80,8 @@ pub(crate) fn emit_native_executable(
     }
     if cfg!(windows) {
         args.push(OsString::from("-lws2_32"));
+        args.push(OsString::from("-Xlinker"));
+        args.push(OsString::from("/subsystem:console"));
         if links_rust_runtime {
             for library in ["kernel32", "ntdll", "userenv", "dbghelp"] {
                 args.push(OsString::from(format!("-l{library}")));

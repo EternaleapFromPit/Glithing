@@ -229,6 +229,24 @@ impl LlvmEmitter {
     }
 
     pub(super) fn retain_for_store(&mut self, ty: &IrType, expr: &TypedExpr, value: &str) {
+        if let IrType::Nullable(inner) = ty {
+            if matches!(
+                expr.kind,
+                TypedExprKind::Var(_) | TypedExprKind::Field { .. } | TypedExprKind::Index { .. }
+            ) {
+                let type_name = LlvmEmitter::nullable_type_name(inner);
+                if self.object_types.contains_key(&type_name) {
+                    self.body.push_str(&format!(
+                        "  call void @{}(ptr {value})\n",
+                        retain_symbol(&type_name)
+                    ));
+                }
+            }
+            return;
+        }
+        if matches!(ty, IrType::Unknown(name) if name == "object") {
+            return;
+        }
         if matches!(ty, IrType::String) {
             if matches!(
                 expr.kind,
@@ -254,6 +272,9 @@ impl LlvmEmitter {
         let Some(type_name) = object_type_name(ty) else {
             return;
         };
+        if type_name.starts_with("Box_") {
+            return;
+        }
         if !self.object_types.contains_key(type_name)
             || matches!(
                 expr.kind,
@@ -307,6 +328,18 @@ impl LlvmEmitter {
                 | TypedExprKind::Move(_)
                 | TypedExprKind::Borrow { .. }
         ) {
+            return;
+        }
+        if let IrType::Nullable(inner) = &expr.ty {
+            let type_name = LlvmEmitter::nullable_type_name(inner);
+            if self.object_types.contains_key(&type_name) {
+                self.emit_drop(&type_name, &value.value);
+            }
+            return;
+        }
+        if matches!(&expr.ty, IrType::Unknown(name) if name == "object") {
+            self.body
+                .push_str(&format!("  call void @glitch_box_release(ptr {})\n", value.value));
             return;
         }
         match expr.drop_kind {
@@ -379,6 +412,16 @@ impl LlvmEmitter {
             self.emit_collection_drop_value(&var.ir_ty, &value);
             return;
         }
+        if let IrType::Nullable(inner) = &var.ir_ty {
+            let value = self.tmp();
+            self.body
+                .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
+            let type_name = LlvmEmitter::nullable_type_name(inner);
+            if self.object_types.contains_key(&type_name) {
+                self.emit_drop(&type_name, &value);
+            }
+            return;
+        }
         if matches!(var.drop_kind, DropKind::DropDelegate) {
             let value = self.tmp();
             self.body
@@ -395,6 +438,12 @@ impl LlvmEmitter {
             if let IrType::Task(inner) = &var.ir_ty {
                 self.emit_task_drop_value(&value, inner);
             }
+            return;
+        }
+        if matches!(&var.ir_ty, IrType::Unknown(name) if name == "object") {
+            let value = self.tmp();
+            self.body
+                .push_str(&format!("  {value} = load ptr, ptr {}\n  call void @glitch_box_release(ptr {value})\n", var.ptr));
             return;
         }
         if !matches!(var.drop_kind, DropKind::DropClass | DropKind::DropStruct) {

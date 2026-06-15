@@ -1,0 +1,59 @@
+package Microsoft.AspNetCore.Http;
+
+using System.Security.Claims;
+using System.Threading.Tasks;
+
+class HeaderDictionary {
+    public string Authorization;
+
+    public HeaderDictionary() {
+        this.Authorization = "";
+    }
+}
+
+delegate Task RequestDelegate(HttpContext context);
+
+class HttpRequest {
+    public HeaderDictionary Headers;
+
+    public HttpRequest() {
+        this.Headers = new HeaderDictionary();
+    }
+}
+
+class HttpResponse {
+    public int StatusCode;
+    public string ContentType;
+    public string Body;
+
+    public HttpResponse() {
+        this.StatusCode = 200;
+        this.ContentType = "";
+        this.Body = "";
+    }
+
+    Task WriteAsync(string text) {
+        this.Body = text;
+        return Task.CompletedTask;
+    }
+}
+
+class HttpContext {
+    public HttpRequest Request;
+    public HttpResponse Response;
+    public ClaimsPrincipal User;
+
+    public HttpContext() {
+        this.Request = new HttpRequest();
+        this.Response = new HttpResponse();
+        this.User = new ClaimsPrincipal();
+    }
+}
+
+interface IHttpContextAccessor {
+    public HttpContext HttpContext;
+}
+
+class HttpContextAccessor : IHttpContextAccessor {
+    public HttpContext HttpContext;
+}

@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 
 #[test]
 fn compiles_csharp_control_flow_smoke() {
@@ -882,6 +883,63 @@ fn compiles_null_literal_for_nullable_reference_overloads() {
 }
 
 #[test]
+fn lowers_nullable_value_types_to_real_wrapper_layout() {
+    let source = r#"
+            struct Point {
+                public int X;
+            }
+
+            fn main() {
+                Point? maybe = new Point { X = 7 };
+                print(maybe.HasValue);
+                print(maybe.Value.X);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("nullable value types should lower");
+
+    assert!(llvm_ir.contains("Nullable_Point"));
+    assert!(llvm_ir.contains("getelementptr inbounds %glitch.Nullable_Point"));
+    assert!(llvm_ir.contains("store i1 true"));
+}
+
+#[test]
+fn boxes_scalar_value_types_when_object_is_expected() {
+    let source = r#"
+            fn main() {
+                object boxed = 7;
+                print(boxed);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("scalar values should box into object");
+
+    assert!(llvm_ir.contains("Box_int") || llvm_ir.contains("Box_long"));
+    assert!(llvm_ir.contains("glitch_calloc"));
+}
+
+#[test]
+fn lowers_nullable_value_types_without_the_old_warning() {
+    let source = r#"
+            struct Point {
+                public int X;
+            }
+
+            fn main() {
+                Point? maybe = null;
+                print(0);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("nullable value types should compile");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(!diagnostics.contains("GL3012"));
+    assert!(output.llvm_ir().is_ok());
+}
+
+#[test]
 fn compiles_is_not_null_pattern() {
     let source = r#"
             using System.Collections.Generic;
@@ -1321,6 +1379,28 @@ fn compiles_collections_smoke() {
 
     assert!(llvm_ir.contains("%glitch.list = type"));
     assert!(llvm_ir.contains("%glitch.dict = type"));
+}
+
+#[test]
+fn compiles_list_enumerator_package_surface() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            fn main() {
+                List<int> xs = new List<int>();
+                xs.Add(10);
+                xs.Add(20);
+                IEnumerator<int> e = xs.GetEnumerator();
+                while (e.MoveNext()) {
+                    print(e.Current);
+                }
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("List<T>.GetEnumerator should lower");
+
+    assert!(llvm_ir.contains("ListEnumerator"));
+    assert!(llvm_ir.contains("MoveNext"));
 }
 
 #[test]
@@ -3825,4 +3905,67 @@ fn compiles_memory_leak_tests() {
         .expect("should read memory_leak_tests.gl");
     let llvm_ir = compile_llvm_ir(&source).expect("memory leak tests should compile to LLVM IR");
     assert!(llvm_ir.contains("getelementptr"));
+}
+
+#[test]
+fn compiles_selected_repo_examples_through_llvm() {
+    let examples = [
+        "examples/csharp_var.gl",
+        "examples/llvm_simple.gl",
+        "examples/llvm_collections.gl",
+        "examples/collection_workload.gl",
+        "examples/value_box_benchmark.gl",
+    ];
+
+    for example in examples {
+        let source = fs::read_to_string(example).expect("example source should be readable");
+        compile_llvm_ir(&source).unwrap_or_else(|error| {
+            panic!("example {example} should compile to LLVM IR: {error}");
+        });
+    }
+}
+
+#[test]
+fn compiles_conduit_integration_tests_project_file_through_llvm() {
+    let project = "external/aspnetcore-realworld-example-app/tests/Conduit.IntegrationTests/Conduit.IntegrationTests.csproj";
+    let llvm_ir = compile_llvm_ir_from_path(project)
+        .unwrap_or_else(|error| panic!("Conduit integration tests project should compile through LLVM: {error}"));
+    assert!(llvm_ir.contains("XUnit_RunAllTests"));
+    assert!(llvm_ir.contains("WebApplication_Handle"));
+}
+
+#[test]
+#[ignore]
+fn debug_conduit_integration_tests_project_phases() {
+    let project = std::env::var("GLITCH_PROJECT_BUNDLE").unwrap_or_else(|_| {
+        "external/aspnetcore-realworld-example-app/tests/Conduit.IntegrationTests/Conduit.IntegrationTests.csproj"
+            .to_string()
+    });
+    eprintln!("phase 1 read");
+    let source = if project.ends_with(".gl") {
+        fs::read_to_string(&project).expect("bundle source should load")
+    } else {
+        read_input_source(&project).expect("project source should load")
+    };
+    eprintln!("phase 2 link len={}", source.len());
+    let linked = link_package_sources(&source).expect("package linking should succeed");
+    eprintln!("phase 3 tokenize len={}", linked.len());
+    let tokens = Lexer::new(&linked).tokenize().expect("tokenization should succeed");
+    eprintln!("phase 4 parse tokens={}", tokens.len());
+    let program = Parser::new(tokens).parse_program().expect("parse should succeed");
+    eprintln!(
+        "phase 5 parsed functions={} types={}",
+        program.functions.len(),
+        program.types.len()
+    );
+    validate_generic_constraints(&program).expect("generic validation should succeed");
+    eprintln!("phase 6 borrow");
+    BorrowChecker::check_program(&program).expect("borrow checking should succeed");
+    eprintln!("phase 7 lower");
+    let typed = TypedProgram::lower(&program).expect("typed lowering should succeed");
+    eprintln!(
+        "phase 8 typed functions={} types={}",
+        typed.functions.len(),
+        typed.types.len()
+    );
 }

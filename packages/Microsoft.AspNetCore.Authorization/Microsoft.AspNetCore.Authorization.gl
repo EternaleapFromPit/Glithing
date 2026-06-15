@@ -1,0 +1,64 @@
+package Microsoft.AspNetCore.Authorization;
+
+class AuthorizeAttribute {
+    public string AuthenticationSchemes;
+    public string Policy;
+    public string Roles;
+
+    public AuthorizeAttribute() {
+        this.AuthenticationSchemes = "";
+        this.Policy = "";
+        this.Roles = "";
+    }
+
+    public AuthorizeAttribute(string policy) {
+        this.AuthenticationSchemes = "";
+        this.Policy = policy;
+        this.Roles = "";
+    }
+}
+
+class AllowAnonymousAttribute {
+    public AllowAnonymousAttribute() {}
+}
+
+class AuthorizationPolicy {
+    public string Name;
+
+    public AuthorizationPolicy() {
+        this.Name = "";
+    }
+}
+
+class AuthorizationPolicyBuilder {
+    public string AuthenticationSchemes;
+
+    public AuthorizationPolicyBuilder() {
+        this.AuthenticationSchemes = "";
+    }
+
+    AuthorizationPolicyBuilder RequireAuthenticatedUser() {
+        return this;
+    }
+
+    AuthorizationPolicy Build() {
+        return new AuthorizationPolicy();
+    }
+}
+
+class AuthorizationOptions {
+    public bool InvokeHandlersAfterFailure;
+
+    public AuthorizationOptions() {
+        this.InvokeHandlersAfterFailure = false;
+    }
+}
+
+interface IAuthorizationService {
+    bool AuthorizeAsync();
+}
+
+class AuthorizationHandlerContext {
+    public bool HasSucceeded;
+    public bool HasFailed;
+}

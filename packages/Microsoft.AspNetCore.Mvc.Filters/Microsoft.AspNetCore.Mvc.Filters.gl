@@ -1,0 +1,34 @@
+package Microsoft.AspNetCore.Mvc.Filters;
+
+using Glitching.AspNetCore;
+
+class ActionExecutingContext {
+    public ModelStateDictionary ModelState;
+    public HttpContext HttpContext;
+    public object Result;
+
+    public ActionExecutingContext() {
+        this.ModelState = new ModelStateDictionary();
+        this.HttpContext = new HttpContext(new HttpRequest("GET", "/", ""));
+        this.Result = null;
+    }
+}
+
+class ActionExecutedContext {
+    public HttpContext HttpContext;
+    public object Result;
+    public object Exception;
+    public bool ExceptionHandled;
+
+    public ActionExecutedContext() {
+        this.HttpContext = new HttpContext(new HttpRequest("GET", "/", ""));
+        this.Result = null;
+        this.Exception = null;
+        this.ExceptionHandled = false;
+    }
+}
+
+interface IActionFilter {
+    void OnActionExecuting(ActionExecutingContext filterContext);
+    void OnActionExecuted(ActionExecutedContext filterContext);
+}
