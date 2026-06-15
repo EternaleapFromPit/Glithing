@@ -74,6 +74,8 @@ Current implemented subset:
 
 Nullable reference syntax is parsed, but nullable value types (`T?` on structs/scalars), lifted conversions, and value-type boxing/unboxing are not implemented yet. The compiler emits explicit diagnostics with rewrite guidance for those cases.
 
+Reference cycles over owned graphs are diagnosed with `GL3007` and rewrite guidance such as `Weak<T>`. The compiler can detect the cycle and point to the source field, but arbitrary cyclic ownership is not automatically leak-free in the current memory-safe model.
+
 Supported C#-compatibility examples:
 
 ```csharp

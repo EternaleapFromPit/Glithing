@@ -1785,6 +1785,22 @@ fn compiles_nested_collection_drops_to_llvm() {
 }
 
 #[test]
+fn compiles_nested_list_drops_to_llvm() {
+    let source = r#"
+            fn main() {
+                List<List<string>> nested = new List<List<string>>();
+                List<string> inner = new List<string>();
+                inner.Add("hello");
+                nested.Add(inner);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("Nested list drops should compile to LLVM IR");
+    assert!(llvm_ir.contains("call void @glitch_string_release(ptr"));
+    assert!(llvm_ir.matches("element_drop_loop").count() >= 2);
+}
+
+#[test]
 fn lowers_aspnet_string_routes_and_rust_socket_host_to_llvm() {
     let source = r#"
             using Glitching.AspNetCore;
@@ -3936,6 +3952,17 @@ fn compiles_memory_leak_tests() {
         .expect("should read memory_leak_tests.gl");
     let llvm_ir = compile_llvm_ir(&source).expect("memory leak tests should compile to LLVM IR");
     assert!(llvm_ir.contains("getelementptr"));
+}
+
+#[test]
+fn emits_thread_safe_allocation_registry_for_llvm_runtime() {
+    let source = std::fs::read_to_string("tests/xunit_memory/memory_leak_tests.gl")
+        .expect("should read memory_leak_tests.gl");
+    let llvm_ir = compile_llvm_ir(&source).expect("memory leak tests should compile to LLVM IR");
+
+    assert!(llvm_ir.contains("atomicrmw add ptr @glitch_live_allocations"));
+    assert!(llvm_ir.contains("atomicrmw sub ptr @glitch_live_allocations"));
+    assert!(llvm_ir.contains("load atomic i64, ptr @glitch_live_allocations seq_cst"));
 }
 
 #[test]

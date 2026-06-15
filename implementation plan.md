@@ -69,6 +69,9 @@ The current boundary is:
 
 ## Recently completed
 
+- The LLVM allocation registry and leak counter are now thread-safe for concurrent workloads by using atomic RMW updates in the runtime prelude and atomic leak-count reads in the exit path.
+- A regression test now checks that the LLVM runtime emits atomic allocation-counter operations instead of plain load/store updates.
+- Nested collection drop recursion now has direct regression coverage for `List<List<string>>`, confirming that recursive LLVM drop glue is preserved for nested owned collections.
 - Public C emission has been removed from the CLI surface, and the default output path now produces a native executable.
 - NuGet/package emission now packages LLVM-native assets and linked source metadata instead of generated C source.
 - Current regression tests cover the native-output path and the package payload shape.
@@ -102,11 +105,14 @@ The current boundary is:
 
 ## Next work items
 
-1. Improve framework compatibility for collections, tasks, delegates, and async lowering.
-2. Add stronger borrow-check analysis across any remaining control-flow joins that still need explicit tracking beyond the current loop-exit and early-return handling.
-3. Replace any remaining compatibility stubs with real lowering or real diagnostics, especially in package surfaces that still return typed defaults as placeholders.
-4. Expand framework compatibility in small, test-driven slices where the runtime model already exists, and keep unsupported members on explicit diagnostics with rewrite guidance.
-5. Add additional sample/runtime acceptance work only where a concrete blocker remains after the current compile gates.
+1. Make the allocation registry and leak counter thread-safe for concurrent HTTP workloads.
+2. Finish the remaining async/await and socket-host runtime slice needed for concurrent request handling.
+3. Harden nested collection drop glue so recursive owned graphs release correctly in all supported collection shapes.
+4. Improve framework compatibility for collections, tasks, delegates, and async lowering.
+5. Add stronger borrow-check analysis across any remaining control-flow joins that still need explicit tracking beyond the current loop-exit and early-return handling.
+6. Replace any remaining compatibility stubs with real lowering or real diagnostics, especially in package surfaces that still return typed defaults as placeholders.
+7. Expand framework compatibility in small, test-driven slices where the runtime model already exists, and keep unsupported members on explicit diagnostics with rewrite guidance.
+8. Add additional sample/runtime acceptance work only where a concrete blocker remains after the current compile gates.
 
 ## C# Standard v7 Gap Analysis
 
@@ -218,6 +224,9 @@ Rewrite guidance should be specific and actionable:
 16. Nullable value types now produce an explicit warning with rewrite guidance instead of being silently erased to the underlying reference-or-scalar type.
    - The analyzer now catches `T?` when `T` is a value type and points at the `Nullable<T>` / lifted-conversion gap directly.
    - Covered by a regression test that asserts the warning for `Point?`.
+17. Reference cycles over owned graphs are now treated as a diagnostic boundary rather than an automatic safety guarantee.
+   - The cycle checker reports `GL3007` with a source-specific `Weak<T>` rewrite hint when it finds an ownership loop.
+   - The policy is explicit that arbitrary cyclic ownership is not automatically leak-free in the current memory-safe model.
 
 ## Notes
 

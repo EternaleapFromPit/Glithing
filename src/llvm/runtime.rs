@@ -92,13 +92,13 @@ pub(super) fn finish_module(emitter: &LlvmEmitter) -> Result<String, String> {
             }\n",
         );
         out.push_str(
-            "define ptr @glitch_calloc(i64 %count, i64 %size) {\nentry:\n  %value = call ptr @calloc(i64 %count, i64 %size)\n  %is_null = icmp eq ptr %value, null\n  br i1 %is_null, label %done, label %count_alloc\ncount_alloc:\n  %live = load i64, ptr @glitch_live_allocations\n  %next = add i64 %live, 1\n  store i64 %next, ptr @glitch_live_allocations\n  br label %done\ndone:\n  ret ptr %value\n}\n",
+            "define ptr @glitch_calloc(i64 %count, i64 %size) {\nentry:\n  %value = call ptr @calloc(i64 %count, i64 %size)\n  %is_null = icmp eq ptr %value, null\n  br i1 %is_null, label %done, label %count_alloc\ncount_alloc:\n  %old_live = atomicrmw add ptr @glitch_live_allocations, i64 1 seq_cst\n  br label %done\ndone:\n  ret ptr %value\n}\n",
         );
         out.push_str(
-            "define ptr @glitch_realloc(ptr %old, i64 %size) {\nentry:\n  %value = call ptr @realloc(ptr %old, i64 %size)\n  %old_null = icmp eq ptr %old, null\n  %new_valid = icmp ne ptr %value, null\n  %count_it = and i1 %old_null, %new_valid\n  br i1 %count_it, label %count_alloc, label %done\ncount_alloc:\n  %live = load i64, ptr @glitch_live_allocations\n  %next = add i64 %live, 1\n  store i64 %next, ptr @glitch_live_allocations\n  br label %done\ndone:\n  ret ptr %value\n}\n",
+            "define ptr @glitch_realloc(ptr %old, i64 %size) {\nentry:\n  %value = call ptr @realloc(ptr %old, i64 %size)\n  %old_null = icmp eq ptr %old, null\n  %new_valid = icmp ne ptr %value, null\n  %count_it = and i1 %old_null, %new_valid\n  br i1 %count_it, label %count_alloc, label %done\ncount_alloc:\n  %old_live = atomicrmw add ptr @glitch_live_allocations, i64 1 seq_cst\n  br label %done\ndone:\n  ret ptr %value\n}\n",
         );
         out.push_str(
-            "define void @glitch_free(ptr %value) {\nentry:\n  %is_null = icmp eq ptr %value, null\n  br i1 %is_null, label %done, label %release\nrelease:\n  call void @free(ptr %value)\n  %live = load i64, ptr @glitch_live_allocations\n  %next = sub i64 %live, 1\n  store i64 %next, ptr @glitch_live_allocations\n  br label %done\ndone:\n  ret void\n}\n",
+            "define void @glitch_free(ptr %value) {\nentry:\n  %is_null = icmp eq ptr %value, null\n  br i1 %is_null, label %done, label %release\nrelease:\n  call void @free(ptr %value)\n  %old_live = atomicrmw sub ptr @glitch_live_allocations, i64 1 seq_cst\n  br label %done\ndone:\n  ret void\n}\n",
         );
         out.push_str(
             "define i64 @glitch_string_length(ptr %value) {\nentry:\n  %is_null = icmp eq ptr %value, null\n  br i1 %is_null, label %empty, label %read_len\nempty:\n  ret i64 0\nread_len:\n  %length_ptr = getelementptr i8, ptr %value, i64 -8\n  %length = load i64, ptr %length_ptr\n  ret i64 %length\n}\n",

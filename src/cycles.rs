@@ -48,12 +48,13 @@ pub(crate) fn check_reference_cycles(source: &str, program: &Program) -> Vec<Str
                 );
                 let help = if is_weakable_type(&field.ty) {
                     format!(
-                        "replace '{}' with a weak or borrowed form to break the ownership chain and avoid memory leaks",
-                        type_syntax_display(&field.ty)
+                        "replace '{}' with 'Weak<{}>' or another non-owning form to break the ownership chain; arbitrary ownership cycles are not automatically leak-free in the current memory-safe model",
+                        type_syntax_display(&field.ty),
+                        target
                     )
                 } else {
                     format!(
-                        "replace '{} {}' with 'Weak<{}> {}' to break the cycle and avoid memory leaks",
+                        "replace '{} {}' with 'Weak<{}> {}' to break the cycle; arbitrary ownership cycles are not automatically leak-free in the current memory-safe model",
                         type_syntax_display(&field.ty),
                         field.name,
                         target,
