@@ -38,7 +38,7 @@ class AuthorizationPolicyBuilder {
     }
 
     AuthorizationPolicyBuilder RequireAuthenticatedUser() {
-        return this;
+        return new AuthorizationPolicyBuilder();
     }
 
     AuthorizationPolicy Build() {

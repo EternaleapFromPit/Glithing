@@ -193,14 +193,8 @@ class IServiceCollection {
         this.Singleton = null;
     }
 
-    void AddSingleton(object value) {
-        this.Singleton = value;
-    }
     void AddSingleton<T>(T value) {
         this.Singleton = value;
-    }
-    void AddSingleton(string value) {
-        this.Message = value;
     }
     void AddSingleton(string key, string value) {
         this.Message = value;

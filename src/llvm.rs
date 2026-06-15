@@ -2229,6 +2229,22 @@ impl LlvmEmitter {
                 let raw_condition = self.emit_typed_expr(condition)?;
                 let condition = self.to_i1(raw_condition)?;
                 let result_ty = llvm_ir_type(&expr.ty);
+                if result_ty == LlType::Void {
+                    let true_label = self.next_label("conditional_true");
+                    let false_label = self.next_label("conditional_false");
+                    let end_label = self.next_label("conditional_end");
+                    self.body.push_str(&format!(
+                        "  br i1 {}, label %{true_label}, label %{false_label}\n{true_label}:\n",
+                        condition.value
+                    ));
+                    let true_value = self.emit_typed_expr(when_true)?;
+                    self.emit_temporary_drop(when_true, &true_value);
+                    self.body.push_str(&format!("  br label %{end_label}\n{false_label}:\n"));
+                    let false_value = self.emit_typed_expr(when_false)?;
+                    self.emit_temporary_drop(when_false, &false_value);
+                    self.body.push_str(&format!("  br label %{end_label}\n{end_label}:\n"));
+                    return Ok(void_value());
+                }
                 let result_ptr = self.tmp();
                 let true_label = self.next_label("conditional_true");
                 let false_label = self.next_label("conditional_false");
@@ -2288,7 +2304,12 @@ impl LlvmEmitter {
                         _ => false,
                     };
                     if is_mapper && name == "Map" && !call.args.is_empty() {
-                        return self.emit_mapper_map(target, &call.args[0], &expr.ty);
+                        return self.emit_mapper_map(
+                            target,
+                            &call.args[0],
+                            &call.generic_args,
+                            &expr.ty,
+                        );
                     }
                     if is_task && name == "Run" {
                         return self.emit_task_run_inline(call, &expr.ty);
@@ -2466,16 +2487,11 @@ impl LlvmEmitter {
                             };
                             if self.functions.contains_key(&resolved_symbol) {
                                 let receiver = self.emit_typed_expr(target)?;
-                                let call_args = if name.ends_with("Async") && !call.args.is_empty() {
-                                    &call.args[..call.args.len() - 1]
-                                } else {
-                                    &call.args
-                                };
                                 let result = self.emit_typed_call(
                                     &resolved_symbol,
                                     std::iter::once(receiver.clone()),
                                     &call.generic_args,
-                                    call_args,
+                                    &call.args,
                                 )?;
                                 self.emit_temporary_drop(target, &receiver);
                                 Ok(result)
@@ -2826,6 +2842,12 @@ impl LlvmEmitter {
             values.push(self.emit_typed_expr(arg)?);
         }
         if values.len() != signature.params.len() {
+            eprintln!(
+                "call-arity debug: name={name} resolved={resolved_name} values={} params={} generic_args={:?}",
+                values.len(),
+                signature.params.len(),
+                generic_args
+            );
             return Err(format!(
                 "LLVM TIR backend: call to '{name}' expected {} arguments but got {}",
                 signature.params.len(),
@@ -4572,6 +4594,15 @@ impl LlvmEmitter {
                 LlType::Double => IrType::Double,
                 _ => IrType::Unknown("boxed".to_string()),
             });
+        }
+        if target == &LlType::Void {
+            eprintln!(
+                "cast-to-void debug: value_ty={:?} value={} target={:?}\n{:?}",
+                value.ty,
+                value.value,
+                target,
+                std::backtrace::Backtrace::force_capture()
+            );
         }
         Err(format!(
             "LLVM backend: cannot cast {} to {}",

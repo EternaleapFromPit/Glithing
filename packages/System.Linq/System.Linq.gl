@@ -251,7 +251,10 @@ public static class Enumerable {
     }
 
     public static TSource[] ToArray<TSource>(this IEnumerable<TSource> source) {
-        var list = ToList(source);
+        var list = new List<TSource>();
+        foreach (TSource value in source) {
+            list.Add(value);
+        }
         return list.ToArray();
     }
 

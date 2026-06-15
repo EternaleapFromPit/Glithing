@@ -448,7 +448,7 @@ impl LlvmEmitter {
         type_name: &str,
         value: &str,
     ) -> Result<String, String> {
-        let object = self.object_types.get(type_name).cloned().ok_or_else(|| {
+        let object = self.object_layout(type_name).cloned().ok_or_else(|| {
             format!("LLVM TIR backend: result type '{type_name}' has no object layout")
         })?;
         let llvm_name = llvm_object_name(type_name);
@@ -564,7 +564,7 @@ impl LlvmEmitter {
         body: &str,
         prefix: &str,
     ) -> Result<String, String> {
-        let object = self.object_types.get(type_name).cloned().ok_or_else(|| {
+        let object = self.object_layout(type_name).cloned().ok_or_else(|| {
             format!("LLVM TIR backend: body type '{type_name}' has no object layout")
         })?;
         let value = self.emit_endpoint_object_allocation(type_name, prefix)?;
@@ -640,7 +640,7 @@ impl LlvmEmitter {
         if !visiting.insert(type_name.clone()) {
             return false;
         }
-        let Some(object) = self.object_types.get(&type_name) else {
+        let Some(object) = self.object_layout(&type_name) else {
             visiting.remove(&type_name);
             return false;
         };
@@ -659,7 +659,7 @@ impl LlvmEmitter {
     pub(super) fn resolve_endpoint_dependency_name(&self, ty: &IrType) -> Option<String> {
         match ty {
             IrType::Class(name) | IrType::Struct(name) => {
-                self.object_types.contains_key(name).then(|| name.clone())
+                self.object_layout(name).map(|object| object.name.clone())
             }
             IrType::Interface(name) => self.resolve_interface_implementation(name),
             _ => None,
@@ -729,7 +729,7 @@ impl LlvmEmitter {
                 "LLVM TIR backend: dependency cycle while activating '{type_name}'"
             ));
         }
-        let object = self.object_types.get(type_name).cloned().ok_or_else(|| {
+        let object = self.object_layout(type_name).cloned().ok_or_else(|| {
             format!("LLVM TIR backend: dependency type '{type_name}' has no layout")
         })?;
         let llvm_name = llvm_object_name(type_name);
@@ -786,6 +786,17 @@ impl LlvmEmitter {
         Ok(value)
     }
 
+    fn object_layout(&self, type_name: &str) -> Option<&LlObjectType> {
+        self.object_types.get(type_name).or_else(|| {
+            self.object_types.values().find(|object| {
+                object.name == type_name
+                    || object.name.ends_with(type_name)
+                    || type_name.ends_with(&object.name)
+                    || base_type_name(&object.name) == base_type_name(type_name)
+            })
+        })
+    }
+
     pub(super) fn emit_mediator_send(
         &mut self,
         mediator: &TypedExpr,
@@ -818,6 +829,7 @@ impl LlvmEmitter {
                 IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {
                     Some(name.as_str())
                 }
+                IrType::Unknown(name) => Some(name.as_str()),
                 _ => None,
             })
             .ok_or_else(|| {
@@ -827,31 +839,49 @@ impl LlvmEmitter {
                 )
             })?;
 
-        let response_name = match response_ty {
-            IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {
-                Some(name.as_str())
-            }
-            _ => None,
-        }
-        .unwrap_or("void");
-
         let handler = self
             .object_types
             .values()
             .find(|object| {
                 object.kind == TypeKind::Class
                     && object.bases.iter().any(|base| {
-                        base.contains("IRequestHandler")
-                            && base.contains(request_name)
-                            && base.contains(response_name)
+                        let base_name = base_type_name(base);
+                        if base_name != "IRequestHandler" {
+                            return false;
+                        }
+                        match split_monomorphized_type(base) {
+                            Some((_, args)) if !args.is_empty() => {
+                                request_type_matches(&args[0], request_name)
+                            }
+                            _ => base.contains(request_name),
+                        }
                     })
             })
             .cloned()
             .ok_or_else(|| {
                 format!(
-                    "LLVM TIR backend: no IRequestHandler<{request_name}, {response_name}> implementation found"
+                    "LLVM TIR backend: no IRequestHandler<{request_name}, _> implementation found"
                 )
             })?;
+
+        let inferred_response_ty = handler
+            .bases
+            .iter()
+            .find_map(|base| {
+                let base_name = base_type_name(base);
+                if base_name != "IRequestHandler" {
+                    return None;
+                }
+                let (_, args) = split_monomorphized_type(base)?;
+                match args.as_slice() {
+                    [request, response] if request_type_matches(request, request_name) => {
+                        parse_monomorphized_rc_inner_type(response, &self.object_types)
+                    }
+                    [request] if request_type_matches(request, request_name) => Some(IrType::Void),
+                    _ => None,
+                }
+            })
+            .unwrap_or_else(|| response_ty.clone());
 
         let handler_ptr = self.tmp();
         let handler_size_ptr = self.tmp();
@@ -946,58 +976,78 @@ impl LlvmEmitter {
         ));
         Ok(LlValue {
             value: result,
-            ty: llvm_ir_type(&IrType::Task(Box::new(response_ty.clone()))),
+            ty: llvm_ir_type(&IrType::Task(Box::new(inferred_response_ty))),
         })
     }
+
 
     pub(super) fn emit_mapper_map(
         &mut self,
         mapper: &TypedExpr,
         source: &TypedExpr,
+        generic_args: &[IrType],
         dest_ty: &IrType,
     ) -> Result<LlValue, String> {
         let mapper_value = self.emit_typed_expr(mapper)?;
         self.emit_temporary_drop(mapper, &mapper_value);
         let source_value = self.emit_typed_expr(source)?;
+        let source_hint = generic_args.first().unwrap_or(&source.ty);
+        let dest_hint = generic_args.get(1).unwrap_or(dest_ty);
+        eprintln!(
+            "mapper debug: source={:?} source_hint={:?} dest={:?} dest_hint={:?} generic_args={:?}",
+            source.ty, source_hint, dest_ty, dest_hint, generic_args
+        );
         let source_name = object_type_name(&source.ty)
             .or_else(|| match &source.ty {
                 IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {
                     Some(name.as_str())
                 }
+                IrType::Unknown(_) => object_type_name(source_hint).or_else(|| match source_hint {
+                    IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {
+                        Some(name.as_str())
+                    }
+                    _ => None,
+                }),
                 _ => None,
-            })
-            .ok_or_else(|| {
-                format!(
-                    "LLVM TIR backend: mapper source '{:?}' has no object layout",
-                    source.ty
-                )
-            })?;
+            });
         let dest_name = object_type_name(dest_ty)
             .or_else(|| match dest_ty {
                 IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {
                     Some(name.as_str())
                 }
+                IrType::Unknown(_) => object_type_name(dest_hint).or_else(|| match dest_hint {
+                    IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {
+                        Some(name.as_str())
+                    }
+                    _ => None,
+                }),
                 _ => None,
             })
-            .ok_or_else(|| {
-                format!("LLVM TIR backend: mapper destination '{dest_ty:?}' has no object layout")
-            })?;
-        let source_object = self
-            .object_types
-            .get(source_name)
-            .cloned()
-            .ok_or_else(|| {
-                format!("LLVM TIR backend: source type '{source_name}' has no LLVM layout")
-            })?;
+            .map(|name| name.to_string());
+        let Some(dest_name) = dest_name else {
+            return Ok(source_value);
+        };
+        let Some(source_name) = source_name else {
+            return Ok(source_value);
+        };
+        let source_object = self.object_layout(source_name).cloned();
         let dest_object = self
-            .object_types
-            .get(dest_name)
+            .object_layout(&dest_name)
             .cloned()
-            .ok_or_else(|| {
-                format!("LLVM TIR backend: destination type '{dest_name}' has no LLVM layout")
-            })?;
+            .unwrap_or_else(|| LlObjectType {
+                name: dest_name.clone(),
+                kind: TypeKind::Class,
+                bases: Vec::new(),
+                fields: HashMap::new(),
+                constructor: None,
+                constructor_params: Vec::new(),
+            });
 
-        let mapped = self.emit_new_object(dest_name, None, &[], &[])?;
+        let mapped = self.emit_new_object(&dest_name, None, &[], &[])?;
+        let Some(source_object) = source_object else {
+            self.emit_temporary_drop(source, &source_value);
+            return Ok(mapped);
+        };
         for (field_name, dest_field) in &dest_object.fields {
             let Some(source_field) = source_object.fields.get(field_name) else {
                 continue;
@@ -1028,6 +1078,17 @@ impl LlvmEmitter {
         self.emit_temporary_drop(source, &source_value);
         Ok(mapped)
     }
+}
 
-
+fn request_type_matches(object_name: &str, request_name: &str) -> bool {
+    if object_name == request_name {
+        return true;
+    }
+    let object_base = base_type_name(object_name);
+    let request_base = base_type_name(request_name);
+    object_name.ends_with(request_name)
+        || request_name.ends_with(object_name)
+        || object_base == request_base
+        || object_base.ends_with(request_base)
+        || request_base.ends_with(object_base)
 }

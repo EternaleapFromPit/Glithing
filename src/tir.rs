@@ -466,13 +466,9 @@ impl TypedProgram {
         }
         for ty in &program.types {
             for constructor in &ty.constructors {
-                let this_type = match ty.kind {
-                    TypeKind::Class | TypeKind::Interface => IrType::Class(ty.name.clone()),
-                    _ => IrType::Ref(Box::new(IrType::Struct(ty.name.clone()))),
-                };
                 let mut params = vec![TypedBinding {
                     name: "this".to_string(),
-                    ty: this_type,
+                    ty: collection_this_type(ty),
                     ownership: Ownership::Borrowed,
                 }];
                 for param in &constructor.params {
@@ -493,16 +489,12 @@ impl TypedProgram {
                 )?;
             }
             for method in &ty.methods {
-                let this_type = match ty.kind {
-                    TypeKind::Class | TypeKind::Interface => IrType::Class(ty.name.clone()),
-                    _ => IrType::Ref(Box::new(IrType::Struct(ty.name.clone()))),
-                };
                 OwnershipChecker::check_function(
                     method,
                     &env,
                     vec![TypedBinding {
                         name: "this".to_string(),
-                        ty: this_type,
+                        ty: collection_this_type(ty),
                         ownership: Ownership::Borrowed,
                     }],
                 )?;
@@ -1118,9 +1110,26 @@ where
                         .iter()
                         .zip(ranks.iter())
                         .all(|(best, candidate)| best <= candidate))
-        })
+                })
         .count();
     if tied > 1 {
+        let tied_candidates = applicable
+            .iter()
+            .filter(|(_, ranks)| ranks == best_ranks)
+            .collect::<Vec<_>>();
+        let best_specificity = tied_candidates
+            .iter()
+            .map(|(signature, _)| signature_specificity(signature))
+            .min();
+        if let Some(best_specificity) = best_specificity {
+            let specialized = tied_candidates
+                .into_iter()
+                .filter(|(signature, _)| signature_specificity(signature) == best_specificity)
+                .collect::<Vec<_>>();
+            if specialized.len() == 1 {
+                return Ok(Some(specialized[0].0));
+            }
+        }
         let candidates = applicable
             .iter()
             .map(|(signature, ranks)| {
@@ -1141,7 +1150,41 @@ where
     Ok(Some(*best))
 }
 
+fn signature_specificity(signature: &FunctionSignature) -> u16 {
+    signature
+        .params
+        .iter()
+        .map(ir_type_specificity)
+        .sum()
+}
+
+fn ir_type_specificity(ty: &IrType) -> u16 {
+    match ty {
+        IrType::Enumerable(_) => 0,
+        IrType::List(_) => 1,
+        IrType::Array(_) => 0,
+        IrType::Dictionary(_, _) => 0,
+        IrType::Ref(inner)
+        | IrType::Task(inner)
+        | IrType::Weak(inner)
+        | IrType::Nullable(inner) => ir_type_specificity(inner),
+        IrType::Function {
+            params,
+            return_type,
+        } => params.iter().map(ir_type_specificity).sum::<u16>() + ir_type_specificity(return_type),
+        _ => 0,
+    }
+}
+
 fn infer_generic_args_from_signature(signature: &FunctionSignature, args: &[TypedExpr]) -> Vec<IrType> {
+    infer_generic_args_from_signature_with_expected(signature, args, None)
+}
+
+fn infer_generic_args_from_signature_with_expected(
+    signature: &FunctionSignature,
+    args: &[TypedExpr],
+    expected: Option<&IrType>,
+) -> Vec<IrType> {
     if signature.generic_params.is_empty() {
         return Vec::new();
     }
@@ -1183,6 +1226,14 @@ fn infer_generic_args_from_signature(signature: &FunctionSignature, args: &[Type
     if !matches {
         return Vec::new();
     }
+    if let Some(expected) = expected {
+        let _ = infer_generic_args_from_type(
+            &signature.return_type,
+            expected,
+            &signature.generic_params,
+            &mut inferred,
+        );
+    }
     let mut result = Vec::with_capacity(signature.generic_params.len());
     for name in &signature.generic_params {
         let Some(ty) = inferred.get(name) else {
@@ -1191,6 +1242,46 @@ fn infer_generic_args_from_signature(signature: &FunctionSignature, args: &[Type
         result.push(ty.clone());
     }
     result
+}
+
+fn substitute_generic_args_in_ir_type(
+    ty: &IrType,
+    generic_params: &[String],
+    generic_args: &[IrType],
+) -> IrType {
+    let mut subst = HashMap::new();
+    for (name, arg) in generic_params.iter().zip(generic_args.iter()) {
+        subst.insert(name.clone(), arg.clone());
+    }
+    substitute_ir_type_with_map(ty, &subst)
+}
+
+fn substitute_ir_type_with_map(ty: &IrType, subst: &HashMap<String, IrType>) -> IrType {
+    match ty {
+        IrType::Unknown(name) => subst.get(name).cloned().unwrap_or_else(|| ty.clone()),
+        IrType::Array(inner) => IrType::Array(Box::new(substitute_ir_type_with_map(inner, subst))),
+        IrType::Ref(inner) => IrType::Ref(Box::new(substitute_ir_type_with_map(inner, subst))),
+        IrType::List(inner) => IrType::List(Box::new(substitute_ir_type_with_map(inner, subst))),
+        IrType::Dictionary(key, value) => IrType::Dictionary(
+            Box::new(substitute_ir_type_with_map(key, subst)),
+            Box::new(substitute_ir_type_with_map(value, subst)),
+        ),
+        IrType::Enumerable(inner) => {
+            IrType::Enumerable(Box::new(substitute_ir_type_with_map(inner, subst)))
+        }
+        IrType::Task(inner) => IrType::Task(Box::new(substitute_ir_type_with_map(inner, subst))),
+        IrType::Nullable(inner) => {
+            IrType::Nullable(Box::new(substitute_ir_type_with_map(inner, subst)))
+        }
+        IrType::Function { params, return_type } => IrType::Function {
+            params: params
+                .iter()
+                .map(|param| substitute_ir_type_with_map(param, subst))
+                .collect(),
+            return_type: Box::new(substitute_ir_type_with_map(return_type, subst)),
+        },
+        _ => ty.clone(),
+    }
 }
 
 fn infer_generic_args_from_type(
@@ -1282,6 +1373,44 @@ fn ir_conversion_rank(expected: &IrType, arg: &TypedExpr, env: &TypeEnv) -> Opti
                 0
             },
         );
+    }
+    if let (
+        IrType::Function {
+            params: expected_params,
+            return_type: expected_return,
+        },
+        IrType::Function {
+            params: actual_params,
+            return_type: actual_return,
+        },
+    ) = (expected, &arg.ty)
+    {
+        if expected_params.len() == actual_params.len()
+            && expected_params
+                .iter()
+                .zip(actual_params.iter())
+                .all(|(expected_param, actual_param)| {
+                    expected_param == actual_param || matches!(actual_param, IrType::Unknown(_))
+                })
+        {
+            if expected_return.as_ref() == actual_return.as_ref() {
+                return Some(0);
+            }
+            if matches!(
+                (expected_return.as_ref(), actual_return.as_ref()),
+                (IrType::Enumerable(expected_inner), IrType::List(actual_inner))
+                    if expected_inner.as_ref() == actual_inner.as_ref()
+            ) {
+                return Some(1);
+            }
+            if matches!(
+                (expected_return.as_ref(), actual_return.as_ref()),
+                (IrType::Enumerable(expected_inner), IrType::Array(actual_inner))
+                    if expected_inner.as_ref() == actual_inner.as_ref()
+            ) {
+                return Some(1);
+            }
+        }
     }
     if matches!(arg.kind, TypedExprKind::Int(_)) && expected == &IrType::Int {
         return Some(0);
@@ -3785,6 +3914,7 @@ fn join_route_path(prefix: &str, path: &str) -> String {
 }
 
 fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Result<TypedType, String> {
+    let this_type = collection_this_type(ty);
     let fields = env
         .all_field_infos(&ty.name)
         .into_iter()
@@ -3796,10 +3926,7 @@ fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Result<TypedType
         .collect::<Vec<_>>();
     let this_binding = TypedBinding {
         name: "this".to_string(),
-        ty: match ty.kind {
-            TypeKind::Class | TypeKind::Interface => IrType::Class(ty.name.clone()),
-            _ => IrType::Ref(Box::new(IrType::Struct(ty.name.clone()))),
-        },
+        ty: this_type,
         ownership: Ownership::Borrowed,
     };
     let constructors = ty
@@ -3956,6 +4083,44 @@ fn lower_function(
         locals,
         body,
     })
+}
+
+fn collection_this_type(ty: &TypeDef) -> IrType {
+    match ty.name.as_str() {
+        "List" | "System.Collections.Generic.List" => {
+            let item = ty
+                .generic_params
+                .first()
+                .map(|param| IrType::Unknown(param.name.clone()))
+                .unwrap_or_else(|| IrType::Unknown("T".to_string()));
+            IrType::List(Box::new(item))
+        }
+        "Dictionary" | "System.Collections.Generic.Dictionary" => {
+            let key = ty
+                .generic_params
+                .first()
+                .map(|param| IrType::Unknown(param.name.clone()))
+                .unwrap_or_else(|| IrType::Unknown("TKey".to_string()));
+            let value = ty
+                .generic_params
+                .get(1)
+                .map(|param| IrType::Unknown(param.name.clone()))
+                .unwrap_or_else(|| IrType::Unknown("TValue".to_string()));
+            IrType::Dictionary(Box::new(key), Box::new(value))
+        }
+        "IEnumerable" | "System.Collections.Generic.IEnumerable" => {
+            let item = ty
+                .generic_params
+                .first()
+                .map(|param| IrType::Unknown(param.name.clone()))
+                .unwrap_or_else(|| IrType::Unknown("T".to_string()));
+            IrType::Enumerable(Box::new(item))
+        }
+        _ => match ty.kind {
+            TypeKind::Class | TypeKind::Interface => IrType::Class(ty.name.clone()),
+            _ => IrType::Ref(Box::new(IrType::Struct(ty.name.clone()))),
+        },
+    }
 }
 
 fn lower_stmts(
@@ -4944,12 +5109,26 @@ fn lower_typed_expr_with_expected(
             }
             let expected_types = find_expected_types(&candidates, args);
             let args = lower_call_args(args, &expected_types, env, scopes)?;
-            let (ty, ownership, symbol, resolution) = resolve_method_call(env, &target, name, &args)?;
+            let (ty, _ownership, symbol, resolution) = resolve_method_call(env, &target, name, &args)?;
             let generic_args = candidates
                 .iter()
                 .find(|signature| signature.symbol == symbol)
-                .map(|signature| infer_generic_args_from_signature(signature, &args))
+                .map(|signature| {
+                    infer_generic_args_from_signature_with_expected(signature, &args, expected)
+                })
                 .unwrap_or_default();
+            let ty = candidates
+                .iter()
+                .find(|signature| signature.symbol == symbol)
+                .map(|signature| {
+                    substitute_generic_args_in_ir_type(
+                        &signature.return_type,
+                        &signature.generic_params,
+                        &generic_args,
+                    )
+                })
+                .unwrap_or(ty);
+            let ownership = ownership_for_type(&ty);
             let args = if let Some(signature) =
                 candidates.iter().find(|signature| signature.symbol == symbol)
             {
@@ -5011,7 +5190,9 @@ fn lower_typed_expr_with_expected(
             };
             let signature = method_signature.as_ref().or(function_signature.as_ref());
             let generic_args = signature
-                .map(|signature| infer_generic_args_from_signature(signature, &args))
+                .map(|signature| {
+                    infer_generic_args_from_signature_with_expected(signature, &args, expected)
+                })
                 .unwrap_or_default();
             let args = if let Some(signature) = signature {
                 pack_params_args(signature, args)
@@ -5019,11 +5200,15 @@ fn lower_typed_expr_with_expected(
                 args
             };
             let ty = signature
-                .map(|signature| signature.return_type.clone())
+                .map(|signature| {
+                    substitute_generic_args_in_ir_type(
+                        &signature.return_type,
+                        &signature.generic_params,
+                        &generic_args,
+                    )
+                })
                 .unwrap_or_else(|| IrType::Unknown(name.clone()));
-            let ownership = signature
-                .map(|signature| signature.return_ownership.clone())
-                .unwrap_or_else(|| Ownership::Shared);
+            let ownership = ownership_for_type(&ty);
             typed_expr_with_ownership(
                 TypedExprKind::Call(TypedCall {
                     kind: if let Some(signature) = method_signature {
@@ -6995,6 +7180,19 @@ fn type_syntax_to_ir_with_subst(
                     return IrType::Unknown(format!("{name}<>"));
                 }
                 return type_syntax_to_ir_with_subst(replacement, env, subst);
+            }
+            if (name == "List" || name == "System.Collections.Generic.List") && args.len() == 1 {
+                return IrType::List(Box::new(type_syntax_to_ir_with_subst(
+                    &args[0],
+                    env,
+                    subst,
+                )));
+            }
+            if (name == "Dictionary" || name == "System.Collections.Generic.Dictionary") && args.len() == 2 {
+                return IrType::Dictionary(
+                    Box::new(type_syntax_to_ir_with_subst(&args[0], env, subst)),
+                    Box::new(type_syntax_to_ir_with_subst(&args[1], env, subst)),
+                );
             }
             if let Some(signature) = env.delegates.get(name) {
                 return delegate_signature_to_ir(signature, args, env, subst);

@@ -3042,6 +3042,36 @@ fn compiles_conduit_fixture_di_ef_and_mediatr_surface() {
 }
 
 #[test]
+fn compiles_mediatr_send_infers_response_from_request_contract() {
+    let source = r#"
+            using MediatR;
+            using Microsoft.Extensions.DependencyInjection;
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            class DemoRequest : IRequest<string> {}
+
+            class DemoHandler : IRequestHandler<DemoRequest, string> {
+                Task<string> Handle(DemoRequest request, CancellationToken cancellationToken) {
+                    return new Task<string>();
+                }
+            }
+
+            class DemoApp {
+                Task<string> Run() {
+                    var mediator = new Mediator(new ServiceCollection().BuildServiceProvider());
+                    return mediator.Send(new DemoRequest());
+                }
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("mediator Send should infer the generic response from IRequest<T>");
+
+    assert!(!llvm_ir.is_empty());
+}
+
+#[test]
 fn compiles_typeof_marker_for_package_startup_helpers() {
     let source = r#"
             using AutoMapper;
