@@ -112,6 +112,7 @@ impl LlvmEmitter {
                     value: value.clone(),
                     ty: LlType::Ptr,
                 }),
+                &[],
                 args,
             )?;
         } else if !args.is_empty() {

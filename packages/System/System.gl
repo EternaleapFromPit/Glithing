@@ -86,6 +86,17 @@ static double System_DateTime_Parse_TotalMinutes_Native(const char *value) {
 }
 ";
 
+extern string System_String_Substring_Native(string value, int start);
+extern string System_String_TrimEnd_Native(string value, string chars);
+extern string System_String_ToLower_Native(string value);
+extern string System_String_ToLowerInvariant_Native(string value);
+extern string System_String_Replace_Native(string value, string oldValue, string newValue);
+extern string System_String_Trim_Native(string value);
+extern string[] System_String_Split_Native(string value, string separator);
+extern bool System_String_Contains_Native(string value, string needle);
+extern string System_String_TrimStart_Native(string value, string chars);
+extern T[] System_Array_Empty_Native<T>();
+
 class Exception {
     public string Message;
     public Exception(string message) {
@@ -159,19 +170,45 @@ enum StringComparison {
 
 class Type {
     public static Type[] EmptyTypes;
+    public string Name;
+    public string Namespace;
     public bool IsGenericType;
+    public bool IsClass;
+    public bool IsInterface;
+    public bool IsValueType;
+    public bool IsEnum;
+    public bool IsArray;
     public string FullName;
     public string GenericTypeDefinitionName;
     public Type[] GenericArguments;
+    public Type BaseType;
+    public Type ElementType;
     public PropertyInfo[] Properties;
+    public MethodInfo[] Methods;
+    public FieldInfo[] Fields;
+    public ConstructorInfo[] Constructors;
+    public Type[] Interfaces;
     
     Type GetGenericTypeDefinition() {
         Type definition = new Type();
+        definition.Name = this.Name;
+        definition.Namespace = this.Namespace;
         definition.FullName = this.GenericTypeDefinitionName;
         definition.GenericTypeDefinitionName = this.GenericTypeDefinitionName;
         definition.IsGenericType = this.IsGenericType;
+        definition.IsClass = this.IsClass;
+        definition.IsInterface = this.IsInterface;
+        definition.IsValueType = this.IsValueType;
+        definition.IsEnum = this.IsEnum;
+        definition.IsArray = this.IsArray;
+        definition.BaseType = this.BaseType;
+        definition.ElementType = this.ElementType;
         definition.GenericArguments = default(Type[]);
         definition.Properties = default(PropertyInfo[]);
+        definition.Methods = default(MethodInfo[]);
+        definition.Fields = default(FieldInfo[]);
+        definition.Constructors = default(ConstructorInfo[]);
+        definition.Interfaces = default(Type[]);
         return definition;
     }
 
@@ -180,9 +217,24 @@ class Type {
     }
 
     MethodInfo GetMethod(string name, Type[] types) {
-        MethodInfo method = new MethodInfo();
-        method.Name = name;
-        return method;
+        if (this.Methods == null) {
+            return null;
+        }
+        int i = 0;
+        while (i < this.Methods.Length) {
+            var method = this.Methods[i];
+            if (method != null && method.Name == name) {
+                if (types == null || method.ParameterTypes == null || method.ParameterTypes.Length == types.Length) {
+                    return method;
+                }
+            }
+            i = i + 1;
+        }
+        return null;
+    }
+
+    MethodInfo[] GetMethods() {
+        return this.Methods;
     }
 
     PropertyInfo GetProperty(string name, object flags) {
@@ -203,17 +255,60 @@ class Type {
     PropertyInfo[] GetProperties() {
         return this.Properties;
     }
+
+    FieldInfo GetField(string name, object flags) {
+        if (this.Fields == null) {
+            return null;
+        }
+        int i = 0;
+        while (i < this.Fields.Length) {
+            var field = this.Fields[i];
+            if (field != null && field.Name == name) {
+                return field;
+            }
+            i = i + 1;
+        }
+        return null;
+    }
+
+    FieldInfo[] GetFields() {
+        return this.Fields;
+    }
+
+    ConstructorInfo[] GetConstructors() {
+        return this.Constructors;
+    }
+
+    Type[] GetInterfaces() {
+        return this.Interfaces;
+    }
+
+    Type GetElementType() {
+        return this.ElementType;
+    }
+
+    bool IsAssignableFrom(Type other) {
+        if (other == null) {
+            return false;
+        }
+        if (this.FullName == other.FullName) {
+            return true;
+        }
+        if (this.BaseType != null && this.BaseType.FullName == other.FullName) {
+            return true;
+        }
+        return false;
+    }
+
+    bool IsInstanceOfType(object value) {
+        return value != null;
+    }
 }
 
 class Array {
     static T[] Empty<T>() {
-        return default(T[]);
+        return System_Array_Empty_Native<T>();
     }
-}
-
-class PropertyInfo {
-    public string Name;
-    public Type PropertyType;
 }
 
 class string {
@@ -223,14 +318,66 @@ class string {
     static bool IsNullOrWhiteSpace(string value) {
         return value == null || value.Length == 0;
     }
-    string ToLower() { return this; }
-    string ToLowerInvariant() { return this; }
-    string Substring(int start) { return this; }
-    string[] Split(string separator) { return null; }
-    string Replace(string old, string newStr) { return this; }
-    string Trim() { return this; }
-    bool StartsWith(string value, StringComparison comparison) { return false; }
-    bool Equals(string value, StringComparison comparison) { return false; }
+    string ToLower() { return System_String_ToLower_Native(this); }
+    string ToLowerInvariant() { return System_String_ToLowerInvariant_Native(this); }
+    string Substring(int start) { return System_String_Substring_Native(this, start); }
+    string TrimEnd() { return System_String_TrimEnd_Native(this, null); }
+    string TrimEnd(string chars) { return System_String_TrimEnd_Native(this, chars); }
+    string TrimStart() { return System_String_TrimStart_Native(this, null); }
+    string TrimStart(string chars) { return System_String_TrimStart_Native(this, chars); }
+    string[] Split(string separator) { return System_String_Split_Native(this, separator); }
+    string Replace(string old, string newStr) { return System_String_Replace_Native(this, old, newStr); }
+    string Trim() { return System_String_Trim_Native(this); }
+    bool Contains(string value) { return System_String_Contains_Native(this, value); }
+    bool EndsWith(string value, StringComparison comparison) {
+        if (value == null) {
+            return false;
+        }
+        if (value.Length > this.Length) {
+            return false;
+        }
+        int offset = this.Length - value.Length;
+        int i = 0;
+        while (i < value.Length) {
+            if (this[offset + i] != value[i]) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+    bool StartsWith(string value, StringComparison comparison) {
+        if (value == null) {
+            return false;
+        }
+        if (value.Length > this.Length) {
+            return false;
+        }
+        int i = 0;
+        while (i < value.Length) {
+            if (this[i] != value[i]) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+    bool Equals(string value, StringComparison comparison) {
+        if (value == null) {
+            return false;
+        }
+        if (this.Length != value.Length) {
+            return false;
+        }
+        int i = 0;
+        while (i < this.Length) {
+            if (this[i] != value[i]) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
 }
 
 class String {
@@ -240,14 +387,66 @@ class String {
     static bool IsNullOrWhiteSpace(string value) {
         return value == null || value.Length == 0;
     }
-    string ToLower() { return this; }
-    string ToLowerInvariant() { return this; }
-    string Substring(int start) { return this; }
-    string[] Split(string separator) { return null; }
-    string Replace(string old, string newStr) { return this; }
-    string Trim() { return this; }
-    bool StartsWith(string value, StringComparison comparison) { return false; }
-    bool Equals(string value, StringComparison comparison) { return false; }
+    string ToLower() { return System_String_ToLower_Native(this); }
+    string ToLowerInvariant() { return System_String_ToLowerInvariant_Native(this); }
+    string Substring(int start) { return System_String_Substring_Native(this, start); }
+    string TrimEnd() { return System_String_TrimEnd_Native(this, null); }
+    string TrimEnd(string chars) { return System_String_TrimEnd_Native(this, chars); }
+    string TrimStart() { return System_String_TrimStart_Native(this, null); }
+    string TrimStart(string chars) { return System_String_TrimStart_Native(this, chars); }
+    string[] Split(string separator) { return System_String_Split_Native(this, separator); }
+    string Replace(string old, string newStr) { return System_String_Replace_Native(this, old, newStr); }
+    string Trim() { return System_String_Trim_Native(this); }
+    bool Contains(string value) { return System_String_Contains_Native(this, value); }
+    bool EndsWith(string value, StringComparison comparison) {
+        if (value == null) {
+            return false;
+        }
+        if (value.Length > this.Length) {
+            return false;
+        }
+        int offset = this.Length - value.Length;
+        int i = 0;
+        while (i < value.Length) {
+            if (this[offset + i] != value[i]) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+    bool StartsWith(string value, StringComparison comparison) {
+        if (value == null) {
+            return false;
+        }
+        if (value.Length > this.Length) {
+            return false;
+        }
+        int i = 0;
+        while (i < value.Length) {
+            if (this[i] != value[i]) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+    bool Equals(string value, StringComparison comparison) {
+        if (value == null) {
+            return false;
+        }
+        if (this.Length != value.Length) {
+            return false;
+        }
+        int i = 0;
+        while (i < this.Length) {
+            if (this[i] != value[i]) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
 }
 
 class bool {

@@ -311,6 +311,223 @@ extern "C" {
     fn malloc(size: usize) -> *mut std::ffi::c_void;
 }
 
+fn allocate_glitch_string_from_bytes(bytes: &[u8]) -> *mut c_char {
+    let len = bytes.len();
+    let total = match len.checked_add(1).and_then(|value| value.checked_add(16)) {
+        Some(total) => total,
+        None => return std::ptr::null_mut(),
+    };
+    let node = unsafe { malloc(total) as *mut u8 };
+    if node.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        *(node as *mut i64) = 1;
+        *((node.add(8)) as *mut i64) = len as i64;
+        let data = node.add(16);
+        if len > 0 {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), data, len);
+        }
+        *data.add(len) = 0;
+        data as *mut c_char
+    }
+}
+
+fn allocate_glitch_string_from_str(text: &str) -> *mut c_char {
+    allocate_glitch_string_from_bytes(text.as_bytes())
+}
+
+fn allocate_glitch_string_array(values: &[*mut c_char]) -> *mut std::ffi::c_void {
+    let len = values.len();
+    let data_size = len.max(1) * std::mem::size_of::<*mut c_char>();
+    let node = unsafe { malloc(16) as *mut u8 };
+    if node.is_null() {
+        return std::ptr::null_mut();
+    }
+    let data = unsafe { malloc(data_size) as *mut *mut c_char };
+    if data.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        *(node as *mut i64) = len as i64;
+        *((node.add(8)) as *mut *mut c_char) = data as *mut c_char;
+        for (index, value) in values.iter().copied().enumerate() {
+            *data.add(index) = value;
+        }
+        node as *mut std::ffi::c_void
+    }
+}
+
+fn allocate_glitch_empty_array() -> *mut std::ffi::c_void {
+    let node = unsafe { malloc(16) as *mut u8 };
+    if node.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        *(node as *mut i64) = 0;
+        *((node.add(8)) as *mut *mut std::ffi::c_void) = std::ptr::null_mut();
+        node as *mut std::ffi::c_void
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_String_Substring_Native(
+    value: *const c_char,
+    start: i64,
+) -> *mut c_char {
+    if value.is_null() {
+        return std::ptr::null_mut();
+    }
+    let bytes = CStr::from_ptr(value).to_bytes();
+    let start = start.max(0) as usize;
+    let start = start.min(bytes.len());
+    allocate_glitch_string_from_bytes(&bytes[start..])
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_String_TrimEnd_Native(
+    value: *const c_char,
+    chars: *const c_char,
+) -> *mut c_char {
+    if value.is_null() {
+        return std::ptr::null_mut();
+    }
+    let bytes = CStr::from_ptr(value).to_bytes();
+    let trim_chars = if chars.is_null() {
+        b" \t\r\n\x0b\x0c".as_slice()
+    } else {
+        CStr::from_ptr(chars).to_bytes()
+    };
+    let mut end = bytes.len();
+    while end > 0 && trim_chars.contains(&bytes[end - 1]) {
+        end -= 1;
+    }
+    allocate_glitch_string_from_bytes(&bytes[..end])
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_String_TrimStart_Native(
+    value: *const c_char,
+    chars: *const c_char,
+) -> *mut c_char {
+    if value.is_null() {
+        return std::ptr::null_mut();
+    }
+    let bytes = CStr::from_ptr(value).to_bytes();
+    let trim_chars = if chars.is_null() {
+        b" \t\r\n\x0b\x0c".as_slice()
+    } else {
+        CStr::from_ptr(chars).to_bytes()
+    };
+    let mut start = 0usize;
+    while start < bytes.len() && trim_chars.contains(&bytes[start]) {
+        start += 1;
+    }
+    allocate_glitch_string_from_bytes(&bytes[start..])
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_Array_Empty_Native() -> *mut std::ffi::c_void {
+    allocate_glitch_empty_array()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_String_ToLower_Native(value: *const c_char) -> *mut c_char {
+    if value.is_null() {
+        return std::ptr::null_mut();
+    }
+    let text = CStr::from_ptr(value).to_string_lossy().to_lowercase();
+    allocate_glitch_string_from_str(&text)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_String_ToLowerInvariant_Native(
+    value: *const c_char,
+) -> *mut c_char {
+    System_String_ToLower_Native(value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_String_Replace_Native(
+    value: *const c_char,
+    old_value: *const c_char,
+    new_value: *const c_char,
+) -> *mut c_char {
+    if value.is_null() {
+        return std::ptr::null_mut();
+    }
+    let text = CStr::from_ptr(value).to_string_lossy();
+    let old_text = if old_value.is_null() {
+        ""
+    } else {
+        CStr::from_ptr(old_value).to_str().unwrap_or("")
+    };
+    let new_text = if new_value.is_null() {
+        ""
+    } else {
+        CStr::from_ptr(new_value).to_str().unwrap_or("")
+    };
+    let replaced = text.replace(old_text, new_text);
+    allocate_glitch_string_from_str(&replaced)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_String_Trim_Native(value: *const c_char) -> *mut c_char {
+    if value.is_null() {
+        return std::ptr::null_mut();
+    }
+    let text = CStr::from_ptr(value).to_string_lossy();
+    let trimmed = text.trim().to_string();
+    allocate_glitch_string_from_str(&trimmed)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_String_Split_Native(
+    value: *const c_char,
+    separator: *const c_char,
+) -> *mut std::ffi::c_void {
+    if value.is_null() {
+        return std::ptr::null_mut();
+    }
+    let text = CStr::from_ptr(value).to_string_lossy();
+    let sep_byte = if separator.is_null() {
+        None
+    } else {
+        CStr::from_ptr(separator).to_bytes().first().copied()
+    };
+    let Some(sep_byte) = sep_byte else {
+        let item = allocate_glitch_string_from_str(&text);
+        return allocate_glitch_string_array(&[item]);
+    };
+    let bytes = text.as_bytes();
+    let mut items = Vec::<*mut c_char>::new();
+    let mut start = 0usize;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if byte == sep_byte {
+            items.push(allocate_glitch_string_from_bytes(&bytes[start..index]));
+            start = index + 1;
+        }
+    }
+    items.push(allocate_glitch_string_from_bytes(&bytes[start..]));
+    allocate_glitch_string_array(&items)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_String_Contains_Native(
+    value: *const c_char,
+    needle: *const c_char,
+) -> bool {
+    if value.is_null() || needle.is_null() {
+        return false;
+    }
+    let text = CStr::from_ptr(value).to_bytes();
+    let needle = CStr::from_ptr(needle).to_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    text.windows(needle.len()).any(|window| window == needle)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn System_IO_File_ReadAllText(path: *const c_char) -> *mut c_char {
     if path.is_null() {

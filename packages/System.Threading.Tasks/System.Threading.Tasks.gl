@@ -7,6 +7,12 @@ class Task {
         }
     }
 
+    public bool IsCompletedSuccessfully {
+        get {
+            return this.IsCompleted;
+        }
+    }
+
     public static Task CompletedTask {
         get {
             return new Task();
@@ -26,6 +32,14 @@ class Task {
         return new Task<T> { Result = function() };
     }
 
+    public void Wait() {}
+
+    public Task GetAwaiter() {
+        return move this;
+    }
+
+    public void GetResult() {}
+
     public static Task WhenAll(Task[] tasks) {
         return CompletedTask;
     }
@@ -38,8 +52,24 @@ class Task {
 class Task<T> {
     public T Result;
 
+    public bool IsCompletedSuccessfully {
+        get {
+            return true;
+        }
+    }
+
     public static Task<T> FromResult(T value) {
         return new Task<T> { Result = value };
+    }
+
+    public void Wait() {}
+
+    public Task<T> GetAwaiter() {
+        return move this;
+    }
+
+    public T GetResult() {
+        return this.Result;
     }
 
     public static Task WhenAll(Task<T> first, Task<T> second) {
@@ -53,13 +83,48 @@ class ValueTask {
             return true;
         }
     }
+
+    public bool IsCompletedSuccessfully {
+        get {
+            return this.IsCompleted;
+        }
+    }
+
+    public static ValueTask CompletedTask {
+        get {
+            return new ValueTask();
+        }
+    }
+
+    public void Wait() {}
+
+    public ValueTask GetAwaiter() {
+        return move this;
+    }
+
 }
 
 class ValueTask<T> {
     public T Result;
 
+    public bool IsCompletedSuccessfully {
+        get {
+            return true;
+        }
+    }
+
     public static ValueTask<T> FromResult(T value) {
         return new ValueTask<T> { Result = value };
+    }
+
+    public void Wait() {}
+
+    public ValueTask<T> GetAwaiter() {
+        return move this;
+    }
+
+    public T GetResult() {
+        return this.Result;
     }
 
     public Task<T> AsTask() {

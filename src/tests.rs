@@ -79,6 +79,51 @@ fn compiles_task_generic_smoke() {
 }
 
 #[test]
+fn records_generic_package_method_instantiations_from_call_sites() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int Compute() {
+                return 42;
+            }
+
+            fn main() {
+                Task.Run(Compute);
+            }
+        "#;
+
+    let summary = compile_ownership_summary(source)
+        .expect("generic package method instantiation summary should compile");
+
+    assert!(summary.contains("generic"));
+    assert!(summary.contains("Task"));
+}
+
+#[test]
+fn specializes_generic_package_methods_into_concrete_llvm_bodies() {
+    let source = r#"
+            class GenericOps {
+                public static T Echo<T>(T value) {
+                    return value;
+                }
+            }
+
+            fn main() {
+                int number = GenericOps.Echo(42);
+                string name = GenericOps.Echo("Ada");
+                print(number);
+                print(name);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("generic package method should specialize");
+
+    assert!(llvm_ir.contains("__g1__long"));
+    assert!(llvm_ir.contains("__g1__string"));
+    assert!(llvm_ir.contains("GenericOps__g0__t0_Echo__g1__long"));
+}
+
+#[test]
 fn compiles_valuetask_from_result_like_task() {
     let source = r#"
             using System.Threading.Tasks;
@@ -1031,7 +1076,7 @@ fn compiles_system_array_empty_and_bool_parse_surface() {
 
     let llvm_ir = compile_llvm_ir(source).expect("System.Array.Empty and bool.Parse should lower");
 
-    assert!(!llvm_ir.is_empty());
+    assert!(llvm_ir.contains("System_Array_Empty_Native"));
 }
 
 #[test]
@@ -1049,6 +1094,135 @@ fn compiles_system_string_null_helpers() {
     let llvm_ir = compile_llvm_ir(source).expect("System string null helpers should lower");
 
     assert!(!llvm_ir.is_empty());
+}
+
+#[test]
+fn compiles_string_startswith_and_equals_helpers() {
+    let source = r#"
+            using System;
+
+            fn main() {
+                string value = "glitch";
+                print(value.StartsWith("gli", StringComparison.Ordinal));
+                print(value.Equals("glitch", StringComparison.Ordinal));
+            }
+        "#;
+
+    let llvm_ir =
+        compile_llvm_ir(source).expect("string StartsWith and Equals helpers should lower");
+
+    assert!(llvm_ir.contains("glitch_string_length"));
+    assert!(llvm_ir.contains("icmp"));
+}
+
+#[test]
+fn compiles_string_substring_helper() {
+    let source = r#"
+            using System;
+
+            fn main() {
+                string value = "glitch";
+                print(value.Substring(2));
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("string Substring helper should lower");
+
+    assert!(llvm_ir.contains("System_String_Substring_Native"));
+    assert!(llvm_ir.contains("declare ptr @System_String_Substring_Native"));
+}
+
+#[test]
+fn compiles_string_trimend_helper() {
+    let source = r#"
+            using System;
+
+            fn main() {
+                string filterQuery = ">5~10/";
+                string path = filterQuery.TrimEnd('/').Substring(1);
+                print(path);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("string TrimEnd helper should lower");
+
+    assert!(llvm_ir.contains("System_String_TrimEnd_Native"));
+    assert!(llvm_ir.contains("declare ptr @System_String_TrimEnd_Native"));
+}
+
+#[test]
+fn compiles_string_transform_helpers() {
+    let source = r#"
+            using System;
+
+            fn main() {
+                string value = "  Glitch  ";
+                string lowered = value.ToLowerInvariant();
+                string replaced = lowered.Replace("g", "h");
+                string trimmed = replaced.Trim();
+                print(lowered);
+                print(replaced);
+                print(trimmed);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("string transform helpers should lower");
+
+    assert!(llvm_ir.contains("System_String_ToLowerInvariant_Native"));
+    assert!(llvm_ir.contains("System_String_Replace_Native"));
+    assert!(llvm_ir.contains("System_String_Trim_Native"));
+}
+
+#[test]
+fn compiles_string_split_helper() {
+    let source = r#"
+            using System;
+
+            fn main() {
+                string filterQuery = ">5~10";
+                var parts = filterQuery.Split("~");
+                string first = parts[0];
+                print(first);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("string Split helper should lower");
+
+    assert!(llvm_ir.contains("System_String_Split_Native"));
+}
+
+#[test]
+fn compiles_string_contains_helper() {
+    let source = r#"
+            using System;
+
+            fn main() {
+                string filterQuery = ">5~10";
+                print(filterQuery.Contains("~"));
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("string Contains helper should lower");
+
+    assert!(llvm_ir.contains("System_String_Contains_Native"));
+}
+
+#[test]
+fn compiles_string_trimstart_and_endswith_helpers() {
+    let source = r#"
+            using System;
+
+            fn main() {
+                string value = "   glitch/";
+                string trimmed = value.TrimStart();
+                print(trimmed.EndsWith("/", StringComparison.Ordinal));
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("string TrimStart and EndsWith helpers should lower");
+
+    assert!(llvm_ir.contains("System_String_TrimStart_Native"));
+    assert!(llvm_ir.contains("EndsWith"));
 }
 
 #[test]
@@ -2234,6 +2408,28 @@ fn lowers_rc_int_layout_in_llvm() {
 }
 
 #[test]
+fn warns_on_generic_placeholder_indexing_with_actionable_diagnostic() {
+    let source = r#"
+            class Box<T> {
+                T Pick(T value) {
+                    return value[0];
+                }
+            }
+
+            fn main() {
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("generic placeholder indexing should still compile with a warning");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3008"));
+    assert!(diagnostics.contains("generic placeholder"));
+    assert!(diagnostics.contains("specialized method body"));
+}
+
+#[test]
 fn warns_on_lambda_without_executable_closure_lowering_in_non_llvm_path() {
     let source = r#"
             class Runner {
@@ -2418,7 +2614,7 @@ fn compiles_linq_to_array_over_list_surface() {
 
     let llvm = compile_llvm_ir(source).expect("LINQ ToArray over List<T> should lower to LLVM");
 
-    assert!(!llvm.is_empty());
+    assert!(llvm.contains("list_to_array_loop"));
 }
 
 #[test]
@@ -2812,6 +3008,117 @@ fn compiles_typeof_reflection_surface_for_package_helpers() {
 }
 
 #[test]
+fn compiles_xunit_theory_and_extended_assert_surface() {
+    let source = r#"
+            using Xunit;
+
+            class DemoTests {
+                [Theory]
+                [InlineData(1)]
+                [InlineData(2)]
+                public void Numbers(int value) {
+                    Assert.False(value == 0);
+                    Assert.NotEqual(3, value);
+                }
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("xUnit theory surface should lower");
+
+    assert!(!llvm_ir.is_empty());
+    assert!(llvm_ir.contains("XUnit_AddTest"));
+}
+
+#[test]
+fn compiles_xunit_member_and_class_data_theory_surface() {
+    let source = r#"
+            using System;
+            using Xunit;
+
+            class MemberSourceTests {
+                public static object[][] Data() {
+                    return new object[][] {
+                        new object[] { 1 },
+                        new object[] { 2 }
+                    };
+                }
+
+                [Theory]
+                [MemberData(nameof(Data))]
+                public void MemberCases(int value) {
+                    Assert.True(value > 0);
+                }
+            }
+
+            class ClassSourceTests {
+                public static object[][] GetData() {
+                    return new object[][] {
+                        new object[] { 3 },
+                        new object[] { 4 }
+                    };
+                }
+            }
+
+            class ClassDataTests {
+                [Theory]
+                [ClassData(typeof(ClassSourceTests))]
+                public void ClassCases(int value) {
+                    Assert.True(value > 0);
+                }
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("xUnit member/class data surface should lower");
+
+    assert!(!llvm_ir.is_empty());
+    assert!(llvm_ir.contains("MemberCases[member:Data:0]"));
+    assert!(llvm_ir.contains("MemberCases[member:Data:1]"));
+    assert!(llvm_ir.contains("ClassCases[class:ClassSourceTests:0]"));
+    assert!(llvm_ir.contains("ClassCases[class:ClassSourceTests:1]"));
+}
+
+#[test]
+fn compiles_xunit_skip_attribute_by_omitting_registration() {
+    let source = r#"
+            using Xunit;
+
+            class SkipTests {
+                [Fact(Skip = "not now")]
+                public void Ignored() {
+                    Assert.True(false);
+                }
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("xUnit skip attribute surface should lower");
+
+    assert!(!llvm_ir.is_empty());
+}
+
+#[test]
+fn compiles_reflection_assembly_and_member_surface() {
+    let source = r#"
+            using System.Reflection;
+
+            class Demo {
+                public int Value;
+            }
+
+            fn main() {
+                Assembly asm = Assembly.GetExecutingAssembly();
+                string name = asm.GetName().Name;
+                Type type = typeof(Demo);
+                MethodInfo method = type.GetMethod("ToString", Type.EmptyTypes);
+                PropertyInfo property = type.GetProperty("Value", BindingFlags.Public | BindingFlags.Instance);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("reflection assembly surface should lower");
+
+    assert!(!llvm_ir.is_empty());
+}
+
+#[test]
 fn resolves_bare_static_member_lookup_on_current_type() {
     let source = r#"
             class Demo {
@@ -3113,6 +3420,80 @@ fn compiles_task_run_and_completed_task_package_surface() {
 }
 
 #[test]
+fn compiles_task_wait_getawaiter_and_success_properties() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int Compute() {
+                return 7;
+            }
+
+            fn main() {
+                Task<int> task = Task.Run(Compute);
+                task.Wait();
+                print(task.IsCompletedSuccessfully);
+                Task<int> awaiter = task.GetAwaiter();
+                print(awaiter.GetResult());
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("Task.Wait and GetAwaiter should lower");
+
+    assert!(!llvm_ir.is_empty());
+    assert!(llvm_ir.contains("glitch_task_get_result_i32"));
+}
+
+#[test]
+fn compiles_task_and_valuetask_result_methods_from_package_surface() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int Compute() {
+                return 11;
+            }
+
+            fn main() {
+                Task<int> task = Task.FromResult(Compute());
+                print(task.GetResult());
+
+                ValueTask<int> valueTask = ValueTask.FromResult(Compute());
+                print(valueTask.GetResult());
+                print(valueTask.GetAwaiter().GetResult());
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("task and valuetask result methods should lower from package surface");
+
+    assert!(!llvm_ir.is_empty());
+}
+
+#[test]
+fn compiles_valuetask_wait_completed_task_and_getawaiter_surface() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int Compute() {
+                return 9;
+            }
+
+            fn main() {
+                ValueTask<int> task = ValueTask.FromResult(Compute());
+                task.Wait();
+                print(task.IsCompletedSuccessfully);
+                Task<int> awaited = task.GetAwaiter();
+                print(awaited.GetResult());
+                ValueTask completed = ValueTask.CompletedTask;
+                print(completed.IsCompletedSuccessfully);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("ValueTask helpers should lower");
+
+    assert!(!llvm_ir.is_empty());
+}
+
+#[test]
 fn diagnostics_report_linked_file_path_for_marked_sources() {
     let source = r#"
             // __FILE_PATH__: packages/Foo/Foo.gl
@@ -3279,6 +3660,47 @@ fn borrow_checker_rejects_use_after_loop_move() {
 }
 
 #[test]
+fn borrow_checker_ignores_unreachable_code_after_break_in_loop() {
+    let source = r#"
+            fn main() {
+                string name = "Ada";
+                while (true) {
+                    break;
+                    string moved = move name;
+                }
+                print(name);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("unreachable code after break should not poison borrow checking");
+
+    assert!(!llvm_ir.is_empty());
+}
+
+#[test]
+fn borrow_checker_rejects_use_after_break_branch_move() {
+    let source = r#"
+            fn main() {
+                string name = "Ada";
+                while (true) {
+                    if (true) {
+                        string moved = move name;
+                        break;
+                    } else {
+                    }
+                }
+                print(name);
+            }
+        "#;
+
+    let error = compile_source_with_options(source, true, false)
+        .expect_err("break branch move should poison the loop exit state");
+
+    assert!(error.contains("borrow checker: use of moved value 'name'"));
+}
+
+#[test]
 fn borrow_checker_rejects_use_after_try_move() {
     let source = r#"
             fn main() {
@@ -3293,6 +3715,23 @@ fn borrow_checker_rejects_use_after_try_move() {
 
     let error =
         compile_source_with_options(source, true, false).expect_err("try/finally move should poison the join state");
+
+    assert!(error.contains("borrow checker: use of moved value 'name'"));
+}
+
+#[test]
+fn borrow_checker_rejects_use_after_conditional_expression_move() {
+    let source = r#"
+            fn main() {
+                string name = "Ada";
+                bool choose = true;
+                string moved = choose ? move name : "fallback";
+                print(name);
+            }
+        "#;
+
+    let error = compile_source_with_options(source, true, false)
+        .expect_err("conditional expression move should poison the join state");
 
     assert!(error.contains("borrow checker: use of moved value 'name'"));
 }

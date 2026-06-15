@@ -62,7 +62,17 @@ pub(crate) fn emit_native_executable(
     args.push(OsString::from(output_path));
     let links_rust_runtime = llvm_ir.contains("call void @GlitchRestHost_Run(")
         || llvm_ir.contains("System_IO_File_ReadAllText")
-        || llvm_ir.contains("System_IO_File_WriteAllText");
+        || llvm_ir.contains("System_IO_File_WriteAllText")
+        || llvm_ir.contains("System_String_Substring_Native")
+        || llvm_ir.contains("System_String_TrimEnd_Native")
+        || llvm_ir.contains("System_String_ToLower_Native")
+        || llvm_ir.contains("System_String_ToLowerInvariant_Native")
+        || llvm_ir.contains("System_String_Replace_Native")
+        || llvm_ir.contains("System_String_Trim_Native")
+        || llvm_ir.contains("System_String_Split_Native")
+        || llvm_ir.contains("System_String_Contains_Native")
+        || llvm_ir.contains("System_String_TrimStart_Native")
+        || llvm_ir.contains("System_Array_Empty_Native");
     if links_rust_runtime {
         args.push(OsString::from("-x"));
         args.push(OsString::from("none"));

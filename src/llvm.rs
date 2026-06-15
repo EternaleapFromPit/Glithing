@@ -91,12 +91,24 @@ struct LlObjectType {
     constructor_params: Vec<IrType>,
 }
 
+fn is_string_like_type(ty: &IrType) -> bool {
+    match ty {
+        IrType::String => true,
+        IrType::Class(name) | IrType::Struct(name) | IrType::Unknown(name) => {
+            name == "string" || name == "String" || name == "System.String"
+        }
+        _ => false,
+    }
+}
+
 pub(crate) struct LlvmEmitter {
     type_defs: Vec<String>,
     globals: Vec<String>,
     body: String,
     vars: HashMap<String, LlVar>,
     functions: HashMap<String, LlFunctionSig>,
+    specialized_symbols: HashMap<(String, Vec<IrType>), String>,
+    specialized_functions: Vec<TypedFunction>,
     object_types: HashMap<String, LlObjectType>,
     endpoint_handlers: Vec<EndpointHandlerBinding>,
     drop_order: Vec<String>,
@@ -126,6 +138,8 @@ impl LlvmEmitter {
             body: String::new(),
             vars: HashMap::new(),
             functions: HashMap::new(),
+            specialized_symbols: HashMap::new(),
+            specialized_functions: Vec::new(),
             object_types: HashMap::new(),
             endpoint_handlers: program.endpoint_handlers.clone(),
             drop_order: Vec::new(),
@@ -144,6 +158,7 @@ impl LlvmEmitter {
             emitter.register_object_type(ty);
         }
         emitter.register_rc_instantiations(program);
+        emitter.register_generic_specializations(program)?;
         for function in &program.functions {
             emitter.register_function(function);
         }
@@ -159,6 +174,76 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Void,
                 params: vec![LlType::Ptr, LlType::Ptr],
+            },
+        );
+        emitter.functions.insert(
+            "System_String_Substring_Native".to_string(),
+            LlFunctionSig {
+                return_type: LlType::Ptr,
+                params: vec![LlType::Ptr, LlType::I64],
+            },
+        );
+        emitter.functions.insert(
+            "System_String_TrimEnd_Native".to_string(),
+            LlFunctionSig {
+                return_type: LlType::Ptr,
+                params: vec![LlType::Ptr, LlType::Ptr],
+            },
+        );
+        emitter.functions.insert(
+            "System_String_ToLower_Native".to_string(),
+            LlFunctionSig {
+                return_type: LlType::Ptr,
+                params: vec![LlType::Ptr],
+            },
+        );
+        emitter.functions.insert(
+            "System_String_ToLowerInvariant_Native".to_string(),
+            LlFunctionSig {
+                return_type: LlType::Ptr,
+                params: vec![LlType::Ptr],
+            },
+        );
+        emitter.functions.insert(
+            "System_String_Replace_Native".to_string(),
+            LlFunctionSig {
+                return_type: LlType::Ptr,
+                params: vec![LlType::Ptr, LlType::Ptr, LlType::Ptr],
+            },
+        );
+        emitter.functions.insert(
+            "System_String_Trim_Native".to_string(),
+            LlFunctionSig {
+                return_type: LlType::Ptr,
+                params: vec![LlType::Ptr],
+            },
+        );
+        emitter.functions.insert(
+            "System_String_Split_Native".to_string(),
+            LlFunctionSig {
+                return_type: LlType::Ptr,
+                params: vec![LlType::Ptr, LlType::Ptr],
+            },
+        );
+        emitter.functions.insert(
+            "System_String_Contains_Native".to_string(),
+            LlFunctionSig {
+                return_type: LlType::I1,
+                params: vec![LlType::Ptr, LlType::Ptr],
+            },
+        );
+        emitter.functions.insert(
+            "System_String_TrimStart_Native".to_string(),
+            LlFunctionSig {
+                return_type: LlType::Ptr,
+                params: vec![LlType::Ptr, LlType::Ptr],
+            },
+        );
+        emitter.functions.insert(
+            "System_Array_Empty_Native".to_string(),
+            LlFunctionSig {
+                return_type: LlType::Ptr,
+                params: vec![],
             },
         );
         emitter.functions.insert(
@@ -197,6 +282,10 @@ impl LlvmEmitter {
                 emitter.register_function(method);
             }
         }
+        let specialized_functions = emitter.specialized_functions.clone();
+        for function in &specialized_functions {
+            emitter.register_function(function);
+        }
         emitter.emit_drop_glue();
         let mut emitted_symbols = HashSet::new();
         for ty in &program.types {
@@ -221,6 +310,11 @@ impl LlvmEmitter {
                 if emitted_symbols.insert(function.symbol.clone()) {
                     emitter.emit_typed_function(function)?;
                 }
+            }
+        }
+        for function in &specialized_functions {
+            if emitted_symbols.insert(function.symbol.clone()) {
+                emitter.emit_typed_function(function)?;
             }
         }
         emitter.emit_web_application_handle_wrapper(program)?;
@@ -364,6 +458,56 @@ impl LlvmEmitter {
         );
     }
 
+    fn register_generic_specializations(
+        &mut self,
+        program: &TypedProgram,
+    ) -> Result<(), String> {
+        let mut pending = Vec::new();
+        for instantiation in &program.generic_instantiations {
+            if instantiation.args.is_empty() {
+                continue;
+            }
+            if let Some(definition) = find_generic_definition(program, &instantiation.name) {
+                if definition.generic_params.len() != instantiation.args.len() {
+                    continue;
+                }
+                let key = (definition.symbol.clone(), instantiation.args.clone());
+                if self.specialized_symbols.contains_key(&key) {
+                    continue;
+                }
+                let suffix = instantiation
+                    .args
+                    .iter()
+                    .map(ir_symbol_suffix)
+                    .collect::<Vec<_>>()
+                    .join("_");
+                let specialized_symbol = if suffix.is_empty() {
+                    format!("{}__specialized", definition.symbol)
+                } else {
+                    format!("{}__{}", definition.symbol, suffix)
+                };
+                self.specialized_symbols
+                    .insert(key, specialized_symbol.clone());
+                let mut subst = HashMap::new();
+                for (name, ty) in definition
+                    .generic_params
+                    .iter()
+                    .cloned()
+                    .zip(instantiation.args.iter().cloned())
+                {
+                    subst.insert(name, ty);
+                }
+                pending.push(specialize_typed_function(
+                    definition,
+                    &subst,
+                    specialized_symbol,
+                ));
+            }
+        }
+        self.specialized_functions.extend(pending);
+        Ok(())
+    }
+
     fn emit_drop_glue(&mut self) {
         let objects = self.object_types.values().cloned().collect::<Vec<_>>();
         for object in objects {
@@ -424,7 +568,7 @@ impl LlvmEmitter {
                 }
                 continue;
             }
-            if matches!(field.drop_kind, DropKind::Free) && matches!(field.ty, IrType::String) {
+            if matches!(field.drop_kind, DropKind::Free) && is_string_like_type(&field.ty) {
                 self.body.push_str(&format!(
                     "  %field_{}_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 {}\n  %field_{} = load ptr, ptr %field_{}_ptr\n  call void @glitch_string_release(ptr %field_{})\n",
                     field.index, field.index, field.index, field.index, field.index
@@ -472,6 +616,8 @@ impl LlvmEmitter {
             body: String::new(),
             vars: HashMap::new(),
             functions: HashMap::new(),
+            specialized_symbols: HashMap::new(),
+            specialized_functions: Vec::new(),
             object_types: HashMap::new(),
             endpoint_handlers: Vec::new(),
             drop_order: Vec::new(),
@@ -806,7 +952,7 @@ impl LlvmEmitter {
                             ));
                             self.emit_drop(type_name, &old);
                         }
-                    } else if matches!(target.ty, IrType::String) {
+                    } else if is_string_like_type(&target.ty) {
                         let old = self.tmp();
                         self.body.push_str(&format!(
                                 "  {old} = load ptr, ptr {}\n  call void @glitch_string_release(ptr {old})\n",
@@ -904,7 +1050,7 @@ impl LlvmEmitter {
                     {
                         self.emit_retain(type_name, &value.value);
                     }
-                } else if matches!(expr.ty, IrType::String)
+                } else if is_string_like_type(&expr.ty)
                     && (matches!(
                         expr.kind,
                         TypedExprKind::Field { .. } | TypedExprKind::Index { .. }
@@ -1474,7 +1620,7 @@ impl LlvmEmitter {
                                 helper_name,
                                 task_val.value
                             ));
-                            if matches!(result_ty, IrType::String) {
+                            if is_string_like_type(&result_ty) {
                                 self.body.push_str(&format!(
                                     "  call void @glitch_string_retain(ptr {})\n",
                                     call_res
@@ -1490,7 +1636,9 @@ impl LlvmEmitter {
                             });
                         }
                     }
-                    if name == "IsCompleted" && matches!(target.ty, IrType::Task(_)) {
+                    if matches!(name.as_str(), "IsCompleted" | "IsCompletedSuccessfully")
+                        && matches!(target.ty, IrType::Task(_))
+                    {
                         return Ok(LlValue {
                             value: "true".to_string(),
                             ty: LlType::I1,
@@ -1499,7 +1647,7 @@ impl LlvmEmitter {
                     if name == "Target" && matches!(target.ty, IrType::Weak(_)) {
                         let weak_val = self.emit_typed_expr(target)?;
                         if let IrType::Weak(inner) = &target.ty {
-                            if matches!(inner.as_ref(), IrType::String) {
+                            if is_string_like_type(inner.as_ref()) {
                                 self.body.push_str(&format!(
                                     "  call void @glitch_string_retain(ptr {})\n",
                                     weak_val.value
@@ -1555,7 +1703,7 @@ impl LlvmEmitter {
                             ty: LlType::I32,
                         });
                     }
-                    if name == "Length" && matches!(target.ty, IrType::String) {
+                    if name == "Length" && is_string_like_type(&target.ty) {
                         let string = self.emit_typed_expr(target)?;
                         let len = self.tmp();
                         let count = self.tmp();
@@ -1650,7 +1798,7 @@ impl LlvmEmitter {
                                 ));
                                 self.emit_drop(type_name, &old);
                             }
-                        } else if matches!(target.ty, IrType::String) {
+                        } else if is_string_like_type(&target.ty) {
                             let old = self.tmp();
                             self.body.push_str(&format!(
                                 "  {old} = load ptr, ptr {}\n  call void @glitch_string_release(ptr {old})\n",
@@ -1735,7 +1883,7 @@ impl LlvmEmitter {
                     let right = self.emit_typed_expr(right)?;
                     return self.emit_logical_value(left, *op, right);
                 }
-                if *op == BinaryOp::Add && matches!(expr.ty, IrType::String) {
+                if *op == BinaryOp::Add && is_string_like_type(&expr.ty) {
                     let left = self.cast_value(left, &LlType::Ptr)?;
                     let right = self.emit_typed_expr(right)?;
                     let right = self.cast_value(right, &LlType::Ptr)?;
@@ -1944,7 +2092,7 @@ impl LlvmEmitter {
                             return self.cast_value(text_value, &LlType::Ptr);
                         }
                         if self.functions.contains_key(symbol) {
-                            self.emit_typed_function_call(symbol, &call.args)
+                            self.emit_typed_function_call(symbol, &call.generic_args, &call.args)
                         } else if self.vars.contains_key(symbol) {
                             let var = self.vars.get(symbol).unwrap().clone();
                             let delegate_ptr = self.tmp();
@@ -2022,6 +2170,7 @@ impl LlvmEmitter {
                                 let result = self.emit_typed_call(
                                     &resolved_symbol,
                                     std::iter::once(receiver.clone()),
+                                    &call.generic_args,
                                     call_args,
                                 )?;
                                 self.emit_temporary_drop(target, &receiver);
@@ -2041,7 +2190,7 @@ impl LlvmEmitter {
                                 return self.emit_task_from_result_inline(call, &expr.ty);
                             }
                             if self.functions.contains_key(symbol) {
-                                self.emit_typed_function_call(symbol, &call.args)
+                                self.emit_typed_function_call(symbol, &call.generic_args, &call.args)
                             } else {
                                 self.emit_opaque_call(Some(target), &call.args, &expr.ty)
                             }
@@ -2078,6 +2227,7 @@ impl LlvmEmitter {
                                     let result = self.emit_typed_call(
                                         &resolved_symbol,
                                         std::iter::once(receiver.clone()),
+                                        &call.generic_args,
                                         &call.args,
                                     )?;
                                     self.emit_temporary_drop(target, &receiver);
@@ -2240,9 +2390,10 @@ impl LlvmEmitter {
     fn emit_typed_function_call(
         &mut self,
         name: &str,
+        generic_args: &[IrType],
         args: &[TypedExpr],
     ) -> Result<LlValue, String> {
-        self.emit_typed_call(name, std::iter::empty(), args)
+        self.emit_typed_call(name, std::iter::empty(), generic_args, args)
     }
 
     fn emit_mvc_result_value(&mut self, name: &str, args: &[TypedExpr]) -> Result<LlValue, String> {
@@ -2271,7 +2422,7 @@ impl LlvmEmitter {
                 if self.object_types.contains_key(type_name) {
                     self.emit_retain(type_name, &selected.value);
                 }
-            } else if matches!(selected_expr.ty, IrType::String) {
+            } else if is_string_like_type(&selected_expr.ty) {
                 self.body.push_str(&format!(
                     "  call void @glitch_string_retain(ptr {})\n",
                     selected.value
@@ -2351,13 +2502,19 @@ impl LlvmEmitter {
         &mut self,
         name: &str,
         prefix: I,
+        generic_args: &[IrType],
         args: &[TypedExpr],
     ) -> Result<LlValue, String>
     where
         I: IntoIterator<Item = LlValue>,
     {
+        let resolved_name = self
+            .specialized_symbols
+            .get(&(name.to_string(), generic_args.to_vec()))
+            .cloned()
+            .unwrap_or_else(|| name.to_string());
         let signature =
-            self.functions.get(name).cloned().ok_or_else(|| {
+            self.functions.get(&resolved_name).cloned().ok_or_else(|| {
                 format!("LLVM TIR backend: function '{name}' has no lowered body")
             })?;
         let mut values = prefix.into_iter().collect::<Vec<_>>();
@@ -2379,7 +2536,7 @@ impl LlvmEmitter {
         if signature.return_type == LlType::Void {
             self.body.push_str(&format!(
                 "  call void @{}({})\n",
-                sanitize(name),
+                sanitize(&resolved_name),
                 rendered_args.join(", ")
             ));
             self.emit_exception_check();
@@ -2392,7 +2549,7 @@ impl LlvmEmitter {
             self.body.push_str(&format!(
                 "  {tmp} = call {} @{}({})\n",
                 signature.return_type.as_ir(),
-                sanitize(name),
+                sanitize(&resolved_name),
                 rendered_args.join(", ")
             ));
             self.emit_exception_check();
@@ -2977,7 +3134,7 @@ impl LlvmEmitter {
 
                 // Non-null block
                 self.body.push_str(&format!("\n{non_null_lbl}:\n"));
-                if matches!(inner.as_ref(), IrType::String) {
+                if is_string_like_type(inner.as_ref()) {
                     self.body.push_str(&format!(
                         "  call void @glitch_string_retain(ptr {})\n",
                         weak_val.value
@@ -3543,7 +3700,7 @@ impl LlvmEmitter {
                 ));
                 Ok(LlValue { value: result, ty })
             }
-            IrType::String => {
+            ty if is_string_like_type(ty) => {
                 let index = self.emit_typed_expr(index)?;
                 let index = self.cast_value(index, &LlType::I64)?;
                 let slot = self.tmp();
@@ -3577,7 +3734,7 @@ impl LlvmEmitter {
                 })
             }
             other => Err(format!(
-                "LLVM TIR backend: indexing is unsupported for {other:?}"
+                "LLVM TIR backend: indexing is unsupported for {other:?}; move the logic into a concrete specialization or a runtime helper before indexing generic package state"
             )),
         }
     }
@@ -3629,7 +3786,7 @@ impl LlvmEmitter {
                         ));
                         self.emit_drop(type_name, &old);
                     }
-                } else if matches!(element.as_ref(), IrType::String) {
+                } else if is_string_like_type(element.as_ref()) {
                     let old = self.tmp();
                     self.body.push_str(&format!(
                         "  {old} = load ptr, ptr {slot}\n  call void @glitch_string_release(ptr {old})\n"
@@ -3677,7 +3834,7 @@ impl LlvmEmitter {
                         ));
                         self.emit_drop(type_name, &old);
                     }
-                } else if matches!(value_ty.as_ref(), IrType::String) {
+                } else if is_string_like_type(value_ty.as_ref()) {
                     let old = self.tmp();
                     self.body.push_str(&format!(
                         "  {old} = load ptr, ptr {slot}\n  call void @glitch_string_release(ptr {old})\n"
@@ -4287,6 +4444,354 @@ fn expr_source_name(expr: &TypedExpr) -> Option<&str> {
     match &expr.kind {
         TypedExprKind::Var(name) | TypedExprKind::Move(name) => Some(name),
         _ => None,
+    }
+}
+
+fn find_generic_definition<'a>(program: &'a TypedProgram, symbol: &str) -> Option<&'a TypedFunction> {
+    program
+        .functions
+        .iter()
+        .find(|function| function.symbol == symbol && !function.generic_params.is_empty())
+        .or_else(|| {
+            for ty in &program.types {
+                if let Some(method) = ty
+                    .methods
+                    .iter()
+                    .find(|method| method.symbol == symbol && !method.generic_params.is_empty())
+                {
+                    return Some(method);
+                }
+                if let Some(constructor) = ty
+                    .constructors
+                    .iter()
+                    .find(|constructor| constructor.symbol == symbol && !constructor.generic_params.is_empty())
+                {
+                    return Some(constructor);
+                }
+            }
+            None
+        })
+}
+
+fn specialize_typed_function(
+    function: &TypedFunction,
+    subst: &HashMap<String, IrType>,
+    symbol: String,
+) -> TypedFunction {
+    let mut specialized = function.clone();
+    specialized.symbol = symbol;
+    specialized.generic_params.clear();
+    specialized.return_type = substitute_ir_type(&specialized.return_type, subst);
+    specialized.return_ownership = ownership_for_type(&specialized.return_type);
+    specialized.params = specialized
+        .params
+        .into_iter()
+        .map(|binding| specialize_typed_binding(binding, subst))
+        .collect();
+    specialized.locals = specialized
+        .locals
+        .into_iter()
+        .map(|binding| specialize_typed_binding(binding, subst))
+        .collect();
+    specialized.body = specialized
+        .body
+        .into_iter()
+        .map(|stmt| specialize_typed_stmt(stmt, subst))
+        .collect();
+    specialized
+}
+
+fn specialize_typed_binding(binding: TypedBinding, subst: &HashMap<String, IrType>) -> TypedBinding {
+    let ty = substitute_ir_type(&binding.ty, subst);
+    TypedBinding {
+        name: binding.name,
+        ownership: ownership_for_type(&ty),
+        ty,
+    }
+}
+
+fn specialize_typed_stmt(stmt: TypedStmt, subst: &HashMap<String, IrType>) -> TypedStmt {
+    TypedStmt {
+        kind: match stmt.kind {
+            TypedStmtKind::Let { binding, expr } => TypedStmtKind::Let {
+                binding: specialize_typed_binding(binding, subst),
+                expr: specialize_typed_expr(expr, subst),
+            },
+            TypedStmtKind::Assign { name, expr } => TypedStmtKind::Assign {
+                name,
+                expr: specialize_typed_expr(expr, subst),
+            },
+            TypedStmtKind::AssignTarget { target, expr } => TypedStmtKind::AssignTarget {
+                target: specialize_typed_expr(target, subst),
+                expr: specialize_typed_expr(expr, subst),
+            },
+            TypedStmtKind::Block(body) => {
+                TypedStmtKind::Block(body.into_iter().map(|stmt| specialize_typed_stmt(stmt, subst)).collect())
+            }
+            TypedStmtKind::If {
+                condition,
+                then_body,
+                else_body,
+            } => TypedStmtKind::If {
+                condition: specialize_typed_expr(condition, subst),
+                then_body: then_body
+                    .into_iter()
+                    .map(|stmt| specialize_typed_stmt(stmt, subst))
+                    .collect(),
+                else_body: else_body
+                    .into_iter()
+                    .map(|stmt| specialize_typed_stmt(stmt, subst))
+                    .collect(),
+            },
+            TypedStmtKind::Try {
+                try_body,
+                catch_name,
+                catch_body,
+                finally_body,
+            } => TypedStmtKind::Try {
+                try_body: try_body
+                    .into_iter()
+                    .map(|stmt| specialize_typed_stmt(stmt, subst))
+                    .collect(),
+                catch_name,
+                catch_body: catch_body
+                    .into_iter()
+                    .map(|stmt| specialize_typed_stmt(stmt, subst))
+                    .collect(),
+                finally_body: finally_body
+                    .into_iter()
+                    .map(|stmt| specialize_typed_stmt(stmt, subst))
+                    .collect(),
+            },
+            TypedStmtKind::Switch { expr, cases, default } => TypedStmtKind::Switch {
+                expr: specialize_typed_expr(expr, subst),
+                cases: cases
+                    .into_iter()
+                    .map(|case| TypedSwitchCase {
+                        value: specialize_typed_expr(case.value, subst),
+                        body: case
+                            .body
+                            .into_iter()
+                            .map(|stmt| specialize_typed_stmt(stmt, subst))
+                            .collect(),
+                    })
+                    .collect(),
+                default: default
+                    .into_iter()
+                    .map(|stmt| specialize_typed_stmt(stmt, subst))
+                    .collect(),
+            },
+            TypedStmtKind::While { condition, body } => TypedStmtKind::While {
+                condition: specialize_typed_expr(condition, subst),
+                body: body
+                    .into_iter()
+                    .map(|stmt| specialize_typed_stmt(stmt, subst))
+                    .collect(),
+            },
+            TypedStmtKind::For {
+                init,
+                condition,
+                increment,
+                body,
+            } => TypedStmtKind::For {
+                init: init.map(|stmt| Box::new(specialize_typed_stmt(*stmt, subst))),
+                condition: condition.map(|expr| specialize_typed_expr(expr, subst)),
+                increment: increment.map(|stmt| Box::new(specialize_typed_stmt(*stmt, subst))),
+                body: body
+                    .into_iter()
+                    .map(|stmt| specialize_typed_stmt(stmt, subst))
+                    .collect(),
+            },
+            TypedStmtKind::ForEach {
+                item,
+                collection,
+                body,
+            } => TypedStmtKind::ForEach {
+                item: specialize_typed_binding(item, subst),
+                collection: specialize_typed_expr(collection, subst),
+                body: body
+                    .into_iter()
+                    .map(|stmt| specialize_typed_stmt(stmt, subst))
+                    .collect(),
+            },
+            TypedStmtKind::Print(expr) => TypedStmtKind::Print(specialize_typed_expr(expr, subst)),
+            TypedStmtKind::Expr(expr) => TypedStmtKind::Expr(specialize_typed_expr(expr, subst)),
+            TypedStmtKind::Return(expr) => TypedStmtKind::Return(expr.map(|expr| specialize_typed_expr(expr, subst))),
+            TypedStmtKind::Throw(expr) => TypedStmtKind::Throw(specialize_typed_expr(expr, subst)),
+            TypedStmtKind::Break => TypedStmtKind::Break,
+            TypedStmtKind::Continue => TypedStmtKind::Continue,
+        },
+    }
+}
+
+fn specialize_typed_field_init(field: TypedFieldInit, subst: &HashMap<String, IrType>) -> TypedFieldInit {
+    TypedFieldInit {
+        name: field.name,
+        expr: specialize_typed_expr(field.expr, subst),
+    }
+}
+
+fn specialize_typed_expr(expr: TypedExpr, subst: &HashMap<String, IrType>) -> TypedExpr {
+    let TypedExpr {
+        kind,
+        ty: original_ty,
+        ..
+    } = expr;
+    let kind = match kind {
+        TypedExprKind::ArrayLiteral(values) => TypedExprKind::ArrayLiteral(
+            values
+                .into_iter()
+                .map(|value| specialize_typed_expr(value, subst))
+                .collect(),
+        ),
+        TypedExprKind::NewArray {
+            element_type,
+            length,
+            values,
+        } => TypedExprKind::NewArray {
+            element_type: substitute_ir_type(&element_type, subst),
+            length: length.map(|expr| Box::new(specialize_typed_expr(*expr, subst))),
+            values: values
+                .into_iter()
+                .map(|value| specialize_typed_expr(value, subst))
+                .collect(),
+        },
+        TypedExprKind::Index { target, index } => TypedExprKind::Index {
+            target: Box::new(specialize_typed_expr(*target, subst)),
+            index: Box::new(specialize_typed_expr(*index, subst)),
+        },
+        TypedExprKind::Field { target, name } => TypedExprKind::Field {
+            target: Box::new(specialize_typed_expr(*target, subst)),
+            name,
+        },
+        TypedExprKind::IsPattern { expr, binding } => TypedExprKind::IsPattern {
+            expr: Box::new(specialize_typed_expr(*expr, subst)),
+            binding: binding.map(|binding| specialize_typed_binding(binding, subst)),
+        },
+        TypedExprKind::Throw(expr) => TypedExprKind::Throw(Box::new(specialize_typed_expr(*expr, subst))),
+        TypedExprKind::Assign { target, value } => TypedExprKind::Assign {
+            target: Box::new(specialize_typed_expr(*target, subst)),
+            value: Box::new(specialize_typed_expr(*value, subst)),
+        },
+        TypedExprKind::Call(call) => TypedExprKind::Call(TypedCall {
+            kind: match call.kind {
+                TypedCallKind::Function { name, symbol } => {
+                    TypedCallKind::Function { name, symbol }
+                }
+                TypedCallKind::Method {
+                    target,
+                    name,
+                    symbol,
+                    resolution,
+                } => TypedCallKind::Method {
+                    target: Box::new(specialize_typed_expr(*target, subst)),
+                    name,
+                    symbol,
+                    resolution,
+                },
+            },
+            args: call
+                .args
+                .into_iter()
+                .map(|arg| specialize_typed_expr(arg, subst))
+                .collect(),
+            generic_args: call
+                .generic_args
+                .into_iter()
+                .map(|arg| substitute_ir_type(&arg, subst))
+                .collect(),
+        }),
+        TypedExprKind::NewObject {
+            type_name,
+            constructor,
+            args,
+            fields,
+        } => TypedExprKind::NewObject {
+            type_name,
+            constructor,
+            args: args
+                .into_iter()
+                .map(|arg| specialize_typed_expr(arg, subst))
+                .collect(),
+            fields: fields
+                .into_iter()
+                .map(|field| specialize_typed_field_init(field, subst))
+                .collect(),
+        },
+        TypedExprKind::Lambda { params, body } => TypedExprKind::Lambda {
+            params,
+            body: Box::new(specialize_typed_expr(*body, subst)),
+        },
+        TypedExprKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => TypedExprKind::Conditional {
+            condition: Box::new(specialize_typed_expr(*condition, subst)),
+            when_true: Box::new(specialize_typed_expr(*when_true, subst)),
+            when_false: Box::new(specialize_typed_expr(*when_false, subst)),
+        },
+        TypedExprKind::Unary { op, expr } => TypedExprKind::Unary {
+            op,
+            expr: Box::new(specialize_typed_expr(*expr, subst)),
+        },
+        TypedExprKind::IncDec { target, delta, prefix } => TypedExprKind::IncDec {
+            target: Box::new(specialize_typed_expr(*target, subst)),
+            delta,
+            prefix,
+        },
+        TypedExprKind::Binary { left, op, right } => TypedExprKind::Binary {
+            left: Box::new(specialize_typed_expr(*left, subst)),
+            op,
+            right: Box::new(specialize_typed_expr(*right, subst)),
+        },
+        TypedExprKind::Await(expr) => TypedExprKind::Await(Box::new(specialize_typed_expr(*expr, subst))),
+        TypedExprKind::Int(value) => TypedExprKind::Int(value),
+        TypedExprKind::Float(value) => TypedExprKind::Float(value),
+        TypedExprKind::Bool(value) => TypedExprKind::Bool(value),
+        TypedExprKind::Null => TypedExprKind::Null,
+        TypedExprKind::String(value) => TypedExprKind::String(value),
+        TypedExprKind::Var(name) => TypedExprKind::Var(name),
+        TypedExprKind::FunctionSymbol(name) => TypedExprKind::FunctionSymbol(name),
+        TypedExprKind::Move(name) => TypedExprKind::Move(name),
+        TypedExprKind::Borrow { mutable, name } => TypedExprKind::Borrow { mutable, name },
+        TypedExprKind::NewCollection(ty) => TypedExprKind::NewCollection(substitute_ir_type(&ty, subst)),
+        TypedExprKind::NewThread(name) => TypedExprKind::NewThread(name),
+    };
+    let ty = substitute_ir_type(&original_ty, subst);
+    let ownership = match &kind {
+        TypedExprKind::Borrow { .. } => Ownership::Borrowed,
+        TypedExprKind::Move(_) => Ownership::Moved,
+        TypedExprKind::Null => Ownership::Copy,
+        _ => ownership_for_type(&ty),
+    };
+    let drop_kind = drop_kind_for_type(&ty, &ownership);
+    TypedExpr {
+        kind,
+        ty,
+        ownership,
+        drop_kind,
+    }
+}
+
+fn substitute_ir_type(ty: &IrType, subst: &HashMap<String, IrType>) -> IrType {
+    match ty {
+        IrType::Unknown(name) => subst.get(name).cloned().unwrap_or_else(|| ty.clone()),
+        IrType::Array(inner) => IrType::Array(Box::new(substitute_ir_type(inner, subst))),
+        IrType::Ref(inner) => IrType::Ref(Box::new(substitute_ir_type(inner, subst))),
+        IrType::List(inner) => IrType::List(Box::new(substitute_ir_type(inner, subst))),
+        IrType::Dictionary(key, value) => IrType::Dictionary(
+            Box::new(substitute_ir_type(key, subst)),
+            Box::new(substitute_ir_type(value, subst)),
+        ),
+        IrType::Enumerable(inner) => IrType::Enumerable(Box::new(substitute_ir_type(inner, subst))),
+        IrType::Task(inner) => IrType::Task(Box::new(substitute_ir_type(inner, subst))),
+        IrType::Function { params, return_type } => IrType::Function {
+            params: params.iter().map(|param| substitute_ir_type(param, subst)).collect(),
+            return_type: Box::new(substitute_ir_type(return_type, subst)),
+        },
+        IrType::Weak(inner) => IrType::Weak(Box::new(substitute_ir_type(inner, subst))),
+        _ => ty.clone(),
     }
 }
 

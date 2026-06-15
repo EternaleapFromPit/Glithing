@@ -15,6 +15,7 @@ struct BorrowState {
     ref_targets: HashMap<String, String>,
     scopes: Vec<Vec<String>>,
     terminated: bool,
+    loop_exit_snapshots: Vec<BorrowState>,
 }
 
 impl BorrowState {
@@ -136,8 +137,45 @@ impl BorrowState {
             state.mutable_borrowed = mutable_borrowed;
         }
         merged.ref_targets = base.ref_targets.clone();
+        merged.loop_exit_snapshots = branches
+            .iter()
+            .flat_map(|branch| branch.loop_exit_snapshots.iter().cloned())
+            .collect();
         merged.terminated = active_branches.is_empty();
         merged
+    }
+
+    fn merge_loop_exit_states(base: &BorrowState, branches: &[BorrowState]) -> BorrowState {
+        let mut merged = base.clone();
+        for (name, state) in &mut merged.vars {
+            let mut moved = false;
+            let mut shared_borrows = 0usize;
+            let mut mutable_borrowed = false;
+            for branch in branches {
+                if let Some(branch_state) = branch.vars.get(name) {
+                    moved |= branch_state.moved;
+                    shared_borrows = shared_borrows.max(branch_state.shared_borrows);
+                    mutable_borrowed |= branch_state.mutable_borrowed;
+                }
+            }
+            state.moved = moved;
+            state.shared_borrows = shared_borrows;
+            state.mutable_borrowed = mutable_borrowed;
+        }
+        merged.ref_targets = base.ref_targets.clone();
+        merged.loop_exit_snapshots = branches
+            .iter()
+            .flat_map(|branch| branch.loop_exit_snapshots.iter().cloned())
+            .collect();
+        merged.terminated = false;
+        merged
+    }
+
+    fn snapshot_for_loop_exit(&self) -> BorrowState {
+        let mut snapshot = self.clone();
+        snapshot.terminated = false;
+        snapshot.loop_exit_snapshots.clear();
+        snapshot
     }
 }
 
@@ -181,6 +219,9 @@ impl BorrowChecker {
                 break;
             }
             Self::check_stmt(stmt, state)?;
+            if state.terminated {
+                break;
+            }
         }
         Ok(())
     }
@@ -286,7 +327,9 @@ impl BorrowChecker {
                 body_state.push_scope();
                 Self::check_stmts(body, &mut body_state)?;
                 body_state.pop_scope();
-                *state = BorrowState::merge_from_branches(&base_state, &[body_state]);
+                let mut loop_branches = vec![body_state.clone()];
+                loop_branches.extend(body_state.loop_exit_snapshots.iter().cloned());
+                *state = BorrowState::merge_loop_exit_states(&base_state, &loop_branches);
             }
             Stmt::For {
                 init,
@@ -308,7 +351,9 @@ impl BorrowChecker {
                     Self::check_stmt(increment, &mut loop_state)?;
                 }
                 loop_state.pop_scope();
-                *state = BorrowState::merge_from_branches(&base_state, &[loop_state]);
+                let mut loop_branches = vec![loop_state.clone()];
+                loop_branches.extend(loop_state.loop_exit_snapshots.iter().cloned());
+                *state = BorrowState::merge_loop_exit_states(&base_state, &loop_branches);
             }
             Stmt::ForEach {
                 item_name,
@@ -323,7 +368,9 @@ impl BorrowChecker {
                 loop_state.declare(item_name);
                 Self::check_stmts(body, &mut loop_state)?;
                 loop_state.pop_scope();
-                *state = BorrowState::merge_from_branches(&base_state, &[loop_state]);
+                let mut loop_branches = vec![loop_state.clone()];
+                loop_branches.extend(loop_state.loop_exit_snapshots.iter().cloned());
+                *state = BorrowState::merge_loop_exit_states(&base_state, &loop_branches);
             }
             Stmt::Print(expr) | Stmt::Expr(expr) => {
                 Self::check_expr(expr, state)?;
@@ -339,7 +386,10 @@ impl BorrowChecker {
                 Self::check_expr(expr, state)?;
                 state.terminated = true;
             }
-            Stmt::Break | Stmt::Continue => {}
+            Stmt::Break | Stmt::Continue => {
+                state.loop_exit_snapshots.push(state.snapshot_for_loop_exit());
+                state.terminated = true;
+            }
         }
         Ok(())
     }
@@ -409,8 +459,12 @@ impl BorrowChecker {
                 when_false,
             } => {
                 Self::check_expr(condition, state)?;
-                Self::check_expr(when_true, state)?;
-                Self::check_expr(when_false, state)?;
+                let base_state = state.clone();
+                let mut true_state = base_state.clone();
+                Self::check_expr(when_true, &mut true_state)?;
+                let mut false_state = base_state.clone();
+                Self::check_expr(when_false, &mut false_state)?;
+                *state = BorrowState::merge_from_branches(&base_state, &[true_state, false_state]);
             }
             Expr::Unary { expr, .. } => Self::check_expr(expr, state)?,
             Expr::IncDec { name, .. } => state.ensure_available(name)?,

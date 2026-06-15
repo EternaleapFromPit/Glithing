@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 
@@ -28,7 +28,7 @@ pub(crate) enum DropKind {
     BorrowOnly,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum IrType {
     Bool,
     Byte,
@@ -85,6 +85,7 @@ pub(crate) struct TypedType {
 pub(crate) struct TypedFunction {
     pub(crate) name: String,
     pub(crate) symbol: String,
+    pub(crate) generic_params: Vec<String>,
     pub(crate) is_extern: bool,
     pub(crate) return_type: IrType,
     pub(crate) return_ownership: Ownership,
@@ -261,6 +262,7 @@ pub(crate) struct TypedFieldInit {
 pub(crate) struct TypedCall {
     pub(crate) kind: TypedCallKind,
     pub(crate) args: Vec<TypedExpr>,
+    pub(crate) generic_args: Vec<IrType>,
 }
 
 #[derive(Debug, Clone)]
@@ -292,7 +294,7 @@ pub(crate) enum CallResolution {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct GenericInstantiation {
     pub(crate) name: String,
     pub(crate) args: Vec<IrType>,
@@ -331,6 +333,7 @@ pub(crate) struct EndpointParameterBinding {
 
 #[derive(Debug, Clone)]
 struct FunctionSignature {
+    generic_params: Vec<String>,
     params: Vec<IrType>,
     param_ownerships: Vec<Ownership>,
     params_element_type: Option<IrType>,
@@ -439,6 +442,11 @@ impl TypedProgram {
                 collect_instantiation(&method.return_type, &mut generic_instantiations);
             }
         }
+        collect_generic_call_instantiations(
+            &functions,
+            &types,
+            &mut generic_instantiations,
+        );
         let endpoint_handlers = collect_endpoint_handlers(program, &env)?;
 
         Ok(Self {
@@ -508,6 +516,12 @@ impl TypedProgram {
                 "function {} returns {:?} {:?}\n",
                 function.name, function.return_ownership, function.return_type
             ));
+            if !function.generic_params.is_empty() {
+                out.push_str(&format!(
+                    "  generic params {:?}\n",
+                    function.generic_params
+                ));
+            }
             for param in &function.params {
                 out.push_str(&format!(
                     "  param {}: {:?} {:?} drop={:?}\n",
@@ -661,6 +675,11 @@ fn populate_method_signatures(program: &Program, env: &mut TypeEnv) {
             let params_element_type = params_element_type(&method.params, env);
             let key = (ty.name.clone(), method.name.clone());
             let signature = FunctionSignature {
+                generic_params: method
+                    .generic_params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect(),
                 params,
                 param_ownerships,
                 params_element_type,
@@ -720,6 +739,11 @@ fn populate_constructor_signatures(program: &Program, env: &mut TypeEnv) {
                 .entry(ty.name.clone())
                 .or_default()
                 .push(FunctionSignature {
+                    generic_params: ty
+                        .generic_params
+                        .iter()
+                        .map(|param| param.name.clone())
+                        .collect(),
                     params,
                     param_ownerships,
                     params_element_type,
@@ -1075,6 +1099,138 @@ where
     Ok(Some(*best))
 }
 
+fn infer_generic_args_from_signature(signature: &FunctionSignature, args: &[TypedExpr]) -> Vec<IrType> {
+    if signature.generic_params.is_empty() {
+        return Vec::new();
+    }
+    let mut inferred = HashMap::<String, IrType>::new();
+    let matches = if let Some(params_element_type) = &signature.params_element_type {
+        let fixed_len = signature.params.len().saturating_sub(1);
+        if args.len() < fixed_len {
+            false
+        } else {
+            let mut ok = true;
+            for (expected, arg) in signature.params.iter().take(fixed_len).zip(args.iter().take(fixed_len)) {
+                if !infer_generic_args_from_type(expected, &arg.ty, &signature.generic_params, &mut inferred) {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                for arg in args.iter().skip(fixed_len) {
+                    if !infer_generic_args_from_type(params_element_type, &arg.ty, &signature.generic_params, &mut inferred) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            ok
+        }
+    } else if signature.params.len() == args.len() {
+        let mut ok = true;
+        for (expected, arg) in signature.params.iter().zip(args.iter()) {
+            if !infer_generic_args_from_type(expected, &arg.ty, &signature.generic_params, &mut inferred) {
+                ok = false;
+                break;
+            }
+        }
+        ok
+    } else {
+        false
+    };
+    if !matches {
+        return Vec::new();
+    }
+    let mut result = Vec::with_capacity(signature.generic_params.len());
+    for name in &signature.generic_params {
+        let Some(ty) = inferred.get(name) else {
+            return Vec::new();
+        };
+        result.push(ty.clone());
+    }
+    result
+}
+
+fn infer_generic_args_from_type(
+    expected: &IrType,
+    actual: &IrType,
+    generic_params: &[String],
+    inferred: &mut HashMap<String, IrType>,
+) -> bool {
+    match expected {
+        IrType::Unknown(name) if generic_params.iter().any(|param| param == name) => {
+            match inferred.get(name) {
+                Some(existing) => existing == actual,
+                None => {
+                    inferred.insert(name.clone(), actual.clone());
+                    true
+                }
+            }
+        }
+        IrType::Array(expected_inner)
+        | IrType::Ref(expected_inner)
+        | IrType::List(expected_inner)
+        | IrType::Enumerable(expected_inner)
+        | IrType::Task(expected_inner)
+        | IrType::Weak(expected_inner) => match actual {
+            IrType::Array(actual_inner)
+            | IrType::Ref(actual_inner)
+            | IrType::List(actual_inner)
+            | IrType::Enumerable(actual_inner)
+            | IrType::Task(actual_inner)
+            | IrType::Weak(actual_inner) => infer_generic_args_from_type(
+                expected_inner,
+                actual_inner,
+                generic_params,
+                inferred,
+            ),
+            _ => false,
+        },
+        IrType::Dictionary(expected_key, expected_value) => match actual {
+            IrType::Dictionary(actual_key, actual_value) => {
+                infer_generic_args_from_type(expected_key, actual_key, generic_params, inferred)
+                    && infer_generic_args_from_type(
+                        expected_value,
+                        actual_value,
+                        generic_params,
+                        inferred,
+                    )
+            }
+            _ => false,
+        },
+        IrType::Function {
+            params: expected_params,
+            return_type: expected_return,
+        } => match actual {
+            IrType::Function {
+                params: actual_params,
+                return_type: actual_return,
+            } => {
+                expected_params.len() == actual_params.len()
+                    && expected_params
+                        .iter()
+                        .zip(actual_params.iter())
+                        .all(|(expected_param, actual_param)| {
+                            infer_generic_args_from_type(
+                                expected_param,
+                                actual_param,
+                                generic_params,
+                                inferred,
+                            )
+                        })
+                    && infer_generic_args_from_type(
+                        expected_return,
+                        actual_return,
+                        generic_params,
+                        inferred,
+                    )
+            }
+            _ => false,
+        },
+        _ => expected == actual || matches!(expected, IrType::Unknown(_) if matches!(actual, IrType::Unknown(_))),
+    }
+}
+
 fn ir_conversion_rank(expected: &IrType, arg: &TypedExpr, env: &TypeEnv) -> Option<u16> {
     if expected == &arg.ty {
         return Some(
@@ -1353,11 +1509,20 @@ struct CheckedVar {
 }
 
 #[derive(Debug, Clone)]
+struct OwnershipSnapshot {
+    scopes: Vec<Vec<String>>,
+    vars: HashMap<String, CheckedVar>,
+    exits_function: bool,
+    exits_loop: bool,
+}
+
+#[derive(Debug, Clone)]
 struct OwnershipState {
     scopes: Vec<Vec<String>>,
     vars: HashMap<String, CheckedVar>,
     exits_function: bool,
     exits_loop: bool,
+    loop_exit_snapshots: Vec<OwnershipSnapshot>,
 }
 
 impl OwnershipState {
@@ -1367,6 +1532,7 @@ impl OwnershipState {
             vars: HashMap::new(),
             exits_function: false,
             exits_loop: false,
+            loop_exit_snapshots: Vec::new(),
         };
         for param in params {
             state.declare(param.name, param.ty, param.ownership, None);
@@ -1427,6 +1593,25 @@ impl OwnershipState {
 
     fn get(&self, name: &str) -> Option<&CheckedVar> {
         self.vars.get(name)
+    }
+
+    fn snapshot(&self) -> OwnershipSnapshot {
+        OwnershipSnapshot {
+            scopes: self.scopes.clone(),
+            vars: self.vars.clone(),
+            exits_function: self.exits_function,
+            exits_loop: self.exits_loop,
+        }
+    }
+
+    fn from_snapshot(snapshot: &OwnershipSnapshot) -> Self {
+        Self {
+            scopes: snapshot.scopes.clone(),
+            vars: snapshot.vars.clone(),
+            exits_function: snapshot.exits_function,
+            exits_loop: snapshot.exits_loop,
+            loop_exit_snapshots: Vec::new(),
+        }
     }
 }
 
@@ -1580,6 +1765,28 @@ impl OwnershipChecker {
             }
             merged.vars.insert(name.clone(), current);
         }
+        merged.loop_exit_snapshots = branches
+            .iter()
+            .flat_map(|branch| branch.loop_exit_snapshots.iter().cloned())
+            .collect();
+        merged
+    }
+
+    fn merge_loop_exit_states(base: &OwnershipState, branches: &[OwnershipState]) -> OwnershipState {
+        let mut merged = base.clone();
+        for (name, base_var) in base.vars.iter() {
+            let mut current = base_var.clone();
+            for branch in branches {
+                if let Some(branch_var) = branch.vars.get(name) {
+                    current = merge_checked_vars(&current, branch_var);
+                }
+            }
+            merged.vars.insert(name.clone(), current);
+        }
+        merged.loop_exit_snapshots = branches
+            .iter()
+            .flat_map(|branch| branch.loop_exit_snapshots.iter().cloned())
+            .collect();
         merged
     }
 
@@ -1758,7 +1965,14 @@ impl OwnershipChecker {
                     return_type,
                     return_ownership.clone(),
                 )?;
-                *state = Self::merge_branch_states(&base, &[body_state]);
+                let mut loop_branches = vec![body_state.clone()];
+                loop_branches.extend(
+                    body_state
+                        .loop_exit_snapshots
+                        .iter()
+                        .map(OwnershipState::from_snapshot),
+                );
+                *state = Self::merge_loop_exit_states(&base, &loop_branches);
             }
             Stmt::For {
                 init,
@@ -1792,7 +2006,14 @@ impl OwnershipChecker {
                         return_ownership.clone(),
                     )?;
                 }
-                *state = Self::merge_branch_states(&base, &[body_state]);
+                let mut loop_branches = vec![body_state.clone()];
+                loop_branches.extend(
+                    body_state
+                        .loop_exit_snapshots
+                        .iter()
+                        .map(OwnershipState::from_snapshot),
+                );
+                *state = Self::merge_loop_exit_states(&base, &loop_branches);
                 state.pop_scope();
             }
             Stmt::ForEach {
@@ -1819,7 +2040,14 @@ impl OwnershipChecker {
                     return_type,
                     return_ownership.clone(),
                 )?;
-                *state = Self::merge_branch_states(&base, &[body_state]);
+                let mut loop_branches = vec![body_state.clone()];
+                loop_branches.extend(
+                    body_state
+                        .loop_exit_snapshots
+                        .iter()
+                        .map(OwnershipState::from_snapshot),
+                );
+                *state = Self::merge_loop_exit_states(&base, &loop_branches);
                 state.pop_scope();
             }
             Stmt::Print(expr) | Stmt::Expr(expr) | Stmt::Throw(expr) => {
@@ -1858,6 +2086,7 @@ impl OwnershipChecker {
                 state.exits_function = true;
             }
             Stmt::Break | Stmt::Continue => {
+                state.loop_exit_snapshots.push(state.snapshot());
                 state.exits_loop = true;
             }
         }
@@ -1991,7 +2220,7 @@ impl OwnershipChecker {
                         ty: inner.as_ref().clone(),
                         ownership: ownership_for_type(inner),
                     }),
-                    (IrType::Task(_), "IsCompleted") => Some(FieldSignature {
+                    (IrType::Task(_), "IsCompleted") | (IrType::Task(_), "IsCompletedSuccessfully") => Some(FieldSignature {
                         ty: IrType::Bool,
                         ownership: Ownership::Copy,
                     }),
@@ -2052,6 +2281,7 @@ impl OwnershipChecker {
                     }
                     (IrType::Task(inner), "GetResult") => inner.as_ref().clone(),
                     (IrType::Task(inner), "GetAwaiter") => IrType::Task(inner.clone()),
+                    (IrType::Task(_), "IsCompletedSuccessfully") => IrType::Bool,
                     (_, "Contains") | (_, "ContainsKey") | (_, "Remove") | (_, "TryGetValue") => IrType::Bool,
                     (_, "Add") | (_, "Clear") | (_, "Wait") => IrType::Void,
                     (IrType::Unknown(target) | IrType::Class(target), "Run")
@@ -2399,33 +2629,44 @@ fn checked_temp(ty: IrType) -> CheckedExpr {
 }
 
 fn function_signature(function: &Function, env: &TypeEnv, overloaded: bool) -> FunctionSignature {
-            let params = function
-                .params
-                .iter()
-                .map(|param| type_syntax_to_ir(&param.ty, env))
-                .collect::<Vec<_>>();
-            let param_ownerships = function
-                .params
-                .iter()
-                .map(|param| ownership_for_declared_type_syntax(&param.ty, env))
-                .collect::<Vec<_>>();
-            let params_element_type = params_element_type(&function.params, env);
-            FunctionSignature {
-                symbol: if overloaded {
-                    overloaded_function_symbol(&qualified_function_symbol_name(
-                        &function.namespace,
-                        &function.name,
-            ), &params)
+    let params = function
+        .params
+        .iter()
+        .map(|param| type_syntax_to_ir(&param.ty, env))
+        .collect::<Vec<_>>();
+    let param_ownerships = function
+        .params
+        .iter()
+        .map(|param| ownership_for_declared_type_syntax(&param.ty, env))
+        .collect::<Vec<_>>();
+    let params_element_type = params_element_type(&function.params, env);
+    let base_symbol = if function.generic_params.is_empty() {
+        qualified_function_symbol_name(&function.namespace, &function.name)
+    } else {
+        format!(
+            "{}__g{}",
+            qualified_function_symbol_name(&function.namespace, &function.name),
+            function.generic_params.len()
+        )
+    };
+    FunctionSignature {
+        generic_params: function
+            .generic_params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect(),
+        symbol: if overloaded {
+            overloaded_function_symbol(&base_symbol, &params)
         } else {
-            qualified_function_symbol_name(&function.namespace, &function.name)
-                },
-                params,
-                param_ownerships,
-                params_element_type,
-                return_type: type_syntax_to_ir(&function.return_type, env),
-                return_ownership: ownership_for_declared_type_syntax(&function.return_type, env),
-                is_static: false,
-            }
+            base_symbol
+        },
+        params,
+        param_ownerships,
+        params_element_type,
+        return_type: type_syntax_to_ir(&function.return_type, env),
+        return_ownership: ownership_for_declared_type_syntax(&function.return_type, env),
+        is_static: false,
+    }
 }
 
 fn params_element_type(params: &[Param], env: &TypeEnv) -> Option<IrType> {
@@ -2564,7 +2805,7 @@ fn type_constructor_symbol(
     }
 }
 
-fn ir_symbol_suffix(ty: &IrType) -> String {
+pub(crate) fn ir_symbol_suffix(ty: &IrType) -> String {
     match ty {
         IrType::Bool => "bool".to_string(),
         IrType::Byte => "byte".to_string(),
@@ -2590,7 +2831,17 @@ fn ir_symbol_suffix(ty: &IrType) -> String {
         IrType::Enumerable(inner) => format!("ienumerable_{}", ir_symbol_suffix(inner)),
         IrType::Thread => "thread".to_string(),
         IrType::Task(inner) => format!("task_{}", ir_symbol_suffix(inner)),
-        IrType::Function { .. } => "fn".to_string(),
+        IrType::Function { params, return_type } => {
+            let mut parts = params.iter().map(ir_symbol_suffix).collect::<Vec<_>>();
+            if !matches!(return_type.as_ref(), IrType::Void) {
+                parts.push(format!("ret_{}", ir_symbol_suffix(return_type)));
+            }
+            if parts.is_empty() {
+                "fn".to_string()
+            } else {
+                format!("fn_{}", parts.join("_"))
+            }
+        }
         IrType::Exception => "exception".to_string(),
     }
 }
@@ -2661,6 +2912,220 @@ fn collect_instantiation(ty: &IrType, output: &mut Vec<GenericInstantiation>) {
         if !output.contains(&instantiation) {
             output.push(instantiation);
         }
+    }
+}
+
+fn collect_generic_call_instantiations(
+    functions: &[TypedFunction],
+    types: &[TypedType],
+    output: &mut Vec<GenericInstantiation>,
+) {
+    let mut generic_symbols = HashSet::new();
+    for function in functions {
+        if !function.generic_params.is_empty() {
+            generic_symbols.insert(function.symbol.clone());
+        }
+    }
+    for ty in types {
+        for constructor in &ty.constructors {
+            if !constructor.generic_params.is_empty() {
+                generic_symbols.insert(constructor.symbol.clone());
+            }
+        }
+        for method in &ty.methods {
+            if !method.generic_params.is_empty() {
+                generic_symbols.insert(method.symbol.clone());
+            }
+        }
+    }
+
+    for function in functions {
+        collect_generic_call_instantiations_function(function, &generic_symbols, output);
+    }
+    for ty in types {
+        for constructor in &ty.constructors {
+            collect_generic_call_instantiations_function(constructor, &generic_symbols, output);
+        }
+        for method in &ty.methods {
+            collect_generic_call_instantiations_function(method, &generic_symbols, output);
+        }
+    }
+}
+
+fn collect_generic_call_instantiations_function(
+    function: &TypedFunction,
+    generic_symbols: &HashSet<String>,
+    output: &mut Vec<GenericInstantiation>,
+) {
+    collect_generic_call_instantiations_stmts(&function.body, generic_symbols, output);
+}
+
+fn collect_generic_call_instantiations_stmts(
+    stmts: &[TypedStmt],
+    generic_symbols: &HashSet<String>,
+    output: &mut Vec<GenericInstantiation>,
+) {
+    for stmt in stmts {
+        match &stmt.kind {
+            TypedStmtKind::Let { binding, expr } => {
+                collect_instantiation(&binding.ty, output);
+                collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+            }
+            TypedStmtKind::Assign { expr, .. }
+            | TypedStmtKind::Print(expr)
+            | TypedStmtKind::Expr(expr)
+            | TypedStmtKind::Return(Some(expr))
+            | TypedStmtKind::Throw(expr) => {
+                collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+            }
+            TypedStmtKind::AssignTarget { target, expr } => {
+                collect_generic_call_instantiations_expr(target, generic_symbols, output);
+                collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+            }
+            TypedStmtKind::Block(body)
+            | TypedStmtKind::While { body, .. }
+            | TypedStmtKind::For { body, .. }
+            | TypedStmtKind::ForEach { body, .. } => {
+                collect_generic_call_instantiations_stmts(body, generic_symbols, output);
+            }
+            TypedStmtKind::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_generic_call_instantiations_expr(condition, generic_symbols, output);
+                collect_generic_call_instantiations_stmts(then_body, generic_symbols, output);
+                collect_generic_call_instantiations_stmts(else_body, generic_symbols, output);
+            }
+            TypedStmtKind::Try {
+                try_body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
+                collect_generic_call_instantiations_stmts(try_body, generic_symbols, output);
+                collect_generic_call_instantiations_stmts(catch_body, generic_symbols, output);
+                collect_generic_call_instantiations_stmts(finally_body, generic_symbols, output);
+            }
+            TypedStmtKind::Switch { expr, cases, default } => {
+                collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+                for case in cases {
+                    collect_generic_call_instantiations_expr(&case.value, generic_symbols, output);
+                    collect_generic_call_instantiations_stmts(&case.body, generic_symbols, output);
+                }
+                collect_generic_call_instantiations_stmts(default, generic_symbols, output);
+            }
+            TypedStmtKind::Return(None) | TypedStmtKind::Break | TypedStmtKind::Continue => {}
+        }
+    }
+}
+
+fn collect_generic_call_instantiations_expr(
+    expr: &TypedExpr,
+    generic_symbols: &HashSet<String>,
+    output: &mut Vec<GenericInstantiation>,
+) {
+    match &expr.kind {
+        TypedExprKind::ArrayLiteral(values) => {
+            for value in values {
+                collect_generic_call_instantiations_expr(value, generic_symbols, output);
+            }
+        }
+        TypedExprKind::NewArray { length, values, .. } => {
+            if let Some(length) = length {
+                collect_generic_call_instantiations_expr(length, generic_symbols, output);
+            }
+            for value in values {
+                collect_generic_call_instantiations_expr(value, generic_symbols, output);
+            }
+        }
+        TypedExprKind::Index { target, index } => {
+            collect_generic_call_instantiations_expr(target, generic_symbols, output);
+            collect_generic_call_instantiations_expr(index, generic_symbols, output);
+        }
+        TypedExprKind::Field { target, .. } => {
+            collect_generic_call_instantiations_expr(target, generic_symbols, output);
+        }
+        TypedExprKind::IsPattern { expr, .. } => {
+            collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+        }
+        TypedExprKind::Throw(expr) | TypedExprKind::Await(expr) => {
+            collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+        }
+        TypedExprKind::Assign { target, value } => {
+            collect_generic_call_instantiations_expr(target, generic_symbols, output);
+            collect_generic_call_instantiations_expr(value, generic_symbols, output);
+        }
+        TypedExprKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            collect_generic_call_instantiations_expr(condition, generic_symbols, output);
+            collect_generic_call_instantiations_expr(when_true, generic_symbols, output);
+            collect_generic_call_instantiations_expr(when_false, generic_symbols, output);
+        }
+        TypedExprKind::Binary { left, right, .. } => {
+            collect_generic_call_instantiations_expr(left, generic_symbols, output);
+            collect_generic_call_instantiations_expr(right, generic_symbols, output);
+        }
+        TypedExprKind::Unary { expr: inner, .. }
+        | TypedExprKind::IncDec { target: inner, .. } => {
+            collect_generic_call_instantiations_expr(inner, generic_symbols, output);
+        }
+        TypedExprKind::Lambda { body, .. } => {
+            collect_generic_call_instantiations_expr(body, generic_symbols, output);
+        }
+        TypedExprKind::Call(call) => {
+            match &call.kind {
+                TypedCallKind::Function { symbol, .. } => {
+                    if generic_symbols.contains(symbol) && !call.generic_args.is_empty() {
+                        let instantiation = GenericInstantiation {
+                            name: symbol.clone(),
+                            args: call.generic_args.clone(),
+                        };
+                        if !output.contains(&instantiation) {
+                            output.push(instantiation);
+                        }
+                    }
+                }
+                TypedCallKind::Method { target, symbol, resolution, .. } => {
+                    collect_generic_call_instantiations_expr(target, generic_symbols, output);
+                    if generic_symbols.contains(symbol) && !call.generic_args.is_empty() {
+                        let instantiation = GenericInstantiation {
+                            name: symbol.clone(),
+                            args: call.generic_args.clone(),
+                        };
+                        if !output.contains(&instantiation) {
+                            output.push(instantiation);
+                        }
+                    }
+                    let _ = resolution;
+                }
+            }
+            for arg in &call.args {
+                collect_generic_call_instantiations_expr(arg, generic_symbols, output);
+            }
+        }
+        TypedExprKind::NewObject { args, fields, .. } => {
+            for arg in args {
+                collect_generic_call_instantiations_expr(arg, generic_symbols, output);
+            }
+            for field in fields {
+                collect_generic_call_instantiations_expr(&field.expr, generic_symbols, output);
+            }
+        }
+        TypedExprKind::NewCollection(_)
+        | TypedExprKind::NewThread(_)
+        | TypedExprKind::Int(_)
+        | TypedExprKind::Float(_)
+        | TypedExprKind::Bool(_)
+        | TypedExprKind::Null
+        | TypedExprKind::String(_)
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FunctionSymbol(_)
+        | TypedExprKind::Move(_)
+        | TypedExprKind::Borrow { .. } => {}
     }
 }
 
@@ -3430,6 +3895,11 @@ fn lower_function(
             .map(|signature| signature.symbol.clone())
             .unwrap_or_else(|| function.name.clone())
         }),
+        generic_params: function
+            .generic_params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect(),
         is_extern: function.is_extern,
         return_ownership: ownership_for_declared_type_syntax(&function.return_type, env),
         return_type,
@@ -4160,6 +4630,7 @@ fn lower_typed_expr_with_expected(
                                     symbol: signature.symbol.clone(),
                                 },
                                 args: Vec::new(),
+                                generic_args: Vec::new(),
                             }),
                             signature.return_type.clone(),
                             signature.return_ownership.clone(),
@@ -4174,6 +4645,7 @@ fn lower_typed_expr_with_expected(
                                 symbol: signature.symbol.clone(),
                             },
                             args: Vec::new(),
+                            generic_args: Vec::new(),
                         }),
                         signature.return_type.clone(),
                         signature.return_ownership.clone(),
@@ -4333,6 +4805,7 @@ fn lower_typed_expr_with_expected(
                                 resolution: CallResolution::InstanceMethod,
                             },
                             args: Vec::new(),
+                            generic_args: Vec::new(),
                         }),
                         signature.return_type.clone(),
                         signature.return_ownership.clone(),
@@ -4423,6 +4896,11 @@ fn lower_typed_expr_with_expected(
             let expected_types = find_expected_types(&candidates, args);
             let args = lower_call_args(args, &expected_types, env, scopes)?;
             let (ty, ownership, symbol, resolution) = resolve_method_call(env, &target, name, &args)?;
+            let generic_args = candidates
+                .iter()
+                .find(|signature| signature.symbol == symbol)
+                .map(|signature| infer_generic_args_from_signature(signature, &args))
+                .unwrap_or_default();
             let args = if let Some(signature) =
                 candidates.iter().find(|signature| signature.symbol == symbol)
             {
@@ -4439,6 +4917,7 @@ fn lower_typed_expr_with_expected(
                         resolution,
                     },
                     args,
+                    generic_args,
                 }),
                 ty,
                 ownership,
@@ -4461,6 +4940,7 @@ fn lower_typed_expr_with_expected(
                             TypedExprKind::Var(type_name.clone()),
                             IrType::Unknown(type_name),
                         )],
+                        generic_args: Vec::new(),
                     }),
                     IrType::Int,
                 ));
@@ -4481,6 +4961,9 @@ fn lower_typed_expr_with_expected(
                 None
             };
             let signature = method_signature.as_ref().or(function_signature.as_ref());
+            let generic_args = signature
+                .map(|signature| infer_generic_args_from_signature(signature, &args))
+                .unwrap_or_default();
             let args = if let Some(signature) = signature {
                 pack_params_args(signature, args)
             } else {
@@ -4525,6 +5008,7 @@ fn lower_typed_expr_with_expected(
                         }
                     },
                     args,
+                    generic_args,
                 }),
                 ty,
                 ownership,
@@ -5306,7 +5790,7 @@ fn augment_type_metadata_fields(
     let property_values = properties
         .into_iter()
         .map(|(name, field)| {
-            let property_type = type_object_expr_from_ir(&field.ty, env);
+            let property_type = type_object_expr_from_ir_shallow(&field.ty, env);
             typed_expr_with_ownership(
                 TypedExprKind::NewObject {
                     type_name: "PropertyInfo".to_string(),
@@ -5315,14 +5799,19 @@ fn augment_type_metadata_fields(
                     fields: vec![
                         TypedFieldInit {
                             name: "Name".to_string(),
-                            expr: typed_expr(
-                                TypedExprKind::String(name),
-                                IrType::String,
-                            ),
+                            expr: typed_expr(TypedExprKind::String(name), IrType::String),
                         },
                         TypedFieldInit {
                             name: "PropertyType".to_string(),
                             expr: property_type,
+                        },
+                        TypedFieldInit {
+                            name: "CanRead".to_string(),
+                            expr: typed_expr(TypedExprKind::Bool(true), IrType::Bool),
+                        },
+                        TypedFieldInit {
+                            name: "CanWrite".to_string(),
+                            expr: typed_expr(TypedExprKind::Bool(true), IrType::Bool),
                         },
                     ],
                 },
@@ -5342,7 +5831,21 @@ fn augment_type_metadata_fields(
 }
 
 fn type_object_expr_from_ir(ty: &IrType, env: &TypeEnv) -> TypedExpr {
+    type_object_expr_from_ir_impl(ty, env, true)
+}
+
+fn type_object_expr_from_ir_shallow(ty: &IrType, env: &TypeEnv) -> TypedExpr {
+    type_object_expr_from_ir_impl(ty, env, false)
+}
+
+fn type_object_expr_from_ir_impl(ty: &IrType, env: &TypeEnv, include_members: bool) -> TypedExpr {
     let full_name = type_object_full_name_from_ir(ty);
+    let simple_name = full_name.rsplit('.').next().unwrap_or(&full_name).to_string();
+    let namespace = if let Some((ns, _)) = full_name.rsplit_once('.') {
+        ns.to_string()
+    } else {
+        String::new()
+    };
     let generic_definition_name = type_object_generic_definition_name_from_ir(ty);
     let is_generic = matches!(
         ty,
@@ -5353,12 +5856,52 @@ fn type_object_expr_from_ir(ty: &IrType, env: &TypeEnv) -> TypedExpr {
             | IrType::Function { .. }
     );
     let generic_arguments = type_object_generic_arguments_from_ir(ty, env);
+    let base_type = type_object_base_type_from_ir(ty, env);
+    let element_type = match ty {
+        IrType::Array(inner) | IrType::List(inner) | IrType::Enumerable(inner) | IrType::Task(inner) => {
+            Some(type_object_expr_from_ir_shallow(inner, env))
+        }
+        _ => None,
+    };
+    let properties = if include_members {
+        type_object_properties_from_ir(ty, env, include_members)
+    } else {
+        Vec::new()
+    };
+    let methods = if include_members {
+        type_object_methods_from_ir(ty, env, include_members)
+    } else {
+        Vec::new()
+    };
+    let fields = if include_members {
+        type_object_fields_from_ir(ty, env, include_members)
+    } else {
+        Vec::new()
+    };
+    let constructors = if include_members {
+        type_object_constructors_from_ir(ty, env, include_members)
+    } else {
+        Vec::new()
+    };
+    let interfaces = if include_members {
+        type_object_interfaces_from_ir(ty, env, include_members)
+    } else {
+        Vec::new()
+    };
     typed_expr_with_ownership(
         TypedExprKind::NewObject {
             type_name: "Type".to_string(),
             constructor: None,
             args: Vec::new(),
             fields: vec![
+                TypedFieldInit {
+                    name: "Name".to_string(),
+                    expr: typed_expr(TypedExprKind::String(simple_name), IrType::String),
+                },
+                TypedFieldInit {
+                    name: "Namespace".to_string(),
+                    expr: typed_expr(TypedExprKind::String(namespace), IrType::String),
+                },
                 TypedFieldInit {
                     name: "FullName".to_string(),
                     expr: typed_expr(TypedExprKind::String(full_name), IrType::String),
@@ -5375,6 +5918,66 @@ fn type_object_expr_from_ir(ty: &IrType, env: &TypeEnv) -> TypedExpr {
                     expr: typed_expr(TypedExprKind::Bool(is_generic), IrType::Bool),
                 },
                 TypedFieldInit {
+                    name: "IsClass".to_string(),
+                    expr: typed_expr(
+                        TypedExprKind::Bool(matches!(ty, IrType::Class(_))),
+                        IrType::Bool,
+                    ),
+                },
+                TypedFieldInit {
+                    name: "IsInterface".to_string(),
+                    expr: typed_expr(
+                        TypedExprKind::Bool(matches!(ty, IrType::Interface(_))),
+                        IrType::Bool,
+                    ),
+                },
+                TypedFieldInit {
+                    name: "IsValueType".to_string(),
+                    expr: typed_expr(
+                        TypedExprKind::Bool(matches!(
+                            ty,
+                            IrType::Struct(_)
+                                | IrType::Bool
+                                | IrType::Byte
+                                | IrType::Short
+                                | IrType::Int
+                                | IrType::Long
+                                | IrType::UInt
+                                | IrType::Double
+                                | IrType::Decimal
+                        )),
+                        IrType::Bool,
+                    ),
+                },
+                TypedFieldInit {
+                    name: "IsEnum".to_string(),
+                    expr: typed_expr(TypedExprKind::Bool(false), IrType::Bool),
+                },
+                TypedFieldInit {
+                    name: "IsArray".to_string(),
+                    expr: typed_expr(TypedExprKind::Bool(matches!(ty, IrType::Array(_))), IrType::Bool),
+                },
+                TypedFieldInit {
+                    name: "BaseType".to_string(),
+                    expr: base_type.unwrap_or_else(|| {
+                        typed_expr_with_ownership(
+                            TypedExprKind::Null,
+                            IrType::Unknown("null".to_string()),
+                            Ownership::Copy,
+                        )
+                    }),
+                },
+                TypedFieldInit {
+                    name: "ElementType".to_string(),
+                    expr: element_type.unwrap_or_else(|| {
+                        typed_expr_with_ownership(
+                            TypedExprKind::Null,
+                            IrType::Unknown("null".to_string()),
+                            Ownership::Copy,
+                        )
+                    }),
+                },
+                TypedFieldInit {
                     name: "GenericArguments".to_string(),
                     expr: typed_expr(
                         TypedExprKind::ArrayLiteral(generic_arguments),
@@ -5384,8 +5987,36 @@ fn type_object_expr_from_ir(ty: &IrType, env: &TypeEnv) -> TypedExpr {
                 TypedFieldInit {
                     name: "Properties".to_string(),
                     expr: typed_expr(
-                        TypedExprKind::ArrayLiteral(Vec::new()),
+                        TypedExprKind::ArrayLiteral(properties),
                         IrType::Array(Box::new(IrType::Class("PropertyInfo".to_string()))),
+                    ),
+                },
+                TypedFieldInit {
+                    name: "Methods".to_string(),
+                    expr: typed_expr(
+                        TypedExprKind::ArrayLiteral(methods),
+                        IrType::Array(Box::new(IrType::Class("MethodInfo".to_string()))),
+                    ),
+                },
+                TypedFieldInit {
+                    name: "Fields".to_string(),
+                    expr: typed_expr(
+                        TypedExprKind::ArrayLiteral(fields),
+                        IrType::Array(Box::new(IrType::Class("FieldInfo".to_string()))),
+                    ),
+                },
+                TypedFieldInit {
+                    name: "Constructors".to_string(),
+                    expr: typed_expr(
+                        TypedExprKind::ArrayLiteral(constructors),
+                        IrType::Array(Box::new(IrType::Class("ConstructorInfo".to_string()))),
+                    ),
+                },
+                TypedFieldInit {
+                    name: "Interfaces".to_string(),
+                    expr: typed_expr(
+                        TypedExprKind::ArrayLiteral(interfaces),
+                        IrType::Array(Box::new(IrType::Class("Type".to_string()))),
                     ),
                 },
             ],
@@ -5393,6 +6024,319 @@ fn type_object_expr_from_ir(ty: &IrType, env: &TypeEnv) -> TypedExpr {
         IrType::Class("Type".to_string()),
         Ownership::Shared,
     )
+}
+
+fn type_object_base_type_from_ir(ty: &IrType, env: &TypeEnv) -> Option<TypedExpr> {
+    let base_name = match ty {
+        IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) | IrType::Unknown(name) => {
+            let simple = name.rsplit('.').next().unwrap_or(name);
+            env.bases.get(simple).and_then(|bases| bases.first()).cloned()
+        }
+        IrType::String => Some("System.Object".to_string()),
+        _ => None,
+    }?;
+    Some(type_object_expr_from_ir_impl(&IrType::Unknown(base_name), env, false))
+}
+
+fn type_object_properties_from_ir(ty: &IrType, env: &TypeEnv, include_members: bool) -> Vec<TypedExpr> {
+    if !include_members {
+        return Vec::new();
+    }
+    let type_name = type_object_lookup_name(ty);
+    let Some(type_name) = type_name else {
+        return Vec::new();
+    };
+    env.all_field_infos(type_name)
+        .into_iter()
+        .map(|(name, field)| {
+            typed_expr_with_ownership(
+                TypedExprKind::NewObject {
+                    type_name: "PropertyInfo".to_string(),
+                    constructor: None,
+                    args: Vec::new(),
+                    fields: vec![
+                        TypedFieldInit {
+                            name: "Name".to_string(),
+                            expr: typed_expr(TypedExprKind::String(name), IrType::String),
+                        },
+                        TypedFieldInit {
+                            name: "PropertyType".to_string(),
+                            expr: type_object_expr_from_ir_shallow(&field.ty, env),
+                        },
+                        TypedFieldInit {
+                            name: "CanRead".to_string(),
+                            expr: typed_expr(TypedExprKind::Bool(true), IrType::Bool),
+                        },
+                        TypedFieldInit {
+                            name: "CanWrite".to_string(),
+                            expr: typed_expr(TypedExprKind::Bool(true), IrType::Bool),
+                        },
+                    ],
+                },
+                IrType::Class("PropertyInfo".to_string()),
+                Ownership::Shared,
+            )
+        })
+        .collect()
+}
+
+fn type_object_methods_from_ir(ty: &IrType, env: &TypeEnv, include_members: bool) -> Vec<TypedExpr> {
+    if !include_members {
+        return Vec::new();
+    }
+    let mut methods = builtin_methods_from_ir(ty, env);
+    if let Some(type_name) = type_object_lookup_name(ty) {
+        for ((owner, method_name), signatures) in &env.methods {
+            if owner != type_name {
+                continue;
+            }
+            for signature in signatures {
+                let parameters = signature
+                    .params
+                    .iter()
+                    .map(|param| {
+                        type_object_expr_from_ir_shallow(param, env)
+                    })
+                    .collect::<Vec<_>>();
+                methods.push(typed_expr_with_ownership(
+                    TypedExprKind::NewObject {
+                        type_name: "MethodInfo".to_string(),
+                        constructor: None,
+                        args: Vec::new(),
+                        fields: vec![
+                            TypedFieldInit {
+                                name: "Name".to_string(),
+                                expr: typed_expr(
+                                    TypedExprKind::String(method_name.clone()),
+                                    IrType::String,
+                                ),
+                            },
+                            TypedFieldInit {
+                                name: "ReturnType".to_string(),
+                                expr: type_object_expr_from_ir_shallow(&signature.return_type, env),
+                            },
+                            TypedFieldInit {
+                                name: "ParameterTypes".to_string(),
+                                expr: typed_expr(
+                                    TypedExprKind::ArrayLiteral(parameters),
+                                    IrType::Array(Box::new(IrType::Class("Type".to_string()))),
+                                ),
+                            },
+                            TypedFieldInit {
+                                name: "IsStatic".to_string(),
+                                expr: typed_expr(TypedExprKind::Bool(signature.is_static), IrType::Bool),
+                            },
+                        ],
+                    },
+                    IrType::Class("MethodInfo".to_string()),
+                    Ownership::Shared,
+                ));
+            }
+        }
+    }
+    methods
+}
+
+fn type_object_fields_from_ir(ty: &IrType, env: &TypeEnv, include_members: bool) -> Vec<TypedExpr> {
+    if !include_members {
+        return Vec::new();
+    }
+    let Some(type_name) = type_object_lookup_name(ty) else {
+        return Vec::new();
+    };
+    env.all_field_infos(type_name)
+        .into_iter()
+        .map(|(name, field)| {
+            typed_expr_with_ownership(
+                TypedExprKind::NewObject {
+                    type_name: "FieldInfo".to_string(),
+                    constructor: None,
+                    args: Vec::new(),
+                    fields: vec![
+                        TypedFieldInit {
+                            name: "Name".to_string(),
+                            expr: typed_expr(TypedExprKind::String(name), IrType::String),
+                        },
+                        TypedFieldInit {
+                            name: "FieldType".to_string(),
+                            expr: type_object_expr_from_ir_shallow(&field.ty, env),
+                        },
+                    ],
+                },
+                IrType::Class("FieldInfo".to_string()),
+                Ownership::Shared,
+            )
+        })
+        .collect()
+}
+
+fn type_object_constructors_from_ir(
+    ty: &IrType,
+    env: &TypeEnv,
+    include_members: bool,
+) -> Vec<TypedExpr> {
+    if !include_members {
+        return Vec::new();
+    }
+    let Some(type_name) = type_object_lookup_name(ty) else {
+        return Vec::new();
+    };
+    env.constructors
+        .get(type_name)
+        .into_iter()
+        .flat_map(|signatures| signatures.iter())
+        .map(|signature| {
+            let parameters = signature
+                .params
+                .iter()
+                .map(|param| type_object_expr_from_ir_shallow(param, env))
+                .collect::<Vec<_>>();
+            typed_expr_with_ownership(
+                TypedExprKind::NewObject {
+                    type_name: "ConstructorInfo".to_string(),
+                    constructor: None,
+                    args: Vec::new(),
+                    fields: vec![
+                        TypedFieldInit {
+                            name: "Name".to_string(),
+                            expr: typed_expr(
+                                TypedExprKind::String(type_name.to_string()),
+                                IrType::String,
+                            ),
+                        },
+                        TypedFieldInit {
+                            name: "ParameterTypes".to_string(),
+                            expr: typed_expr(
+                                TypedExprKind::ArrayLiteral(parameters),
+                                IrType::Array(Box::new(IrType::Class("Type".to_string()))),
+                            ),
+                        },
+                    ],
+                },
+                IrType::Class("ConstructorInfo".to_string()),
+                Ownership::Shared,
+            )
+        })
+        .collect()
+}
+
+fn type_object_interfaces_from_ir(ty: &IrType, env: &TypeEnv, include_members: bool) -> Vec<TypedExpr> {
+    if !include_members {
+        return Vec::new();
+    }
+    let Some(type_name) = type_object_lookup_name(ty) else {
+        return Vec::new();
+    };
+    env.bases
+        .get(type_name)
+        .into_iter()
+        .flat_map(|bases| bases.iter())
+        .map(|base| type_object_expr_from_ir_shallow(&IrType::Unknown(base.clone()), env))
+        .collect()
+}
+
+fn builtin_methods_from_ir(ty: &IrType, env: &TypeEnv) -> Vec<TypedExpr> {
+    let mut methods = Vec::new();
+    let entries: &[(&str, &[&str])] = match ty {
+        IrType::String => &[
+            ("ToLower", &[]),
+            ("ToLowerInvariant", &[]),
+            ("Substring", &["int"]),
+            ("Split", &["string"]),
+            ("Replace", &["string", "string"]),
+            ("Trim", &[]),
+            ("StartsWith", &["string", "StringComparison"]),
+            ("Equals", &["string", "StringComparison"]),
+            ("Contains", &["string"]),
+        ],
+        IrType::Class(name) | IrType::Struct(name) if name == "DateTime" || name == "System.DateTime" => {
+            &[("CompareTo", &["DateTime"])]
+        }
+        IrType::Class(name) | IrType::Struct(name) if name == "Type" || name == "System.Type" => {
+            &[("GetGenericTypeDefinition", &[]), ("GetGenericArguments", &[]), ("GetMethod", &["string", "Type[]"]), ("GetProperty", &["string", "object"]), ("GetProperties", &[])]
+        }
+        _ => &[],
+    };
+    for (name, params) in entries {
+        let parameter_types = params
+            .iter()
+            .map(|param| match *param {
+                "int" => type_object_expr_from_ir_shallow(&IrType::Int, env),
+                "string" => type_object_expr_from_ir_shallow(&IrType::String, env),
+                "DateTime" => type_object_expr_from_ir_shallow(&IrType::Unknown("DateTime".to_string()), env),
+                "StringComparison" => type_object_expr_from_ir_shallow(&IrType::Unknown("StringComparison".to_string()), env),
+                "object" => type_object_expr_from_ir_shallow(&IrType::Unknown("object".to_string()), env),
+                "Type[]" => type_object_expr_from_ir_shallow(&IrType::Array(Box::new(IrType::Class("Type".to_string()))), env),
+                _ => type_object_expr_from_ir_shallow(&IrType::Unknown((*param).to_string()), env),
+            })
+            .collect::<Vec<_>>();
+        methods.push(typed_expr_with_ownership(
+            TypedExprKind::NewObject {
+                type_name: "MethodInfo".to_string(),
+                constructor: None,
+                args: Vec::new(),
+                fields: vec![
+                    TypedFieldInit {
+                        name: "Name".to_string(),
+                        expr: typed_expr(TypedExprKind::String((*name).to_string()), IrType::String),
+                    },
+                    TypedFieldInit {
+                        name: "ReturnType".to_string(),
+                        expr: typed_expr(
+                            TypedExprKind::String(if *name == "GetGenericArguments" {
+                                "Type[]".to_string()
+                            } else if *name == "GetProperties" {
+                                "PropertyInfo[]".to_string()
+                            } else if *name == "GetMethod" {
+                                "MethodInfo".to_string()
+                            } else if *name == "GetProperty" {
+                                "PropertyInfo".to_string()
+                            } else if *name == "GetGenericTypeDefinition" {
+                                "Type".to_string()
+                            } else if *name == "CompareTo" {
+                                "int".to_string()
+                            } else {
+                                "void".to_string()
+                            }),
+                            IrType::String,
+                        ),
+                    },
+                    TypedFieldInit {
+                        name: "ParameterTypes".to_string(),
+                        expr: typed_expr(
+                            TypedExprKind::ArrayLiteral(parameter_types),
+                            IrType::Array(Box::new(IrType::Class("Type".to_string()))),
+                        ),
+                    },
+                    TypedFieldInit {
+                        name: "IsStatic".to_string(),
+                        expr: typed_expr(TypedExprKind::Bool(true), IrType::Bool),
+                    },
+                ],
+            },
+            IrType::Class("MethodInfo".to_string()),
+            Ownership::Shared,
+        ));
+    }
+    methods
+}
+
+fn type_object_lookup_name(ty: &IrType) -> Option<&str> {
+    match ty {
+        IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) | IrType::Unknown(name) => {
+            Some(name.rsplit('.').next().unwrap_or(name))
+        }
+        IrType::String => Some("string"),
+        IrType::Bool => Some("bool"),
+        IrType::Int => Some("int"),
+        IrType::Long => Some("long"),
+        IrType::Double => Some("double"),
+        IrType::UInt => Some("uint"),
+        IrType::Byte => Some("byte"),
+        IrType::Short => Some("short"),
+        IrType::Decimal => Some("decimal"),
+        _ => None,
+    }
 }
 
 fn type_object_full_name_from_ir(ty: &IrType) -> String {
@@ -5462,23 +6406,22 @@ fn type_object_generic_definition_name_from_ir(ty: &IrType) -> String {
 }
 
 fn type_object_generic_arguments_from_ir(ty: &IrType, env: &TypeEnv) -> Vec<TypedExpr> {
-    let _ = env;
     match ty {
         IrType::List(inner)
         | IrType::Enumerable(inner)
         | IrType::Task(inner)
-        | IrType::Weak(inner) => vec![type_object_expr_from_ir(inner, env)],
+        | IrType::Weak(inner) => vec![type_object_expr_from_ir_shallow(inner, env)],
         IrType::Dictionary(key, value) => vec![
-            type_object_expr_from_ir(key, env),
-            type_object_expr_from_ir(value, env),
+            type_object_expr_from_ir_shallow(key, env),
+            type_object_expr_from_ir_shallow(value, env),
         ],
         IrType::Function { params, return_type } => {
             let mut args = params
                 .iter()
-                .map(|param| type_object_expr_from_ir(param, env))
+                .map(|param| type_object_expr_from_ir_shallow(param, env))
                 .collect::<Vec<_>>();
             if !matches!(return_type.as_ref(), IrType::Void) {
-                args.push(type_object_expr_from_ir(return_type, env));
+                args.push(type_object_expr_from_ir_shallow(return_type, env));
             }
             args
         }
@@ -5539,6 +6482,34 @@ fn resolve_method_call(
     args: &[TypedExpr],
 ) -> Result<(IrType, Ownership, String, CallResolution), String> {
     match (&target.ty, name) {
+        (IrType::String, _) => {
+            for string_type in ["string", "String", "System.String"] {
+                if let Some(signature) = env.resolve_method_call(string_type, name, args)? {
+                    if signature.is_static {
+                        return Ok((
+                            signature.return_type.clone(),
+                            signature.return_ownership.clone(),
+                            signature.symbol.clone(),
+                            CallResolution::StaticFunction,
+                        ));
+                    }
+                    return Ok((
+                        signature.return_type.clone(),
+                        signature.return_ownership.clone(),
+                        signature.symbol.clone(),
+                        CallResolution::InstanceMethod,
+                    ));
+                }
+            }
+            if let Some(signature) = env.resolve_function_call(name, args)? {
+                return Ok((
+                    signature.return_type.clone(),
+                    signature.return_ownership.clone(),
+                    signature.symbol.clone(),
+                    CallResolution::StaticFunction,
+                ));
+            }
+        }
         (IrType::Unknown(target_name) | IrType::Class(target_name), _) => {
             if let Some(signature) = env.resolve_method_call(target_name, name, args)? {
                 if signature.is_static {
@@ -6024,7 +6995,7 @@ fn scalar_to_ir(scalar: ScalarType) -> IrType {
     }
 }
 
-fn ownership_for_type(ty: &IrType) -> Ownership {
+pub(crate) fn ownership_for_type(ty: &IrType) -> Ownership {
     match ty {
         IrType::Bool
         | IrType::Byte

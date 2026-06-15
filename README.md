@@ -27,12 +27,13 @@ Current implemented subset:
 - `HashSet<string>` with `new HashSet<string>()`, `.Add(value)`, `.Contains(value)`, and `.Clear()`
 - `System.Collections.Generic.List<int>` and `System.Collections.Generic.Dictionary<string, int>`, including `using` aliases
 - C#-style `Thread` with `new Thread(worker)`, `.Start()`, and `.Join()`
-- `System.Threading.Tasks.Task` with `Task.Run(worker)` and `task.Wait()`
-- `System.Threading.Tasks.Task<T>` for `int`, `long`, and owned `string` results with `Task.Run(worker)`, `task.Result`, and `task.GetResult()`
-- `System.Threading.Tasks.Task.IsCompleted`, `Task.WhenAll(Task[])`, and `ValueTask<T>.AsTask()`
+- `System.Threading.Tasks.Task` with `Task.Run(worker)`, `task.Wait()`, and `task.GetAwaiter()`
+- `System.Threading.Tasks.Task<T>` for `int`, `long`, and owned `string` results with `Task.Run(worker)`, `task.Result`, `task.GetResult()`, and `task.GetAwaiter()`
+- `System.Threading.Tasks.Task.IsCompleted`, `Task.WhenAll(Task[])`, `ValueTask<T>.AsTask()`, and the matching `ValueTask` / `ValueTask<T>` awaiter helpers
 - `System.Threading.Tasks.Task.WhenAll(Task<T>[])` for the supported task-array subset
 - `System.Linq.Enumerable` now has working `IEnumerable<T>` overloads for `Count`, `Any`, `First`, `FirstOrDefault`, `ToList`, and `ToArray`
-- `System.Array.Empty<T>()` is present on the current core-library surface, and `bool.Parse` / the `string` null helpers compile on the current path
+- `System.Array.Empty<T>()` lowers through a native helper on the current core-library surface, and `bool.Parse` / the `string` null helpers compile on the current path
+- `string.ToLower()`, `string.ToLowerInvariant()`, `string.Replace(...)`, `string.Trim()`, `string.Contains(...)`, `string.StartsWith(...)`, `string.EndsWith(...)`, `string.Substring(...)`, `string.TrimStart(...)`, and `string.TrimEnd(...)` now lower through native runtime helpers or direct LLVM lowering on the LLVM path
 - `int.Parse`, `int.TryParse`, `DateTime.Parse`, and `TimeSpan.FromMinutes` are present on the current `System` surface
 - `System.IO.Path.GetExtension` and `System.IO.Path.GetFileName` are available on the current file-system surface
 - `System.Text.Encoding.UTF8.GetBytes` is available on the current text-encoding surface
@@ -273,6 +274,24 @@ Important remaining safety boundaries:
 - the allocation counter covers LLVM allocations routed through `glitch_calloc`,
   `glitch_realloc`, and `glitch_free`; it is not a replacement for an external native memory
   sanitizer.
+
+Unsupported syntax and runtime behavior are rejected explicitly:
+
+- `unsafe` blocks, pointer types, pointer arithmetic, pointer comparisons, and pointer-member access
+- `fixed` statements and fixed-size buffers
+- raw-pointer `stackalloc`
+- finalizers that depend on GC reachability
+- pinning and pin-sensitive interop patterns
+- exact weak-reference / object-header semantics from .NET
+
+When the compiler hits one of these cases, it should emit a rewrite suggestion instead of a silent fallback:
+
+- replace pointer code with owned arrays, `ref struct` views, or a narrow native helper
+- replace `fixed` with a scoped copy or a `ref struct` view that does not escape
+- replace raw-pointer `stackalloc` with a bounded owned buffer or a native helper
+- replace finalizers with `Dispose` / `using`
+- replace pinning assumptions with copy-based data flow
+- replace exact weak-reference behavior with `Weak<T>`-style compatibility helpers or accept that exact .NET behavior is unavailable
 
 The cloned `Backend/Library` source tree currently parses, lowers, and links to a native
 executable in the supported subset. Compatibility diagnostics still identify unresolved ASP.NET

@@ -434,7 +434,7 @@ impl<'a> CompatibilityAnalyzer<'a> {
                     self.visit_expr(value, emit_llvm);
                 }
             }
-            tir::TypedExprKind::NewArray { length, values, .. } => {
+                tir::TypedExprKind::NewArray { length, values, .. } => {
                 if let Some(length) = length {
                     self.visit_expr(length, emit_llvm);
                 }
@@ -443,6 +443,17 @@ impl<'a> CompatibilityAnalyzer<'a> {
                 }
             }
             tir::TypedExprKind::Index { target, index } => {
+                if is_generic_placeholder_type(&target.ty) {
+                    self.emit(
+                        "GL3008",
+                        "[",
+                        format!(
+                            "indexing on generic placeholder {:?} still lowers to a typed default; LLVM cannot specialize this package body yet",
+                            target.ty
+                        ),
+                        "rewrite this code to call a concrete helper or move the indexing into a specialized method body".to_string(),
+                    );
+                }
                 self.visit_expr(target, emit_llvm);
                 self.visit_expr(index, emit_llvm);
             }
@@ -555,6 +566,20 @@ fn base_type_name(name: &str) -> &str {
         .rsplit('.')
         .next()
         .unwrap_or(name)
+}
+
+fn is_generic_placeholder_type(ty: &tir::IrType) -> bool {
+    match ty {
+        tir::IrType::Class(name) | tir::IrType::Struct(name) | tir::IrType::Unknown(name) => {
+            let simple = base_type_name(name);
+            simple.len() <= 2
+                && simple
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_uppercase())
+        }
+        _ => false,
+    }
 }
 
 fn is_llvm_runtime_function(symbol: &str) -> bool {

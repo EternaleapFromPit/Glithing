@@ -101,6 +101,104 @@ The current boundary is:
 4. Expand framework compatibility in small, test-driven slices where the runtime model already exists, and keep unsupported members on explicit diagnostics with rewrite guidance.
 5. Add additional sample/runtime acceptance work only where a concrete blocker remains after the current compile gates.
 
+## C# Standard v7 Gap Analysis
+
+The standard-v7 C# specification is still a useful target for the language front-end, but not every section is compatible with the current GC-free, memory-safe model.
+
+### Still implementable without GC
+
+These parts can still be widened with compiler/runtime work and do not require reintroducing tracing GC:
+
+- nullable value types and lifted conversions
+- boxing and unboxing for supported value types
+- user-defined conversions
+- anonymous function conversions, method group conversions, and delegate invocation
+- pattern matching and switch-based flow analysis
+- ref locals / ref-safe contexts / byref-friendly lowering
+- async functions and iterator lowering into owned state machines
+- arrays and array members
+- namespaces, using directives, attributes, enums, structs, classes, interfaces, and most access modifiers
+- `lock`/`using`-style runtime wrappers when backed by explicit runtime primitives
+- collection, task, and framework slices where ownership can be proven or diagnostics can be made explicit
+
+### Not implementable exactly in the current memory-safe model
+
+These standard sections depend on raw memory access or GC-style runtime behavior, so they cannot be implemented with exact C# semantics without relaxing the model:
+
+- unsafe code (§23), including pointer types, pointer indirection, pointer arithmetic, pointer comparisons, and pointer-member access
+- the `fixed` statement and fixed/moveable-variable semantics
+- fixed-size buffers as raw-pointer-backed storage
+- exact raw-pointer forms of `stackalloc`
+- GC-dependent runtime behaviors such as pinning, resurrection, finalization queues, and exact weak-reference / object-header semantics
+- compatibility for APIs that assume those runtime behaviors, if they are required to match .NET exactly rather than approximated through diagnostics or alternate helpers
+
+### Plan implication
+
+The next safe expansion path is to continue implementing the language and framework slices listed above, while keeping the unsafe/GC-dependent sections as explicit diagnostics or limited compatibility shims instead of silent lowering.
+
+### Unsupported syntax policy
+
+The following common C# surfaces should be treated as hard diagnostics in the current memory-safe model:
+
+- `unsafe` blocks and all pointer syntax
+- `fixed` statements
+- raw-pointer `stackalloc`
+- fixed-size buffers
+- finalizers that depend on GC reachability
+- pinning and pin-sensitive interop patterns
+- exact weak-reference / object-header semantics
+
+Rewrite guidance should be specific and actionable:
+
+- replace pointer code with owned arrays, `ref struct` views, or a narrow native helper
+- replace `fixed` with a scoped copy or a `ref struct` view that does not escape
+- replace raw-pointer `stackalloc` with a bounded owned buffer, or move the operation into a native helper
+- replace finalizers with `Dispose` / `using`
+- replace pinning assumptions with copy-based data flow
+- replace exact weak-reference behavior with `Weak<T>`-style compatibility helpers or a diagnostic that exact .NET semantics are unavailable
+
+## Completed
+
+1. Monomorphize generic package methods by recording concrete call-site instantiations and specializing package bodies where the runtime model already exists.
+   - Implemented by recording concrete instantiations from typed call sites, specializing matching package functions, and emitting concrete LLVM bodies for those specializations.
+   - Covered by regression tests for instantiation collection and LLVM specialization output.
+2. Generic placeholder indexing now emits an explicit compatibility warning instead of silently lowering to a typed default.
+   - The diagnostics pass now reports GL3008 when a generic placeholder is indexed before specialization/runtime support exists.
+   - Covered by a regression test that checks the warning text and rewrite guidance.
+3. Loop-exit borrow-check joins now preserve moved state from `break` paths through nested control-flow joins.
+   - The ownership checker now snapshots loop-exit state and merges it back into the post-loop state, so a move inside a `break` branch is no longer lost at the loop join.
+   - Covered by a regression test for a moved value followed by `break` inside an `if` within a loop.
+4. `System.String`/`string` prefix and equality helpers now lower through real LLVM string handling instead of returning typed defaults.
+   - The LLVM emitter now treats the `System.String` package alias as string-like for indexing, length, concatenation, and retain/release paths.
+   - `StartsWith` and `Equals` are implemented in the core package as real loop-based comparisons and covered by a regression test.
+5. `System.String.Substring(int)` now lowers through a typed runtime helper instead of returning the original string placeholder.
+   - The `System` package now declares `System_String_Substring_Native`, and the Rust runtime provides the allocation/copy helper used by LLVM-native executables.
+   - Covered by a regression test that checks the LLVM IR contains the helper call and declaration.
+6. `System.String.TrimEnd(...)` now lowers through a typed runtime helper instead of relying on an opaque compatibility fallback.
+   - The `System` package now declares `System_String_TrimEnd_Native`, and the Rust runtime trims and copies the trailing slice into a fresh owned string.
+   - Covered by a regression test that compiles the `TrimEnd('/').Substring(1)` path used by the existing string-surface fixture.
+7. `System.String.ToLower()`, `System.String.ToLowerInvariant()`, `System.String.Replace(...)`, and `System.String.Trim()` now lower through typed runtime helpers instead of returning placeholders.
+   - The `System` package now declares dedicated native helpers for these transforms, and the Rust runtime allocates fresh owned strings for each transformed result.
+   - Covered by a regression test that checks the LLVM IR references the transform helpers.
+8. `System.String.Split(string)` now lowers through a typed runtime helper instead of returning a placeholder array.
+   - The `System` package now declares `System_String_Split_Native`, and the Rust runtime returns an owned `string[]` split on the first separator byte.
+   - Covered by a regression test that exercises the current string split fixture path.
+9. `System.String.Contains(string)` now lowers through a typed runtime helper instead of relying on an opaque fallback.
+   - The `System` package now declares `System_String_Contains_Native`, and the Rust runtime checks for a substring match without introducing GC-managed state.
+   - Covered by a regression test that checks the LLVM IR references the helper.
+10. `System.String.TrimStart(...)` now lowers through a typed runtime helper, and `System.String.EndsWith(...)` is now implemented as a real suffix comparison instead of a placeholder.
+   - The `System` package now declares `System_String_TrimStart_Native`, and the Rust runtime trims leading characters into a fresh owned string.
+   - `EndsWith` now uses the same direct LLVM string indexing path as `StartsWith`, and is covered by a regression test.
+11. `System.Array.Empty<T>()` now lowers through a dedicated native helper instead of depending on generic array state indexing in the package body.
+   - The `System` package now declares `System_Array_Empty_Native`, and the Rust runtime returns a zero-length owned array node that the LLVM path can reuse across concrete instantiations.
+   - Covered by a regression test that checks the LLVM IR references the helper.
+12. Borrow-check flow now treats `break` / `continue` as terminating the current path and preserves loop-exit snapshots across nested joins.
+   - The borrow checker now stops analyzing unreachable statements after `break` / `continue` and carries loop-exit state through enclosing joins instead of pretending the path is still live.
+   - Covered by a regression test that keeps unreachable code after `break` from poisoning the loop state, plus the existing break-branch regression.
+13. The task-like package surface now exposes the common awaiter/result helpers directly, and those awaiter methods move the underlying wrapper instead of borrowing it unsafely.
+   - `Task`, `Task<T>`, `ValueTask`, and `ValueTask<T>` now expose `GetAwaiter()` and `GetResult()` where the current async/task lowering expects them.
+   - Covered by regression tests that compile direct package-surface calls to `GetResult()` and `GetAwaiter().GetResult()` on `Task<T>` and `ValueTask<T>`.
+
 ## Notes
 
 This document intentionally avoids repeating stale claims from the analysis file that are already resolved in the current repo state. It is meant to be the live implementation plan going forward, not a historical bug list.

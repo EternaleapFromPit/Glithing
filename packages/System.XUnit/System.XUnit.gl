@@ -12,9 +12,40 @@ public class InlineDataAttribute {
     public readonly object[] Data;
     public InlineDataAttribute(params object[] data) { Data = data; }
 }
+public class SkipAttribute {
+    public readonly string Reason;
+    public SkipAttribute(string reason) { Reason = reason; }
+}
+public class TraitAttribute {
+    public readonly string Name;
+    public readonly string Value;
+    public TraitAttribute(string name, string value) { Name = name; Value = value; }
+}
+public class CollectionAttribute {
+    public readonly string Name;
+    public CollectionAttribute(string name) { Name = name; }
+}
+public class CollectionDefinitionAttribute {
+    public readonly string Name;
+    public CollectionDefinitionAttribute(string name) { Name = name; }
+}
+public class MemberDataAttribute {
+    public readonly string MemberName;
+    public MemberDataAttribute(string memberName) { MemberName = memberName; }
+}
+public class ClassDataAttribute {
+    public readonly System.Type DataType;
+    public ClassDataAttribute(System.Type dataType) { DataType = dataType; }
+}
 
 // Simple Assert helpers
 public static class Assert {
+    public static void False(bool condition) {
+        if (condition) throw new AssertionFailedException("");
+    }
+    public static void False(bool condition, string message) {
+        if (condition) throw new AssertionFailedException(message);
+    }
     public static void True(bool condition) {
         if (!condition) throw new AssertionFailedException("");
     }
@@ -27,6 +58,12 @@ public static class Assert {
     public static void Equal<T>(T expected, T actual, string message) {
         if (!object.Equals(expected, actual)) throw new AssertionFailedException(message);
     }
+    public static void NotEqual<T>(T notExpected, T actual) {
+        if (object.Equals(notExpected, actual)) throw new AssertionFailedException("");
+    }
+    public static void NotEqual<T>(T notExpected, T actual, string message) {
+        if (object.Equals(notExpected, actual)) throw new AssertionFailedException(message);
+    }
     public static void NotNull(object value) {
         if (object.Equals(value, null)) throw new AssertionFailedException("");
     }
@@ -38,6 +75,18 @@ public static class Assert {
     }
     public static void Null(object value, string message) {
         if (!object.Equals(value, null)) throw new AssertionFailedException(message);
+    }
+    public static void Same(object expected, object actual) {
+        if (!object.Equals(expected, actual)) throw new AssertionFailedException("");
+    }
+    public static void Same(object expected, object actual, string message) {
+        if (!object.Equals(expected, actual)) throw new AssertionFailedException(message);
+    }
+    public static void NotSame(object expected, object actual) {
+        if (object.Equals(expected, actual)) throw new AssertionFailedException("");
+    }
+    public static void NotSame(object expected, object actual, string message) {
+        if (object.Equals(expected, actual)) throw new AssertionFailedException(message);
     }
     public static void Contains<T>(T expected, IEnumerable<T> values) {
         foreach (var value in values) {
@@ -55,6 +104,48 @@ public static class Assert {
         }
         throw new AssertionFailedException(message);
     }
+    public static void DoesNotContain<T>(T expected, IEnumerable<T> values) {
+        foreach (var value in values) {
+            if (object.Equals(expected, value)) {
+                throw new AssertionFailedException("");
+            }
+        }
+    }
+    public static void Empty<T>(IEnumerable<T> values) {
+        foreach (var value in values) {
+            throw new AssertionFailedException("");
+        }
+    }
+    public static void NotEmpty<T>(IEnumerable<T> values) {
+        foreach (var value in values) {
+            return;
+        }
+        throw new AssertionFailedException("");
+    }
+    public static T Single<T>(IEnumerable<T> values) {
+        T found = default(T);
+        bool hasValue = false;
+        foreach (var value in values) {
+            if (hasValue) {
+                throw new AssertionFailedException("");
+            }
+            found = value;
+            hasValue = true;
+        }
+        if (!hasValue) {
+            throw new AssertionFailedException("");
+        }
+        return found;
+    }
+    public static void StartsWith(string expected, string actual) {
+        if (!actual.StartsWith(expected, StringComparison.Ordinal)) throw new AssertionFailedException("");
+    }
+    public static void EndsWith(string expected, string actual) {
+        int expectedLength = expected.Length;
+        int actualLength = actual.Length;
+        if (expectedLength > actualLength) throw new AssertionFailedException("");
+        if (actual.Substring(actualLength - expectedLength) != expected) throw new AssertionFailedException("");
+    }
     public static void Throws<TException>(Func<void> action) where TException : class {
         try { action(); }
         catch (TException) { return; }
@@ -64,6 +155,9 @@ public static class Assert {
         try { action(); }
         catch (TException) { return; }
         throw new AssertionFailedException(message);
+    }
+    public static void ThrowsAny<TException>(Func<void> action) where TException : class {
+        Throws<TException>(action);
     }
 }
 
