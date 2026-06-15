@@ -4,11 +4,40 @@ package System.Linq;
 // Delegate-based sequence operators are intentionally left out for now.
 
 public static class Enumerable {
-    public static int Count<TSource>(List<TSource> source) {
+    static int CompareStrings(string left, string right) {
+        if (left == right) {
+            return 0;
+        }
+        if (left == null) {
+            return -1;
+        }
+        if (right == null) {
+            return 1;
+        }
+        int i = 0;
+        while (i < left.Length && i < right.Length) {
+            if (left[i] < right[i]) {
+                return -1;
+            }
+            if (left[i] > right[i]) {
+                return 1;
+            }
+            i = i + 1;
+        }
+        if (left.Length < right.Length) {
+            return -1;
+        }
+        if (left.Length > right.Length) {
+            return 1;
+        }
+        return 0;
+    }
+
+    public static int Count<TSource>(this List<TSource> source) {
         return source.Count;
     }
 
-    public static int Count<TSource>(List<TSource> source, Func<TSource, bool> predicate) {
+    public static int Count<TSource>(this List<TSource> source, Func<TSource, bool> predicate) {
         int c = 0;
         int i = 0;
         while (i < source.Count) {
@@ -21,7 +50,7 @@ public static class Enumerable {
         return c;
     }
 
-    public static List<TSource> Where<TSource>(List<TSource> source, Func<TSource, bool> predicate) {
+    public static List<TSource> Where<TSource>(this List<TSource> source, Func<TSource, bool> predicate) {
         var list = new List<TSource>();
         int i = 0;
         while (i < source.Count) {
@@ -35,7 +64,7 @@ public static class Enumerable {
     }
 
     public static List<TResult> Select<TSource, TResult>(
-        List<TSource> source,
+        this List<TSource> source,
         Func<TSource, TResult> selector
     ) {
         var list = new List<TResult>();
@@ -48,11 +77,26 @@ public static class Enumerable {
         return list;
     }
 
-    public static bool Any<TSource>(List<TSource> source) {
+    public static List<TResult> SelectMany<TSource, TResult>(
+        this List<TSource> source,
+        Func<TSource, IEnumerable<TResult>> selector
+    ) {
+        var list = new List<TResult>();
+        int i = 0;
+        while (i < source.Count) {
+            foreach (TResult value in selector(source[i])) {
+                list.Add(value);
+            }
+            i = i + 1;
+        }
+        return list;
+    }
+
+    public static bool Any<TSource>(this List<TSource> source) {
         return source.Count > 0;
     }
 
-    public static bool Any<TSource>(List<TSource> source, Func<TSource, bool> predicate) {
+    public static bool Any<TSource>(this List<TSource> source, Func<TSource, bool> predicate) {
         int i = 0;
         while (i < source.Count) {
             var item = source[i];
@@ -64,14 +108,14 @@ public static class Enumerable {
         return false;
     }
 
-    public static TSource First<TSource>(List<TSource> source) {
+    public static TSource First<TSource>(this List<TSource> source) {
         if (source.Count > 0) {
             return source[0];
         }
         throw new InvalidOperationException("Sequence contains no elements");
     }
 
-    public static TSource First<TSource>(List<TSource> source, Func<TSource, bool> predicate) {
+    public static TSource First<TSource>(this List<TSource> source, Func<TSource, bool> predicate) {
         int i = 0;
         while (i < source.Count) {
             var item = source[i];
@@ -83,7 +127,7 @@ public static class Enumerable {
         throw new InvalidOperationException("Sequence contains no matching elements");
     }
 
-    public static TSource FirstOrDefault<TSource>(List<TSource> source) {
+    public static TSource FirstOrDefault<TSource>(this List<TSource> source) {
         if (source.Count > 0) {
             return source[0];
         }
@@ -91,7 +135,7 @@ public static class Enumerable {
     }
 
     public static TSource FirstOrDefault<TSource>(
-        List<TSource> source,
+        this List<TSource> source,
         Func<TSource, bool> predicate
     ) {
         int i = 0;
@@ -105,7 +149,7 @@ public static class Enumerable {
         return default(TSource);
     }
 
-    public static List<TSource> ToList<TSource>(List<TSource> source) {
+    public static List<TSource> ToList<TSource>(this List<TSource> source) {
         var list = new List<TSource>();
         int i = 0;
         while (i < source.Count) {
@@ -115,11 +159,61 @@ public static class Enumerable {
         return list;
     }
 
-    public static TSource[] ToArray<TSource>(List<TSource> source) {
-        return ToList(source).ToArray();
+    public static TSource[] ToArray<TSource>(this List<TSource> source) {
+        return source.ToArray();
     }
 
-    public static int Count<TSource>(IEnumerable<TSource> source) {
+    public static List<TSource> OrderBy<TSource>(
+        this List<TSource> source,
+        Func<TSource, string> keySelector
+    ) {
+        var list = new List<TSource>();
+        int copy = 0;
+        while (copy < source.Count) {
+            list.Add(source[copy]);
+            copy = copy + 1;
+        }
+        int i = 1;
+        while (i < list.Count) {
+            TSource item = list[i];
+            string key = keySelector(item);
+            int j = i - 1;
+            while (j >= 0 && CompareStrings(keySelector(list[j]), key) > 0) {
+                list[j + 1] = list[j];
+                j = j - 1;
+            }
+            list[j + 1] = item;
+            i = i + 1;
+        }
+        return list;
+    }
+
+    public static List<TSource> OrderByDescending<TSource>(
+        this List<TSource> source,
+        Func<TSource, string> keySelector
+    ) {
+        var list = new List<TSource>();
+        int copy = 0;
+        while (copy < source.Count) {
+            list.Add(source[copy]);
+            copy = copy + 1;
+        }
+        int i = 1;
+        while (i < list.Count) {
+            TSource item = list[i];
+            string key = keySelector(item);
+            int j = i - 1;
+            while (j >= 0 && CompareStrings(keySelector(list[j]), key) < 0) {
+                list[j + 1] = list[j];
+                j = j - 1;
+            }
+            list[j + 1] = item;
+            i = i + 1;
+        }
+        return list;
+    }
+
+    public static int Count<TSource>(this IEnumerable<TSource> source) {
         int count = 0;
         foreach (TSource value in source) {
             count = count + 1;
@@ -127,28 +221,28 @@ public static class Enumerable {
         return count;
     }
 
-    public static TSource First<TSource>(IEnumerable<TSource> source) {
+    public static TSource First<TSource>(this IEnumerable<TSource> source) {
         foreach (TSource value in source) {
             return value;
         }
         throw new InvalidOperationException("Sequence contains no elements");
     }
 
-    public static TSource FirstOrDefault<TSource>(IEnumerable<TSource> source) {
+    public static TSource FirstOrDefault<TSource>(this IEnumerable<TSource> source) {
         foreach (TSource value in source) {
             return value;
         }
         return default(TSource);
     }
 
-    public static bool Any<TSource>(IEnumerable<TSource> source) {
+    public static bool Any<TSource>(this IEnumerable<TSource> source) {
         foreach (TSource value in source) {
             return true;
         }
         return false;
     }
 
-    public static List<TSource> ToList<TSource>(IEnumerable<TSource> source) {
+    public static List<TSource> ToList<TSource>(this IEnumerable<TSource> source) {
         var list = new List<TSource>();
         foreach (TSource value in source) {
             list.Add(value);
@@ -156,8 +250,43 @@ public static class Enumerable {
         return list;
     }
 
-    public static TSource[] ToArray<TSource>(IEnumerable<TSource> source) {
+    public static TSource[] ToArray<TSource>(this IEnumerable<TSource> source) {
         var list = ToList(source);
         return list.ToArray();
+    }
+
+    public static List<TResult> SelectMany<TSource, TResult>(
+        this IEnumerable<TSource> source,
+        Func<TSource, IEnumerable<TResult>> selector
+    ) {
+        var list = new List<TResult>();
+        foreach (TSource value in source) {
+            foreach (TResult item in selector(value)) {
+                list.Add(item);
+            }
+        }
+        return list;
+    }
+
+    public static List<TSource> OrderBy<TSource>(
+        this IEnumerable<TSource> source,
+        Func<TSource, string> keySelector
+    ) {
+        var list = new List<TSource>();
+        foreach (TSource value in source) {
+            list.Add(value);
+        }
+        return list.OrderBy(keySelector);
+    }
+
+    public static List<TSource> OrderByDescending<TSource>(
+        this IEnumerable<TSource> source,
+        Func<TSource, string> keySelector
+    ) {
+        var list = new List<TSource>();
+        foreach (TSource value in source) {
+            list.Add(value);
+        }
+        return list.OrderByDescending(keySelector);
     }
 }

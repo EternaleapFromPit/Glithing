@@ -1089,7 +1089,21 @@ where
                     .all(|(candidate, other)| candidate <= other)
         })
     }) else {
-        return Err(format!("ambiguous overload resolution for {}", context()));
+        let candidates = applicable
+            .iter()
+            .map(|(signature, ranks)| {
+                format!(
+                    "{:?} -> {:?} ranks={:?}",
+                    signature.params, signature.return_type, ranks
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        return Err(format!(
+            "ambiguous overload resolution for {}: {}",
+            context(),
+            candidates
+        ));
     };
 
     let tied = applicable
@@ -1107,7 +1121,21 @@ where
         })
         .count();
     if tied > 1 {
-        return Err(format!("ambiguous overload resolution for {}", context()));
+        let candidates = applicable
+            .iter()
+            .map(|(signature, ranks)| {
+                format!(
+                    "{:?} -> {:?} ranks={:?}",
+                    signature.params, signature.return_type, ranks
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        return Err(format!(
+            "ambiguous overload resolution for {}: {}",
+            context(),
+            candidates
+        ));
     }
 
     Ok(Some(*best))
@@ -6718,6 +6746,63 @@ fn resolve_method_call(
                 Ownership::Copy,
                 symbol.to_string(),
                 CallResolution::StaticFunction,
+            ))
+        }
+        (IrType::List(_), method_name) => {
+            if let Some(signature) = env.resolve_method_call("List", method_name, args)? {
+                return Ok((
+                    signature.return_type.clone(),
+                    signature.return_ownership.clone(),
+                    signature.symbol.clone(),
+                    CallResolution::InstanceMethod,
+                ));
+            }
+            if let Some(signature) =
+                env.resolve_extension_method_call("List", method_name, target, args)?
+            {
+                return Ok((
+                    signature.return_type.clone(),
+                    signature.return_ownership.clone(),
+                    signature.symbol.clone(),
+                    CallResolution::InstanceMethod,
+                ));
+            }
+            match method_name {
+                "ToArray" => unreachable!(),
+                "Contains" | "Add" | "Clear" => unreachable!(),
+                _ => {}
+            }
+            Ok((
+                IrType::Unknown(method_name.to_string()),
+                Ownership::Shared,
+                method_name.to_string(),
+                CallResolution::Unknown,
+            ))
+        }
+        (IrType::Enumerable(_), method_name) => {
+            if let Some(signature) = env.resolve_method_call("IEnumerable", method_name, args)? {
+                return Ok((
+                    signature.return_type.clone(),
+                    signature.return_ownership.clone(),
+                    signature.symbol.clone(),
+                    CallResolution::InstanceMethod,
+                ));
+            }
+            if let Some(signature) =
+                env.resolve_extension_method_call("IEnumerable", method_name, target, args)?
+            {
+                return Ok((
+                    signature.return_type.clone(),
+                    signature.return_ownership.clone(),
+                    signature.symbol.clone(),
+                    CallResolution::InstanceMethod,
+                ));
+            }
+            Ok((
+                IrType::Unknown(method_name.to_string()),
+                Ownership::Shared,
+                method_name.to_string(),
+                CallResolution::Unknown,
             ))
         }
         (

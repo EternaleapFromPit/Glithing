@@ -2,6 +2,35 @@ package System.Collections.Generic;
 
 using System.Ownership;
 
+int CompareStrings(string left, string right) {
+    if (left == right) {
+        return 0;
+    }
+    if (left == null) {
+        return -1;
+    }
+    if (right == null) {
+        return 1;
+    }
+    int i = 0;
+    while (i < left.Length && i < right.Length) {
+        if (left[i] < right[i]) {
+            return -1;
+        }
+        if (left[i] > right[i]) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    if (left.Length < right.Length) {
+        return -1;
+    }
+    if (left.Length > right.Length) {
+        return 1;
+    }
+    return 0;
+}
+
 public interface IEnumerable<T> {
     IEnumerator<T> GetEnumerator();
 }
@@ -60,6 +89,138 @@ class List<T> : IList<T>, IReadOnlyList<T> {
 
     T[] ToArray() {
         return default(T[]);
+    }
+
+    List<T> ToList() {
+        var list = new List<T>();
+        int i = 0;
+        while (i < this.Count) {
+            list.Add(this[i]);
+            i = i + 1;
+        }
+        return list;
+    }
+
+    List<T> Where(Func<T, bool> predicate) {
+        var list = new List<T>();
+        int i = 0;
+        while (i < this.Count) {
+            var item = this[i];
+            if (predicate(item)) {
+                list.Add(item);
+            }
+            i = i + 1;
+        }
+        return list;
+    }
+
+    List<TResult> Select<TResult>(Func<T, TResult> selector) {
+        var list = new List<TResult>();
+        int i = 0;
+        while (i < this.Count) {
+            list.Add(selector(this[i]));
+            i = i + 1;
+        }
+        return list;
+    }
+
+    List<TResult> SelectMany<TResult>(Func<T, IEnumerable<TResult>> selector) {
+        var list = new List<TResult>();
+        int i = 0;
+        while (i < this.Count) {
+            foreach (TResult value in selector(this[i])) {
+                list.Add(value);
+            }
+            i = i + 1;
+        }
+        return list;
+    }
+
+    bool Any() {
+        return this.Count > 0;
+    }
+
+    bool Any(Func<T, bool> predicate) {
+        int i = 0;
+        while (i < this.Count) {
+            if (predicate(this[i])) {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    T First() {
+        if (this.Count > 0) {
+            return this[0];
+        }
+        throw new InvalidOperationException("Sequence contains no elements");
+    }
+
+    T First(Func<T, bool> predicate) {
+        int i = 0;
+        while (i < this.Count) {
+            var item = this[i];
+            if (predicate(item)) {
+                return item;
+            }
+            i = i + 1;
+        }
+        throw new InvalidOperationException("Sequence contains no matching elements");
+    }
+
+    T FirstOrDefault() {
+        if (this.Count > 0) {
+            return this[0];
+        }
+        return default(T);
+    }
+
+    T FirstOrDefault(Func<T, bool> predicate) {
+        int i = 0;
+        while (i < this.Count) {
+            var item = this[i];
+            if (predicate(item)) {
+                return item;
+            }
+            i = i + 1;
+        }
+        return default(T);
+    }
+
+    List<T> OrderBy(Func<T, string> keySelector) {
+        var list = this.ToList();
+        int i = 1;
+        while (i < list.Count) {
+            T item = list[i];
+            string key = keySelector(item);
+            int j = i - 1;
+            while (j >= 0 && CompareStrings(keySelector(list[j]), key) > 0) {
+                list[j + 1] = list[j];
+                j = j - 1;
+            }
+            list[j + 1] = item;
+            i = i + 1;
+        }
+        return list;
+    }
+
+    List<T> OrderByDescending(Func<T, string> keySelector) {
+        var list = this.ToList();
+        int i = 1;
+        while (i < list.Count) {
+            T item = list[i];
+            string key = keySelector(item);
+            int j = i - 1;
+            while (j >= 0 && CompareStrings(keySelector(list[j]), key) < 0) {
+                list[j + 1] = list[j];
+                j = j - 1;
+            }
+            list[j + 1] = item;
+            i = i + 1;
+        }
+        return list;
     }
 
     void Add(T item) {}
