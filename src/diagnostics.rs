@@ -400,7 +400,11 @@ impl<'a> CompatibilityAnalyzer<'a> {
                 fields,
                 ..
             } => {
-                if type_name.starts_with("Rc_") || type_name.starts_with("ListEnumerator") {
+                let simple_name = type_name.rsplit('.').next().unwrap_or(type_name);
+                if simple_name.starts_with("Rc_")
+                    || simple_name.starts_with("ListEnumerator")
+                    || type_name.contains("Rc_")
+                {
                     for arg in args {
                         self.visit_expr(arg, emit_llvm);
                     }
@@ -412,6 +416,11 @@ impl<'a> CompatibilityAnalyzer<'a> {
                 if type_name != "Exception"
                     && type_name != "System.Exception"
                     && !self.known_types.contains(type_name)
+                    && !self.known_types.contains(simple_name)
+                    && !self
+                        .known_types
+                        .iter()
+                        .any(|known| known.ends_with(simple_name) || simple_name.ends_with(known))
                 {
                     self.emit(
                         "GL3004",

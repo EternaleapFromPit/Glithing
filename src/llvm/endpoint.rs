@@ -993,10 +993,6 @@ impl LlvmEmitter {
         let source_value = self.emit_typed_expr(source)?;
         let source_hint = generic_args.first().unwrap_or(&source.ty);
         let dest_hint = generic_args.get(1).unwrap_or(dest_ty);
-        eprintln!(
-            "mapper debug: source={:?} source_hint={:?} dest={:?} dest_hint={:?} generic_args={:?}",
-            source.ty, source_hint, dest_ty, dest_hint, generic_args
-        );
         let source_name = object_type_name(&source.ty)
             .or_else(|| match &source.ty {
                 IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {

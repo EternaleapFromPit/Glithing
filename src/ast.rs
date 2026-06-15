@@ -61,6 +61,8 @@ pub(crate) enum TypeKind {
 pub(crate) struct FieldDef {
     pub(crate) name: String,
     pub(crate) ty: TypeSyntax,
+    pub(crate) is_static: bool,
+    pub(crate) initializer: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]

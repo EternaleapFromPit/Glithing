@@ -53,7 +53,13 @@ fn link_package_sources_inner(
 fn source_declares_namespace(source: &str, package_id: &str) -> bool {
     let namespace = format!("namespace {package_id}");
     let package = format!("package {package_id}");
-    source.contains(&namespace) || source.contains(&package)
+    source.lines().any(|line| {
+        let line = line.trim();
+        line == namespace
+            || line == format!("{namespace};")
+            || line == package
+            || line == format!("{package};")
+    })
 }
 
 fn source_file_marker(path: &str) -> String {

@@ -1,5 +1,6 @@
 // tests/xunit_memory/memory_leak_tests.gl
 
+using System;
 using System.XUnit;
 using System.LeakDetector;
 using System.Ownership;

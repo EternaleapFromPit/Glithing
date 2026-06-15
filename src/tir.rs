@@ -88,6 +88,7 @@ pub(crate) struct TypedFunction {
     pub(crate) symbol: String,
     pub(crate) generic_params: Vec<String>,
     pub(crate) is_extern: bool,
+    pub(crate) required_params: usize,
     pub(crate) return_type: IrType,
     pub(crate) return_ownership: Ownership,
     pub(crate) params: Vec<TypedBinding>,
@@ -338,6 +339,7 @@ struct FunctionSignature {
     generic_params: Vec<String>,
     params: Vec<IrType>,
     param_ownerships: Vec<Ownership>,
+    required_params: usize,
     params_element_type: Option<IrType>,
     return_type: IrType,
     return_ownership: Ownership,
@@ -363,6 +365,7 @@ struct DelegateSignature {
 struct TypeEnv {
     kinds: HashMap<String, TypeKind>,
     bases: HashMap<String, Vec<String>>,
+    static_fields: HashMap<(String, String), Expr>,
     enum_values: HashMap<(String, String), i64>,
     delegates: HashMap<String, DelegateSignature>,
     functions: HashMap<String, Vec<FunctionSignature>>,
@@ -395,6 +398,13 @@ impl TypedProgram {
         populate_constructor_signatures(program, &mut env);
         for ty in &program.types {
             for field in &ty.fields {
+                if field.is_static {
+                    if let Some(initializer) = &field.initializer {
+                        env.static_fields
+                            .insert((ty.name.clone(), field.name.clone()), initializer.clone());
+                    }
+                    continue;
+                }
                 let field_type = type_syntax_to_ir(&field.ty, &env);
                 let field_signature = FieldSignature {
                     ty: field_type.clone(),
@@ -667,6 +677,7 @@ fn populate_method_signatures(program: &Program, env: &mut TypeEnv) {
             let return_type = type_syntax_to_ir(&method.return_type, env);
             let return_ownership = ownership_for_declared_type_syntax(&method.return_type, env);
             let params_element_type = params_element_type(&method.params, env);
+            let required_params = method.params.iter().take_while(|param| param.default.is_none()).count();
             let key = (ty.name.clone(), method.name.clone());
             let signature = FunctionSignature {
                 generic_params: method
@@ -676,6 +687,7 @@ fn populate_method_signatures(program: &Program, env: &mut TypeEnv) {
                     .collect(),
                 params,
                 param_ownerships,
+                required_params,
                 params_element_type,
                 return_type,
                 return_ownership,
@@ -729,6 +741,7 @@ fn populate_constructor_signatures(program: &Program, env: &mut TypeEnv) {
                 base
             };
             let params_element_type = params_element_type(&constructor.params, env);
+            let required_params = constructor.params.iter().take_while(|param| param.default.is_none()).count();
             env.constructors
                 .entry(ty.name.clone())
                 .or_default()
@@ -740,6 +753,7 @@ fn populate_constructor_signatures(program: &Program, env: &mut TypeEnv) {
                         .collect(),
                     params,
                     param_ownerships,
+                    required_params,
                     params_element_type,
                     return_type: IrType::Void,
                     return_ownership: Ownership::Copy,
@@ -1020,10 +1034,11 @@ where
         if !seen.insert(key) {
             continue;
         }
-        if signature.params.len() == args.len() {
+        if args.len() >= signature.required_params && args.len() <= signature.params.len() {
             if let Some(ranks) = signature
                 .params
                 .iter()
+                .take(args.len())
                 .zip(args.iter())
                 .map(|(expected, arg)| rank(expected, arg))
                 .collect::<Option<Vec<_>>>()
@@ -1373,6 +1388,12 @@ fn ir_conversion_rank(expected: &IrType, arg: &TypedExpr, env: &TypeEnv) -> Opti
                 0
             },
         );
+    }
+    if matches!(
+        expected,
+        IrType::Unknown(name) if name == "object" || name == "System.Object"
+    ) || matches!(expected, IrType::Class(name) if name == "object" || name == "System.Object") {
+        return Some(20);
     }
     if let (
         IrType::Function {
@@ -2814,6 +2835,11 @@ fn function_signature(function: &Function, env: &TypeEnv, overloaded: bool) -> F
         .map(|param| ownership_for_declared_type_syntax(&param.ty, env))
         .collect::<Vec<_>>();
     let params_element_type = params_element_type(&function.params, env);
+    let required_params = function
+        .params
+        .iter()
+        .take_while(|param| param.default.is_none())
+        .count();
     let base_symbol = if function.generic_params.is_empty() {
         qualified_function_symbol_name(&function.namespace, &function.name)
     } else {
@@ -2836,6 +2862,7 @@ fn function_signature(function: &Function, env: &TypeEnv, overloaded: bool) -> F
         },
         params,
         param_ownerships,
+        required_params,
         params_element_type,
         return_type: type_syntax_to_ir(&function.return_type, env),
         return_ownership: ownership_for_declared_type_syntax(&function.return_type, env),
@@ -4077,6 +4104,11 @@ fn lower_function(
             .map(|param| param.name.clone())
             .collect(),
         is_extern: function.is_extern,
+        required_params: function
+            .params
+            .iter()
+            .take_while(|param| param.default.is_none())
+            .count(),
         return_ownership: ownership_for_declared_type_syntax(&function.return_type, env),
         return_type,
         params,
@@ -4864,6 +4896,11 @@ fn lower_typed_expr_with_expected(
                         signature.return_type.clone(),
                         signature.return_ownership.clone(),
                     ));
+                }
+                if let Some(initializer) =
+                    env.static_fields.get(&(current_type.clone(), name.clone()))
+                {
+                    return lower_typed_expr_with_expected(initializer, env, scopes, expected);
                 }
                 if let Some(kind) = env.kinds.get(name) {
                     let ty = match kind {
@@ -6934,6 +6971,30 @@ fn resolve_method_call(
             ))
         }
         (IrType::List(_), method_name) => {
+            let collection_resolution = match method_name {
+                "ToArray" => Some((
+                    IrType::Unknown("ToArray".to_string()),
+                    Ownership::Owned,
+                    name.to_string(),
+                    CallResolution::CollectionMethod,
+                )),
+                "Contains" => Some((
+                    IrType::Bool,
+                    Ownership::Copy,
+                    name.to_string(),
+                    CallResolution::CollectionMethod,
+                )),
+                "Add" | "Clear" => Some((
+                    IrType::Void,
+                    Ownership::Copy,
+                    name.to_string(),
+                    CallResolution::CollectionMethod,
+                )),
+                _ => None,
+            };
+            if let Some(result) = collection_resolution {
+                return Ok(result);
+            }
             if let Some(signature) = env.resolve_method_call("List", method_name, args)? {
                 return Ok((
                     signature.return_type.clone(),
@@ -6951,11 +7012,6 @@ fn resolve_method_call(
                     signature.symbol.clone(),
                     CallResolution::InstanceMethod,
                 ));
-            }
-            match method_name {
-                "ToArray" => unreachable!(),
-                "Contains" | "Add" | "Clear" => unreachable!(),
-                _ => {}
             }
             Ok((
                 IrType::Unknown(method_name.to_string()),
@@ -7040,14 +7096,7 @@ fn resolve_method_call(
         (IrType::Weak(_), "TryGetTarget") => {
             Ok((IrType::Bool, Ownership::Copy, name.to_string(), CallResolution::WeakMethod))
         }
-        (IrType::List(element), "ToArray") => Ok((
-            IrType::Array(Box::new(element.as_ref().clone())),
-            Ownership::Owned,
-            name.to_string(),
-            CallResolution::CollectionMethod,
-        )),
-        (IrType::List(_), "Contains")
-        | (IrType::Dictionary(_, _), "ContainsKey" | "Remove" | "TryGetValue") => {
+        (IrType::Dictionary(_, _), "ContainsKey" | "Remove" | "TryGetValue") => {
             Ok((
                 IrType::Bool,
                 Ownership::Copy,
@@ -7055,7 +7104,7 @@ fn resolve_method_call(
                 CallResolution::CollectionMethod,
             ))
         }
-        (IrType::List(_), "Add" | "Clear") | (IrType::Dictionary(_, _), "Add" | "Clear") => Ok((
+        (IrType::Dictionary(_, _), "Add" | "Clear") => Ok((
             IrType::Void,
             Ownership::Copy,
             name.to_string(),

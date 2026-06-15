@@ -169,7 +169,7 @@ enum StringComparison {
 }
 
 class Type {
-    public static Type[] EmptyTypes;
+    public static view<Type>[] EmptyTypes;
     public string Name;
     public string Namespace;
     public bool IsGenericType;
@@ -180,14 +180,14 @@ class Type {
     public bool IsArray;
     public string FullName;
     public string GenericTypeDefinitionName;
-    public Type[] GenericArguments;
-    public Type BaseType;
-    public Type ElementType;
+    public view<Type>[] GenericArguments;
+    public view<Type> BaseType;
+    public view<Type> ElementType;
     public PropertyInfo[] Properties;
     public MethodInfo[] Methods;
     public FieldInfo[] Fields;
     public ConstructorInfo[] Constructors;
-    public Type[] Interfaces;
+    public view<Type>[] Interfaces;
     
     Type GetGenericTypeDefinition() {
         Type definition = new Type();
@@ -203,16 +203,16 @@ class Type {
         definition.IsArray = this.IsArray;
         definition.BaseType = this.BaseType;
         definition.ElementType = this.ElementType;
-        definition.GenericArguments = default(Type[]);
+        definition.GenericArguments = default(view<Type>[]);
         definition.Properties = default(PropertyInfo[]);
         definition.Methods = default(MethodInfo[]);
         definition.Fields = default(FieldInfo[]);
         definition.Constructors = default(ConstructorInfo[]);
-        definition.Interfaces = default(Type[]);
+        definition.Interfaces = default(view<Type>[]);
         return definition;
     }
 
-    Type[] GetGenericArguments() {
+    view<Type>[] GetGenericArguments() {
         return this.GenericArguments;
     }
 
@@ -279,11 +279,11 @@ class Type {
         return this.Constructors;
     }
 
-    Type[] GetInterfaces() {
+    view<Type>[] GetInterfaces() {
         return this.Interfaces;
     }
 
-    Type GetElementType() {
+    view<Type> GetElementType() {
         return this.ElementType;
     }
 

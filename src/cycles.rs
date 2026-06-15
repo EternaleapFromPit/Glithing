@@ -15,6 +15,9 @@ pub(crate) fn check_reference_cycles(source: &str, program: &Program) -> Vec<Str
     let mut graph = HashMap::<String, Vec<String>>::new();
     for ty in &program.types {
         for field in &ty.fields {
+            if field.is_static {
+                continue;
+            }
             for target in owned_referenced_classes(&field.ty, &classes) {
                 graph
                     .entry(ty.name.clone())
@@ -26,6 +29,9 @@ pub(crate) fn check_reference_cycles(source: &str, program: &Program) -> Vec<Str
     let mut warnings = Vec::new();
     for ty in &program.types {
         for field in &ty.fields {
+            if field.is_static {
+                continue;
+            }
             let targets = owned_referenced_classes(&field.ty, &classes);
             if targets.is_empty() {
                 continue;

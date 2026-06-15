@@ -65,6 +65,7 @@ The current boundary is:
 - the public C emission path has been removed
 - `Rc<T>` and `sizeof(T)` are supported in the LLVM path where the current tests need them
 - the runtime and standard library still need further work before broader ASP.NET Core or EF Core compatibility is realistic
+- the current regression suite is green, including the Conduit integration-tests project compile gate through LLVM
 
 ## Recently completed
 
@@ -79,6 +80,7 @@ The current boundary is:
 - The RealWorld sample now has package surfaces for `Microsoft.AspNetCore.Authorization`, `Microsoft.AspNetCore.Mvc`, `Microsoft.AspNetCore.Mvc.Filters`, `Microsoft.AspNetCore.Mvc.ApplicationModels`, `Microsoft.AspNetCore.Http`, and `Microsoft.AspNetCore.Builder`, which closes the first compile-time package gaps discovered while trying to build the sample.
 - Open generic `typeof(IPipelineBehavior<,>)` style syntax now parses as an open-arity placeholder instead of failing immediately, which lets the sample's DI registrations reach semantic resolution.
 - `System.Linq.Enumerable` now has working `IEnumerable<T>` overloads for `Count`, `Any`, `First`, `FirstOrDefault`, `ToList`, and `ToArray` instead of returning placeholder defaults.
+- `System.Collections.Generic` and `System.Linq` now import `System` explicitly so shared exception helpers like `InvalidOperationException` resolve without false-positive layout warnings.
 - `System.Array.Empty<T>()` is present on the current core-library surface, and `bool.Parse` plus the `string` null helpers now compile without breaking unrelated package loads.
 - `int.Parse`, `int.TryParse`, `DateTime.Parse`, and `TimeSpan.FromMinutes` are now available on the current `System` surface without breaking unrelated package loads.
 - `System.IO.Path.GetExtension` and `System.IO.Path.GetFileName` now resolve to real native helpers instead of placeholder values.
@@ -87,6 +89,7 @@ The current boundary is:
 - Generated regex partial methods used by the ASP.NET sample now synthesize a real `Regex` construction, and the `System.Text.RegularExpressions` surface has a working narrow replace helper for the slug use case.
 - nullable value-type syntax now emits an explicit diagnostic instead of being silently treated as a reference-nullability hint
 - `System.Type` now lowers as a real reflection token with `GetMethod`, `GetProperty`, `GetProperties`, `GetGenericArguments`, and `GetGenericTypeDefinition` support for the current package-backed reflection slice, including open generic names such as `ICollection<>`.
+- `System.Type` ownership edges are modeled as views where needed so the reflection slice no longer trips cycle diagnostics on static metadata fields.
 - Borrow-check joins now ignore early-return branches so safe post-`if` and post-`switch` code is not poisoned by a branch that exits the function.
 - Loop-aware ownership joins now preserve the state at `break` / `continue` exits instead of flattening them into the loop base state, so loop-exiting branches no longer lose the ownership effects that occurred before the exit.
 - The ASP.NET helper surface now records model-state errors and exposes concrete `Ok` / `NotFound` results instead of null placeholders.
@@ -94,6 +97,7 @@ The current boundary is:
 - `Task.WhenAll(Task<T>[])` is now accepted on the LLVM path as part of the supported task-array slice.
 - `ConfigurationManager.Get<T>()` / `GetValue<T>()` now return typed defaults, `ModelBuilder.Entity(string)` returns a builder object, and the EF `SaveChangesAsync()` helper now produces a real completed task.
 - package-linker errors now include the source `using` line number that requested the missing package, which makes unresolved imports easier to localize.
+- package linking now uses exact namespace/package declarations instead of substring matches, which prevents `System.*` packages from accidentally shadowing `System`.
 - The README and this plan have been synchronized with the current compiler and package behavior.
 
 ## Next work items
@@ -103,10 +107,6 @@ The current boundary is:
 3. Replace any remaining compatibility stubs with real lowering or real diagnostics, especially in package surfaces that still return typed defaults as placeholders.
 4. Expand framework compatibility in small, test-driven slices where the runtime model already exists, and keep unsupported members on explicit diagnostics with rewrite guidance.
 5. Add additional sample/runtime acceptance work only where a concrete blocker remains after the current compile gates.
-6. Add a real `Nullable<T>` lowering path, lifted conversions, and value-type boxing/unboxing support for the supported scalar and struct subset; until then, keep value-type `T?` uses on explicit diagnostics.
-7. Add the missing `Microsoft.AspNetCore.Authorization` package surface so controller-level `[Authorize]` attributes in the RealWorld sample and similar ASP.NET code can resolve during package import.
-8. Restore full project-graph execution for the RealWorld sample and its integration tests so `Conduit` and `Conduit.IntegrationTests` can be compiled together without manual bundle surgery.
-9. Add a native entrypoint synthesis path for top-level program files and test assemblies; native `--emit-exe` currently reaches the linker but still fails because the compiled LLVM module does not export `main`.
 
 ## C# Standard v7 Gap Analysis
 
@@ -143,9 +143,9 @@ These standard sections depend on raw memory access or GC-style runtime behavior
 
 The next safe expansion path is to continue implementing the language and framework slices listed above, while keeping the unsafe/GC-dependent sections as explicit diagnostics or limited compatibility shims instead of silent lowering.
 
-The current RealWorld blocker is now concrete: the sample still needs a real project/package graph for `Conduit.*` namespaces, and the native pipeline still needs an emitted entrypoint for top-level programs and xUnit assemblies before `--emit-exe` can produce something runnable.
+The current RealWorld blocker is narrower now: the LLVM compile gate is green, so the next acceptance step is native entrypoint synthesis and smoke execution rather than more package import surgery.
 
-The nullable value-type and boxing/unboxing slice is still open. The compiler now warns on value-type `T?`, but `Nullable<T>`, lifted conversions, and value-type boxing/unboxing still need a real runtime/type-system implementation before they can be called supported.
+The nullable value-type and boxing/unboxing slice is currently implemented for the supported subset and covered by tests; further widening will be incremental rather than foundational.
 
 ### Unsupported syntax policy
 

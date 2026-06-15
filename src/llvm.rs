@@ -72,6 +72,7 @@ struct LlValue {
 struct LlFunctionSig {
     return_type: LlType,
     params: Vec<LlType>,
+    required_params: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +170,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Ptr,
                 params: vec![LlType::Ptr],
+                required_params: 1,
             },
         );
         emitter.functions.insert(
@@ -176,6 +178,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Void,
                 params: vec![LlType::Ptr, LlType::Ptr],
+                required_params: 2,
             },
         );
         emitter.functions.insert(
@@ -183,6 +186,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Ptr,
                 params: vec![LlType::Ptr, LlType::I64],
+                required_params: 2,
             },
         );
         emitter.functions.insert(
@@ -190,6 +194,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Ptr,
                 params: vec![LlType::Ptr, LlType::Ptr],
+                required_params: 2,
             },
         );
         emitter.functions.insert(
@@ -197,6 +202,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Ptr,
                 params: vec![LlType::Ptr],
+                required_params: 1,
             },
         );
         emitter.functions.insert(
@@ -204,6 +210,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Ptr,
                 params: vec![LlType::Ptr],
+                required_params: 1,
             },
         );
         emitter.functions.insert(
@@ -211,6 +218,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Ptr,
                 params: vec![LlType::Ptr, LlType::Ptr, LlType::Ptr],
+                required_params: 3,
             },
         );
         emitter.functions.insert(
@@ -218,6 +226,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Ptr,
                 params: vec![LlType::Ptr],
+                required_params: 1,
             },
         );
         emitter.functions.insert(
@@ -225,6 +234,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Ptr,
                 params: vec![LlType::Ptr, LlType::Ptr],
+                required_params: 2,
             },
         );
         emitter.functions.insert(
@@ -232,6 +242,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::I1,
                 params: vec![LlType::Ptr, LlType::Ptr],
+                required_params: 2,
             },
         );
         emitter.functions.insert(
@@ -239,6 +250,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Ptr,
                 params: vec![LlType::Ptr, LlType::Ptr],
+                required_params: 2,
             },
         );
         emitter.functions.insert(
@@ -246,6 +258,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Ptr,
                 params: vec![],
+                required_params: 0,
             },
         );
         emitter.functions.insert(
@@ -253,6 +266,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Void,
                 params: vec![LlType::Ptr],
+                required_params: 1,
             },
         );
         emitter.functions.insert(
@@ -260,6 +274,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Void,
                 params: vec![LlType::I64],
+                required_params: 1,
             },
         );
         emitter.functions.insert(
@@ -267,6 +282,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Void,
                 params: vec![LlType::Double],
+                required_params: 1,
             },
         );
         emitter.functions.insert(
@@ -274,6 +290,7 @@ impl LlvmEmitter {
             LlFunctionSig {
                 return_type: LlType::Void,
                 params: vec![LlType::I1],
+                required_params: 1,
             },
         );
         for ty in &program.types {
@@ -334,6 +351,7 @@ impl LlvmEmitter {
                     .iter()
                     .map(|param| llvm_ir_type(&param.ty))
                     .collect(),
+                required_params: function.required_params,
             },
         );
     }
@@ -876,6 +894,11 @@ impl LlvmEmitter {
                         .iter()
                         .map(|param| llvm_type(&param.ty))
                         .collect(),
+                    required_params: function
+                        .params
+                        .iter()
+                        .take_while(|param| param.default.is_none())
+                        .count(),
                 },
             );
         }
@@ -2841,13 +2864,27 @@ impl LlvmEmitter {
         for arg in args {
             values.push(self.emit_typed_expr(arg)?);
         }
+        if values.len() < signature.params.len() && values.len() >= signature.required_params {
+            for expected in signature.params.iter().skip(values.len()) {
+                values.push(LlValue {
+                    value: expected.default_value().to_string(),
+                    ty: expected.clone(),
+                });
+            }
+        }
+        if values.is_empty()
+            && signature.params.len() == args.len() + 1
+            && (name.contains("_get_") || name.starts_with("get_"))
+            && self.vars.contains_key("this")
+        {
+            if let Some(this) = self.vars.get("this").cloned() {
+                values.push(LlValue {
+                    value: this.ptr,
+                    ty: this.ty,
+                });
+            }
+        }
         if values.len() != signature.params.len() {
-            eprintln!(
-                "call-arity debug: name={name} resolved={resolved_name} values={} params={} generic_args={:?}",
-                values.len(),
-                signature.params.len(),
-                generic_args
-            );
             return Err(format!(
                 "LLVM TIR backend: call to '{name}' expected {} arguments but got {}",
                 signature.params.len(),
@@ -4594,15 +4631,6 @@ impl LlvmEmitter {
                 LlType::Double => IrType::Double,
                 _ => IrType::Unknown("boxed".to_string()),
             });
-        }
-        if target == &LlType::Void {
-            eprintln!(
-                "cast-to-void debug: value_ty={:?} value={} target={:?}\n{:?}",
-                value.ty,
-                value.value,
-                target,
-                std::backtrace::Backtrace::force_capture()
-            );
         }
         Err(format!(
             "LLVM backend: cannot cast {} to {}",

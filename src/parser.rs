@@ -482,6 +482,8 @@ impl Parser {
                 fields.push(FieldDef {
                     name: param.name.clone(),
                     ty: param.ty.clone(),
+                    is_static: false,
+                    initializer: None,
                 });
             }
             constructors.push(Constructor {
@@ -675,17 +677,29 @@ impl Parser {
                 });
             } else if self.at(&TokenKind::LBrace) {
                 self.parse_auto_property_body()?;
+                let mut initializer = None;
                 if self.match_kind(&TokenKind::Eq) {
-                    let _initializer = self.parse_expr()?;
+                    initializer = Some(self.parse_expr()?);
                     self.expect(TokenKind::Semi)?;
                 }
-                fields.push(FieldDef { name, ty });
+                fields.push(FieldDef {
+                    name,
+                    ty,
+                    is_static: member_modifiers.is_static,
+                    initializer,
+                });
             } else {
+                let mut initializer = None;
                 if self.match_kind(&TokenKind::Eq) {
-                    let _initializer = self.parse_expr()?;
+                    initializer = Some(self.parse_expr()?);
                 }
                 self.expect(TokenKind::Semi)?;
-                fields.push(FieldDef { name, ty });
+                fields.push(FieldDef {
+                    name,
+                    ty,
+                    is_static: member_modifiers.is_static,
+                    initializer,
+                });
             }
         }
         self.expect(TokenKind::RBrace)?;
