@@ -1,7 +1,7 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::io::{self, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 type DelegateFn = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
@@ -12,6 +12,7 @@ struct TestEntry {
     test_name: String,
     fn_ptr: DelegateFn,
     env_ptr: *mut c_void,
+    delegate_ptr: *mut c_void,
 }
 
 unsafe impl Send for TestEntry {}
@@ -22,8 +23,10 @@ static FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(C)]
 struct DelegateAbi {
+    ref_count: i64,
     fn_ptr: DelegateFn,
     env_ptr: *mut c_void,
+    destroy_ptr: *mut c_void,
 }
 
 fn tests() -> &'static Mutex<Vec<TestEntry>> {
@@ -76,6 +79,7 @@ pub unsafe extern "C" fn XUnit_AddTest(
         test_name: c_string(test_name),
         fn_ptr,
         env_ptr,
+        delegate_ptr: test as *mut c_void,
     };
     log_line(format_args!(
         "[xUnit] AddTest strings {}.{}",
@@ -107,6 +111,12 @@ pub unsafe extern "C" fn XUnit_RunAllTests() {
         } else {
             failed += 1;
             log_line(format_args!("[xUnit] FAIL"));
+        }
+    }
+    tests().lock().unwrap().clear();
+    for entry in &snapshot {
+        if !entry.delegate_ptr.is_null() {
+            unsafe { release_registered_delegate(entry.delegate_ptr) };
         }
     }
 
@@ -166,4 +176,31 @@ pub unsafe extern "C" fn tracked_free(ptr: *mut c_void) {
 
 unsafe extern "C" fn dummy_delegate(_env: *mut c_void) -> *mut c_void {
     std::ptr::null_mut()
+}
+
+#[repr(C)]
+struct OwnedDelegateAbi {
+    ref_count: AtomicI64,
+    fn_ptr: DelegateFn,
+    env_ptr: *mut c_void,
+    destroy_ptr: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
+unsafe fn release_registered_delegate(value: *mut c_void) {
+    if value.is_null() {
+        return;
+    }
+    let delegate = value as *mut OwnedDelegateAbi;
+    let refs = (*delegate).ref_count.load(Ordering::SeqCst);
+    if refs >= 1_000_000 {
+        return;
+    }
+    let previous = (*delegate).ref_count.fetch_sub(1, Ordering::SeqCst);
+    if previous != 1 {
+        return;
+    }
+    if let Some(destroy) = (*delegate).destroy_ptr {
+        destroy((*delegate).env_ptr);
+    }
+    free(value);
 }

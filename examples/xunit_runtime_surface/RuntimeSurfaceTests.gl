@@ -1,0 +1,67 @@
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using Xunit;
+
+public delegate int IntTransformer(int value);
+
+int RuntimeSurfaceComputeAnswer() {
+    return 42;
+}
+
+public static class RuntimeSurfaceHelpers {
+    public static int Apply(IntTransformer transformer, int value) {
+        return transformer(value);
+    }
+
+    public static int ComputeAnswer() {
+        return 42;
+    }
+
+    public static List<int> BuildValues() {
+        List<int> values = new List<int>();
+        values.Add(1);
+        values.Add(3);
+        values.Add(5);
+        return values;
+    }
+}
+
+public class RuntimeSurfaceTests {
+    [Fact]
+    public void ListAndEnumerator_SurfaceWorks() {
+        List<int> values = RuntimeSurfaceHelpers.BuildValues();
+        int total = 0;
+        foreach (int value in values) {
+            total = total + value;
+        }
+
+        Assert.Equal(3, values.Count);
+        Assert.Equal(9, total);
+    }
+
+    [Fact]
+    public void DelegateAndLambda_SurfaceWorks() {
+        int delta = 1;
+        int result = RuntimeSurfaceHelpers.Apply(x => x + delta, 41);
+        Assert.Equal(42, result);
+    }
+
+    [Fact]
+    public void Task_SurfaceWorks() {
+        Task<int> task = Task.Run(RuntimeSurfaceComputeAnswer);
+        Assert.Equal(42, task.Result);
+        Assert.Equal(42, task.GetAwaiter().GetResult());
+    }
+
+    [Fact]
+    public void LinqSurfaceWorks() {
+        List<int> values = RuntimeSurfaceHelpers.BuildValues();
+        int[] copy = values.ToArray();
+
+        Assert.True(values.Any());
+        Assert.Equal(1, values.First());
+        Assert.Equal(3, values.Count());
+        Assert.Equal(5, copy[2]);
+    }
+}

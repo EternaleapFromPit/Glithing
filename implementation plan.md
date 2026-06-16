@@ -104,6 +104,8 @@ The current boundary is:
 - package-linker errors now include the source `using` line number that requested the missing package, which makes unresolved imports easier to localize.
 - package linking now uses exact namespace/package declarations instead of substring matches, which prevents `System.*` packages from accidentally shadowing `System`.
 - The README and this plan have been synchronized with the current compiler and package behavior.
+- Native xUnit execution is now part of the example acceptance path for the stable sorting fixture, and the broader runtime-surface fixture is kept as a `.gl` source-level LLVM gate until the remaining task/runtime-accounting gaps are closed.
+- The testing split is now explicit: Rust tests keep the compiler/product gates (`.csproj`, package linking, LLVM/native output, diagnostics), while broader semantic coverage moves into `.gl` / `.cs` fixtures that the compiler can compile directly and, where the runtime slice is stable, execute natively.
 
 ## Next work items
 

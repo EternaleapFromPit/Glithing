@@ -432,6 +432,11 @@ pub unsafe extern "C" fn System_Array_Empty_Native() -> *mut std::ffi::c_void {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn System_Array_Empty_Native__g1() -> *mut std::ffi::c_void {
+    System_Array_Empty_Native()
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn System_String_ToLower_Native(value: *const c_char) -> *mut c_char {
     if value.is_null() {
         return std::ptr::null_mut();

@@ -69,6 +69,7 @@ Current implemented subset:
 - default CLI output builds a native executable when no explicit output is requested
 - NuGet package emission produces LLVM-native assets and linked source metadata
 - source-level packages with `package Name;` and `native "C source";`
+- source directories and `.csproj` files can be used as compiler inputs; `.csproj` support is source-oriented, not full MSBuild parity
 
 `var x = value;` is accepted as a conversion-friendly spelling for `let mut x = value;`.
 
@@ -205,6 +206,12 @@ cargo run -- examples\llvm_simple.gl --emit-exe out.exe
 .\out.exe
 ```
 
+Testing strategy:
+
+- most language/runtime semantics should be exercised in `.gl` / `.cs` source fixtures, especially xUnit-style suites under [examples/xunit_sorting](/D:/Repos/Glitching/examples/xunit_sorting) and [examples/xunit_runtime_surface](/D:/Repos/Glitching/examples/xunit_runtime_surface)
+- Rust-side tests should stay focused on compiler/product acceptance gates such as `.csproj` loading, package linking, LLVM/native emission, diagnostics, and native process execution
+- today the sorting fixture is the native xUnit execution smoke path; the broader runtime-surface fixture is kept as a source-level LLVM compile gate while task/runtime gaps are still being closed
+
 LLVM-only commands use the native LLVM toolchain. On Windows, the compiler searches
 `PATH`, `GLITCH_LLVM_BIN`, and `C:\Program Files\LLVM\bin`. It also discovers installed
 Visual Studio 2022 MSVC and Windows SDK libraries for native linking.
@@ -267,10 +274,11 @@ Important remaining safety boundaries:
 
 - possible reference cycles produce warnings with `Weak<T>` rewrite proposals, but unchanged
   source can still accept cycle-leak risk;
-- arrays, lists, and dictionaries release direct string/class elements, but recursively nested
-  collection element graphs still need complete drop glue;
-- dynamic LLVM strings use deterministic reference counting; the current allocation registry is
-  single-threaded and must become synchronized before concurrent request execution;
+- arrays, lists, and dictionaries now release nested owned collection elements in the current
+  recursive-drop slice, but broader arbitrary shared graph ownership is still not automatically
+  leak-free;
+- dynamic LLVM strings use deterministic reference counting, and the allocation registry is now
+  synchronized for the current concurrent-runtime slice;
 - the socket host is implemented in the linked Rust runtime and is currently a synchronous
   HTTP/1.1 loop;
 - C-only `native` package blocks remain legacy-backend-only;

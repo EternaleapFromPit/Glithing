@@ -58,37 +58,21 @@ pub(crate) fn emit_native_executable(
         OsString::from("ir"),
         OsString::from(&ll_path),
     ];
+    let runtime_library = find_runtime_library()?;
     args.push(OsString::from("-o"));
     args.push(OsString::from(output_path));
-    let links_rust_runtime = llvm_ir.contains("call void @GlitchRestHost_Run(")
-        || llvm_ir.contains("System_IO_File_ReadAllText")
-        || llvm_ir.contains("System_IO_File_WriteAllText")
-        || llvm_ir.contains("System_String_Substring_Native")
-        || llvm_ir.contains("System_String_TrimEnd_Native")
-        || llvm_ir.contains("System_String_ToLower_Native")
-        || llvm_ir.contains("System_String_ToLowerInvariant_Native")
-        || llvm_ir.contains("System_String_Replace_Native")
-        || llvm_ir.contains("System_String_Trim_Native")
-        || llvm_ir.contains("System_String_Split_Native")
-        || llvm_ir.contains("System_String_Contains_Native")
-        || llvm_ir.contains("System_String_TrimStart_Native")
-        || llvm_ir.contains("System_Array_Empty_Native");
-    if links_rust_runtime {
-        args.push(OsString::from("-x"));
-        args.push(OsString::from("none"));
-        args.push(find_runtime_library()?.into_os_string());
-    }
+    args.push(OsString::from("-x"));
+    args.push(OsString::from("none"));
+    args.push(runtime_library.into_os_string());
     if cfg!(windows) {
         args.push(OsString::from("-lws2_32"));
         args.push(OsString::from("-Xlinker"));
         args.push(OsString::from("/subsystem:console"));
-        if links_rust_runtime {
-            for library in ["kernel32", "ntdll", "userenv", "dbghelp"] {
-                args.push(OsString::from(format!("-l{library}")));
-            }
-            args.push(OsString::from("-Xlinker"));
-            args.push(OsString::from("/defaultlib:msvcrt"));
+        for library in ["kernel32", "ntdll", "userenv", "dbghelp"] {
+            args.push(OsString::from(format!("-l{library}")));
         }
+        args.push(OsString::from("-Xlinker"));
+        args.push(OsString::from("/defaultlib:msvcrt"));
         let mut command = Command::new(&clang);
         command.args(&args);
         configure_windows_linker_environment(&mut command)?;
@@ -197,6 +181,15 @@ fn find_runtime_library() -> Result<PathBuf, String> {
     } else {
         "libglitchc.a"
     };
+    let managed_target = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target-runtime-link");
+    let managed_candidate = managed_target.join("debug").join(file_name);
+    if runtime_library_is_stale(&managed_candidate) {
+        build_runtime_library(&managed_target)?;
+    }
+    if managed_candidate.is_file() {
+        return Ok(managed_candidate);
+    }
     let mut candidates = Vec::new();
     if let Ok(executable) = env::current_exe() {
         if let Some(directory) = executable.parent() {
@@ -213,6 +206,51 @@ fn find_runtime_library() -> Result<PathBuf, String> {
                 "Rust native runtime '{file_name}' was not found; build glitchc first or set GLITCH_RUNTIME_LIB"
             )
         })
+}
+
+fn runtime_library_is_stale(candidate: &Path) -> bool {
+    let candidate_time = candidate
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok();
+    let Some(candidate_time) = candidate_time else {
+        return true;
+    };
+    runtime_source_dependencies()
+        .into_iter()
+        .filter_map(|path| path.metadata().ok().and_then(|m| m.modified().ok()))
+        .any(|modified| modified > candidate_time)
+}
+
+fn runtime_source_dependencies() -> Vec<PathBuf> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    vec![
+        root.join("Cargo.toml"),
+        root.join("src").join("lib.rs"),
+        root.join("src").join("runtime.rs"),
+        root.join("src").join("xunit_runner.rs"),
+    ]
+}
+
+fn build_runtime_library(target_dir: &Path) -> Result<(), String> {
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let mut command = Command::new(&cargo);
+    command.current_dir(env!("CARGO_MANIFEST_DIR"));
+    command.arg("build");
+    command.arg("--lib");
+    command.arg("--target-dir");
+    command.arg(target_dir);
+    let output = command
+        .output()
+        .map_err(|err| format!("failed to run cargo build --lib for the native runtime: {err}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to build Rust native runtime: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
 }
 
 fn require_llvm_tool(name: &str) -> Result<PathBuf, String> {

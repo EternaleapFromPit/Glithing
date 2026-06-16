@@ -359,11 +359,29 @@ fn compiles_aspnet_load_test_example_through_llvm() {
 
 #[test]
 fn runs_llvm_simple_example_natively() {
-    let source = include_str!("../examples/llvm_simple.gl");
-    let compiled =
-        compile_source_with_options(source, true, false).expect("llvm simple example should compile to LLVM IR");
-    let llvm_ir = compiled.llvm_ir().expect("LLVM IR should be available");
-    let output_exe = temp_smoke_executable("llvm-simple");
+    let output_exe = emit_native_executable_from_source("llvm-simple", include_str!("../examples/llvm_simple.gl"));
+    let output = run_native_executable(&output_exe);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("42"));
+}
+
+fn emit_native_executable_from_source(stem: &str, source: &str) -> std::path::PathBuf {
+    let compiled = compile_source_with_options(source, true, false)
+        .expect("source should compile to LLVM IR");
+    emit_native_executable_from_ir(stem, compiled.llvm_ir().expect("LLVM IR should be available"))
+}
+
+fn emit_native_executable_from_path(stem: &str, input: &str) -> std::path::PathBuf {
+    let source = read_input_source(input).expect("input source should be readable");
+    let compiled = run_on_large_stack(move || compile_source_with_options(&source, true, false))
+        .expect("input path should compile to LLVM IR");
+    emit_native_executable_from_ir(stem, compiled.llvm_ir().expect("LLVM IR should be available"))
+}
+
+fn emit_native_executable_from_ir(stem: &str, llvm_ir: &str) -> std::path::PathBuf {
+    let output_exe = temp_smoke_executable(stem);
     let _ = fs::remove_file(&output_exe);
     crate::toolchain::emit_native_executable(
         llvm_ir,
@@ -371,17 +389,16 @@ fn runs_llvm_simple_example_natively() {
             .to_str()
             .expect("temporary smoke path should be valid UTF-8"),
     )
-    .expect("llvm simple example should emit a native executable");
+    .expect("native executable should be emitted");
+    output_exe
+}
 
-    let output = Command::new(&output_exe)
+fn run_native_executable(path: &std::path::Path) -> std::process::Output {
+    Command::new(path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("should run the native example");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("42"));
+        .expect("native executable should run")
 }
 
 fn temp_smoke_executable(stem: &str) -> std::path::PathBuf {
@@ -3872,14 +3889,26 @@ fn auto_discovers_csharp_xunit_fact_methods_and_runs_them() {
 }
 
 #[test]
-fn compiles_gl_xunit_sorting_fixture_directory() {
-    let llvm_ir = compile_llvm_ir_from_path("examples/xunit_sorting")
-        .expect("GL sorting + xUnit fixture directory should compile through LLVM");
+fn runs_gl_xunit_sorting_fixture_directory_natively() {
+    let output_exe = emit_native_executable_from_path("xunit-sorting", "examples/xunit_sorting");
+    let output = run_native_executable(&output_exe);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[xUnit] Completed: 4 passed, 0 failed."));
+    assert!(stderr.contains("[xUnit] Memory tracking: 0 mallocs, 0 frees. Clean."));
+    assert!(stderr.contains("BubbleSort_OrdersValues"));
+    assert!(stderr.contains("BinarySearch_ReturnsMinusOneForMissingValue"));
+}
+
+#[test]
+fn compiles_gl_xunit_runtime_surface_fixture_directory_through_llvm() {
+    let llvm_ir = compile_llvm_ir_from_path("examples/xunit_runtime_surface")
+        .expect("GL runtime-surface xUnit fixture directory should compile through LLVM");
 
     assert!(llvm_ir.contains("XUnit_AddTest"));
-    assert!(llvm_ir.contains("BubbleSort_OrdersValues"));
-    assert!(llvm_ir.contains("BinarySearch_ReturnsMinusOneForMissingValue"));
-    assert!(llvm_ir.contains("NumberAlgorithms"));
+    assert!(llvm_ir.contains("ListAndEnumerator_SurfaceWorks"));
+    assert!(llvm_ir.contains("glitch_lambda_0"));
+    assert!(llvm_ir.contains("glitch_delegate_wrapper_RuntimeSurfaceComputeAnswer"));
     assert!(llvm_ir.contains("RunAllTests"));
 }
 
