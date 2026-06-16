@@ -1,7 +1,7 @@
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -14,6 +14,21 @@ use std::time::Duration;
 // concurrent request threads do not corrupt the registry.
 
 static STRING_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static LIVE_ALLOCATIONS: AtomicI64 = AtomicI64::new(0);
+
+#[no_mangle]
+pub extern "C" fn GlitchLiveAllocations_Add(delta: i64) -> i64 {
+    if delta >= 0 {
+        LIVE_ALLOCATIONS.fetch_add(delta, Ordering::SeqCst) + delta
+    } else {
+        LIVE_ALLOCATIONS.fetch_sub((-delta) as i64, Ordering::SeqCst) + delta
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn GlitchLiveAllocations_Load() -> i64 {
+    LIVE_ALLOCATIONS.load(Ordering::SeqCst)
+}
 
 // SAFETY: called from LLVM IR before any access to the string registry.
 // Returns an opaque token (the raw MutexGuard pointer) that the caller must

@@ -354,7 +354,7 @@ fn compiles_aspnet_load_test_example_through_llvm() {
 
     assert!(llvm_ir.contains("WebApplication_Handle"));
     assert!(llvm_ir.contains("System_Console_WriteLine_I64"));
-    assert!(llvm_ir.contains("glitch_live_allocations"));
+    assert!(llvm_ir.contains("GlitchLiveAllocations_Load"));
 }
 
 #[test]
@@ -399,6 +399,15 @@ fn run_native_executable(path: &std::path::Path) -> std::process::Output {
         .stderr(Stdio::piped())
         .output()
         .expect("native executable should run")
+}
+
+fn run_native_executable_with_leak_report(path: &std::path::Path) -> std::process::Output {
+    Command::new(path)
+        .env("GLITCH_REPORT_LEAKS", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("native executable should run with leak reporting enabled")
 }
 
 fn temp_smoke_executable(stem: &str) -> std::path::PathBuf {
@@ -1907,7 +1916,7 @@ fn emits_llvm_owned_generic_collections_and_counted_cleanup() {
     assert!(llvm_ir.contains("%glitch.dict = type { i64, i64, ptr, ptr }"));
     assert!(llvm_ir.contains("call ptr @glitch_realloc"));
     assert!(llvm_ir.contains("call void @glitch_free"));
-    assert!(llvm_ir.contains("@glitch_live_allocations"));
+    assert!(llvm_ir.contains("@GlitchLiveAllocations_Add"));
 }
 
 #[test]
@@ -3891,13 +3900,288 @@ fn auto_discovers_csharp_xunit_fact_methods_and_runs_them() {
 #[test]
 fn runs_gl_xunit_sorting_fixture_directory_natively() {
     let output_exe = emit_native_executable_from_path("xunit-sorting", "examples/xunit_sorting");
-    let output = run_native_executable(&output_exe);
+    let output = run_native_executable_with_leak_report(&output_exe);
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={stdout}\nstderr={stderr}",
+        output.status.code()
+    );
+    assert!(stdout.contains("0"));
     assert!(stderr.contains("[xUnit] Completed: 4 passed, 0 failed."));
     assert!(stderr.contains("[xUnit] Memory tracking: 0 mallocs, 0 frees. Clean."));
     assert!(stderr.contains("BubbleSort_OrdersValues"));
     assert!(stderr.contains("BinarySearch_ReturnsMinusOneForMissingValue"));
+}
+
+#[test]
+fn native_single_bubblesort_xunit_fact_is_leak_free() {
+    let source = r#"
+            using System.Collections.Generic;
+            using Xunit;
+
+            public static class NumberAlgorithms {
+                public static List<int> Clone(List<int> source) {
+                    List<int> copy = new List<int>();
+                    int index = 0;
+                    while (index < source.Count) {
+                        copy.Add(source[index]);
+                        index = index + 1;
+                    }
+                    return copy;
+                }
+
+                public static List<int> BubbleSort(List<int> source) {
+                    List<int> values = Clone(source);
+                    int outer = 0;
+                    while (outer < values.Count) {
+                        int inner = 0;
+                        while (inner + 1 < values.Count - outer) {
+                            if (values[inner] > values[inner + 1]) {
+                                int temp = values[inner];
+                                values[inner] = values[inner + 1];
+                                values[inner + 1] = temp;
+                            }
+                            inner = inner + 1;
+                        }
+                        outer = outer + 1;
+                    }
+                    return values;
+                }
+
+                public static bool IsSorted(List<int> values) {
+                    int index = 0;
+                    while (index + 1 < values.Count) {
+                        if (values[index] > values[index + 1]) {
+                            return false;
+                        }
+                        index = index + 1;
+                    }
+                    return true;
+                }
+            }
+
+            public class NumberAlgorithmsTests {
+                private static List<int> BuildSample() {
+                    List<int> values = new List<int>();
+                    values.Add(5);
+                    values.Add(1);
+                    values.Add(4);
+                    values.Add(2);
+                    values.Add(3);
+                    return values;
+                }
+
+                [Fact]
+                public void BubbleSort_OrdersValues() {
+                    List<int> values = BuildSample();
+                    List<int> sorted = NumberAlgorithms.BubbleSort(values);
+
+                    Assert.Equal(5, values[0]);
+                    Assert.Equal(1, sorted[0]);
+                    Assert.Equal(2, sorted[1]);
+                    Assert.Equal(3, sorted[2]);
+                    Assert.Equal(4, sorted[3]);
+                    Assert.Equal(5, sorted[4]);
+                    Assert.True(NumberAlgorithms.IsSorted(sorted));
+                }
+            }
+
+            public static void main() {
+                RunAllTests();
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("xunit-bubblesort-one", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={stdout}\nstderr={stderr}",
+        output.status.code()
+    );
+    assert!(stderr.contains("[xUnit] Completed: 1 passed, 0 failed."));
+}
+
+#[test]
+fn native_single_binarysearch_xunit_fact_is_leak_free() {
+    let source = r#"
+            using System.Collections.Generic;
+            using Xunit;
+
+            public static class NumberAlgorithms {
+                public static List<int> Clone(List<int> source) {
+                    List<int> copy = new List<int>();
+                    int index = 0;
+                    while (index < source.Count) {
+                        copy.Add(source[index]);
+                        index = index + 1;
+                    }
+                    return copy;
+                }
+
+                public static List<int> BubbleSort(List<int> source) {
+                    List<int> values = Clone(source);
+                    int outer = 0;
+                    while (outer < values.Count) {
+                        int inner = 0;
+                        while (inner + 1 < values.Count - outer) {
+                            if (values[inner] > values[inner + 1]) {
+                                int temp = values[inner];
+                                values[inner] = values[inner + 1];
+                                values[inner + 1] = temp;
+                            }
+                            inner = inner + 1;
+                        }
+                        outer = outer + 1;
+                    }
+                    return values;
+                }
+
+                public static int BinarySearch(List<int> sorted, int value) {
+                    int left = 0;
+                    int right = sorted.Count - 1;
+                    while (left <= right) {
+                        int middle = (left + right) / 2;
+                        int current = sorted[middle];
+                        if (current == value) {
+                            return middle;
+                        }
+                        if (current < value) {
+                            left = middle + 1;
+                        } else {
+                            right = middle - 1;
+                        }
+                    }
+                    return -1;
+                }
+            }
+
+            public class NumberAlgorithmsTests {
+                private static List<int> BuildSample() {
+                    List<int> values = new List<int>();
+                    values.Add(5);
+                    values.Add(1);
+                    values.Add(4);
+                    values.Add(2);
+                    values.Add(3);
+                    return values;
+                }
+
+                [Fact]
+                public void BinarySearch_FindsExistingValue() {
+                    List<int> sorted = NumberAlgorithms.BubbleSort(BuildSample());
+                    Assert.Equal(3, NumberAlgorithms.BinarySearch(sorted, 4));
+                    Assert.Equal(0, NumberAlgorithms.BinarySearch(sorted, 1));
+                    Assert.Equal(4, NumberAlgorithms.BinarySearch(sorted, 5));
+                }
+            }
+
+            public static void main() {
+                RunAllTests();
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("xunit-binarysearch-one", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={stdout}\nstderr={stderr}",
+        output.status.code()
+    );
+    assert!(stderr.contains("[xUnit] Completed: 1 passed, 0 failed."));
+}
+
+#[test]
+fn native_call_argument_temporary_collections_do_not_leak() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            List<int> Build() {
+                List<int> values = new List<int>();
+                values.Add(5);
+                values.Add(1);
+                return values;
+            }
+
+            List<int> Clone(List<int> source) {
+                List<int> copy = new List<int>();
+                int index = 0;
+                while (index < source.Count) {
+                    copy.Add(source[index]);
+                    index = index + 1;
+                }
+                return copy;
+            }
+
+            fn main() {
+                List<int> sorted = Clone(Build());
+                print(sorted.Count);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("native-call-temp-collections", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("2"));
+    assert!(stdout.contains("0"));
+}
+
+#[test]
+fn native_lambda_call_arguments_release_after_invoke() {
+    let source = r#"
+            public delegate int Work();
+
+            int Apply(Work work) {
+                return work();
+            }
+
+            fn main() {
+                int delta = 1;
+                int answer = Apply(() => delta);
+                print(answer);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("native-call-temp-lambda", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("0"));
+}
+
+#[test]
+fn native_task_run_static_call_releases_delegate_temporary() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int Compute() {
+                return 42;
+            }
+
+            fn main() {
+                Task<int> task = Task.Run(Compute);
+                print(task.Result);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("native-task-run-static", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("42"));
+    assert!(stdout.contains("0"));
 }
 
 #[test]
@@ -4157,9 +4441,11 @@ fn emits_thread_safe_allocation_registry_for_llvm_runtime() {
         .expect("should read memory_leak_tests.gl");
     let llvm_ir = compile_llvm_ir(&source).expect("memory leak tests should compile to LLVM IR");
 
-    assert!(llvm_ir.contains("atomicrmw add ptr @glitch_live_allocations"));
-    assert!(llvm_ir.contains("atomicrmw sub ptr @glitch_live_allocations"));
-    assert!(llvm_ir.contains("load atomic i64, ptr @glitch_live_allocations seq_cst"));
+    assert!(llvm_ir.contains("declare i64 @GlitchLiveAllocations_Add(i64)"));
+    assert!(llvm_ir.contains("declare i64 @GlitchLiveAllocations_Load()"));
+    assert!(llvm_ir.contains("call i64 @GlitchLiveAllocations_Add(i64 1)"));
+    assert!(llvm_ir.contains("call i64 @GlitchLiveAllocations_Add(i64 -1)"));
+    assert!(llvm_ir.contains("call i64 @GlitchLiveAllocations_Load()"));
 }
 
 #[test]

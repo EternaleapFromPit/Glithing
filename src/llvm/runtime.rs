@@ -28,8 +28,18 @@ pub(super) fn finish_module(emitter: &LlvmEmitter) -> Result<String, String> {
         out.push_str("declare void @System_Console_WriteLine_Bool(i1)\n");
         out.push_str("declare ptr @GlitchString_Lock()\n");
         out.push_str("declare void @GlitchString_Unlock(ptr)\n");
-        out.push_str("@glitch_live_allocations = internal global i64 0\n");
+        out.push_str("declare i64 @GlitchLiveAllocations_Add(i64)\n");
+        out.push_str("declare i64 @GlitchLiveAllocations_Load()\n");
         out.push_str("@glitch_exception_pending = internal global ptr null\n");
+        out.push_str(
+            "define ptr @glitch_take_pending_exception() {\nentry:\n  %value = load ptr, ptr @glitch_exception_pending\n  store ptr null, ptr @glitch_exception_pending\n  ret ptr %value\n}\n",
+        );
+        out.push_str(
+            "define void @glitch_object_drop(ptr %value) {\nentry:\n  %is_null = icmp eq ptr %value, null\n  br i1 %is_null, label %done, label %drop\n\
+drop:\n  %drop_ptr_ptr = getelementptr inbounds { i64, ptr }, ptr %value, i32 0, i32 1\n  %drop_ptr = load ptr, ptr %drop_ptr_ptr\n  %has_drop = icmp ne ptr %drop_ptr, null\n  br i1 %has_drop, label %call_drop, label %done\n\
+call_drop:\n  call void %drop_ptr(ptr %value)\n  br label %done\n\
+done:\n  ret void\n}\n",
+        );
         out.push_str(
             "%glitch.task = type { i32, ptr }\n\
             define ptr @glitch_task_from_result_ptr(ptr %result) {\n\
@@ -92,13 +102,13 @@ pub(super) fn finish_module(emitter: &LlvmEmitter) -> Result<String, String> {
             }\n",
         );
         out.push_str(
-            "define ptr @glitch_calloc(i64 %count, i64 %size) {\nentry:\n  %value = call ptr @calloc(i64 %count, i64 %size)\n  %is_null = icmp eq ptr %value, null\n  br i1 %is_null, label %done, label %count_alloc\ncount_alloc:\n  %old_live = atomicrmw add ptr @glitch_live_allocations, i64 1 seq_cst\n  br label %done\ndone:\n  ret ptr %value\n}\n",
+            "define ptr @glitch_calloc(i64 %count, i64 %size) {\nentry:\n  %value = call ptr @calloc(i64 %count, i64 %size)\n  %is_null = icmp eq ptr %value, null\n  br i1 %is_null, label %done, label %count_alloc\ncount_alloc:\n  %live = call i64 @GlitchLiveAllocations_Add(i64 1)\n  br label %done\ndone:\n  ret ptr %value\n}\n",
         );
         out.push_str(
-            "define ptr @glitch_realloc(ptr %old, i64 %size) {\nentry:\n  %value = call ptr @realloc(ptr %old, i64 %size)\n  %old_null = icmp eq ptr %old, null\n  %new_valid = icmp ne ptr %value, null\n  %count_it = and i1 %old_null, %new_valid\n  br i1 %count_it, label %count_alloc, label %done\ncount_alloc:\n  %old_live = atomicrmw add ptr @glitch_live_allocations, i64 1 seq_cst\n  br label %done\ndone:\n  ret ptr %value\n}\n",
+            "define ptr @glitch_realloc(ptr %old, i64 %size) {\nentry:\n  %value = call ptr @realloc(ptr %old, i64 %size)\n  %old_null = icmp eq ptr %old, null\n  %new_valid = icmp ne ptr %value, null\n  %count_it = and i1 %old_null, %new_valid\n  br i1 %count_it, label %count_alloc, label %done\ncount_alloc:\n  %live = call i64 @GlitchLiveAllocations_Add(i64 1)\n  br label %done\ndone:\n  ret ptr %value\n}\n",
         );
         out.push_str(
-            "define void @glitch_free(ptr %value) {\nentry:\n  %is_null = icmp eq ptr %value, null\n  br i1 %is_null, label %done, label %release\nrelease:\n  call void @free(ptr %value)\n  %old_live = atomicrmw sub ptr @glitch_live_allocations, i64 1 seq_cst\n  br label %done\ndone:\n  ret void\n}\n",
+            "define void @glitch_free(ptr %value) {\nentry:\n  %is_null = icmp eq ptr %value, null\n  br i1 %is_null, label %done, label %release\nrelease:\n  call void @free(ptr %value)\n  %live = call i64 @GlitchLiveAllocations_Add(i64 -1)\n  br label %done\ndone:\n  ret void\n}\n",
         );
         out.push_str(
             "define i64 @glitch_string_length(ptr %value) {\nentry:\n  %is_null = icmp eq ptr %value, null\n  br i1 %is_null, label %empty, label %read_len\nempty:\n  ret i64 0\nread_len:\n  %length_ptr = getelementptr i8, ptr %value, i64 -8\n  %length = load i64, ptr %length_ptr\n  ret i64 %length\n}\n",

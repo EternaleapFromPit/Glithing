@@ -1,0 +1,48 @@
+{
+  "name": "glitching-language-support",
+  "displayName": "Glitching Language Support",
+  "description": "Syntax highlighting and editor language configuration for Glitching (.gl) files.",
+  "version": "0.1.0",
+  "publisher": "glitching",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "glitching",
+    "gl",
+    "csharp"
+  ],
+  "extensionDependencies": [
+    "ms-dotnettools.csharp"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "glitching",
+        "aliases": [
+          "Glitching",
+          "glitching",
+          "gl"
+        ],
+        "extensions": [
+          ".gl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "glitching",
+        "scopeName": "source.glitching",
+        "path": "./syntaxes/glitching.tmLanguage.json"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.9.2"
+  }
+}

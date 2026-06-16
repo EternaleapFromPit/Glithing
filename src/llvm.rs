@@ -102,6 +102,38 @@ fn is_string_like_type(ty: &IrType) -> bool {
     }
 }
 
+fn is_task_surface_type(ty: &IrType) -> bool {
+    matches!(
+        ty,
+        IrType::Unknown(name) | IrType::Class(name)
+            if matches!(
+                base_type_name(name),
+                "Task" | "ValueTask" | "System.Threading.Tasks.Task" | "System.Threading.Tasks.ValueTask"
+            )
+    )
+}
+
+fn should_drop_argument_after_call(expr: &TypedExpr) -> bool {
+    matches!(
+        expr.kind,
+        TypedExprKind::FunctionSymbol(_)
+            | TypedExprKind::Lambda { .. }
+            | TypedExprKind::Call(_)
+            | TypedExprKind::Await(_)
+            | TypedExprKind::NewObject { .. }
+            | TypedExprKind::NewCollection(_)
+            | TypedExprKind::NewArray { .. }
+            | TypedExprKind::ArrayLiteral(_)
+            | TypedExprKind::NewThread(_)
+            | TypedExprKind::Conditional { .. }
+            | TypedExprKind::NullableSome(_)
+    )
+}
+
+fn value_uses_boxed_scalar_temporary(value: &LlValue, expected: &LlType) -> bool {
+    *expected == LlType::Ptr && (value.ty.is_integer() || value.ty == LlType::Double)
+}
+
 fn is_weak_reference_type_name(name: &str) -> bool {
     name.starts_with("Weak_")
         || name.starts_with("System_WeakReference_")
@@ -2488,10 +2520,7 @@ impl LlvmEmitter {
             }
             TypedExprKind::Call(call) => {
                 if let TypedCallKind::Method { target, name, .. } = &call.kind {
-                    let is_task = match &target.ty {
-                        IrType::Unknown(n) => n == "Task" || n.starts_with("Task<"),
-                        _ => false,
-                    };
+                    let is_task = is_task_surface_type(&target.ty);
                     let is_mediator = match &target.ty {
                         IrType::Interface(name) | IrType::Class(name) => {
                             base_type_name(name) == "IMediator"
@@ -2654,9 +2683,11 @@ impl LlvmEmitter {
                                 env_ptr, env_ptr_addr
                             ));
                             let mut arg_vals = Vec::new();
+                            let mut arg_values = Vec::new();
                             arg_vals.push(format!("ptr {env_ptr}"));
                             for arg in &call.args {
                                 let val = self.emit_typed_expr(arg)?;
+                                arg_values.push(val.clone());
                                 arg_vals.push(format!("{} {}", val.ty.as_ir(), val.value));
                             }
                             let result_reg = self.tmp();
@@ -2668,6 +2699,11 @@ impl LlvmEmitter {
                                 fn_ptr,
                                 arg_vals.join(", ")
                             ));
+                            for (arg, value) in call.args.iter().zip(arg_values.iter()) {
+                                if should_drop_argument_after_call(arg) {
+                                    self.emit_temporary_drop(arg, value);
+                                }
+                            }
                             Ok(LlValue {
                                 value: result_reg,
                                 ty: ret_ty,
@@ -2718,14 +2754,13 @@ impl LlvmEmitter {
                             }
                         }
                         CallResolution::StaticFunction => {
-                            if name == "FromResult"
-                                && matches!(target.ty, IrType::Class(ref type_name)
-                                    if type_name == "Task"
-                                        || type_name == "ValueTask"
-                                        || type_name == "System.Threading.Tasks.Task"
-                                        || type_name == "System.Threading.Tasks.ValueTask")
-                            {
-                                return self.emit_task_from_result_inline(call, &expr.ty);
+                            if is_task_surface_type(&target.ty) {
+                                if name == "Run" {
+                                    return self.emit_task_run_inline(call, &expr.ty);
+                                }
+                                if name == "FromResult" {
+                                    return self.emit_task_from_result_inline(call, &expr.ty);
+                                }
                             }
                             if self.functions.contains_key(symbol) {
                                 self.emit_typed_function_call(symbol, &call.generic_args, &call.args)
@@ -3064,9 +3099,14 @@ impl LlvmEmitter {
             let value = self.emit_typed_expr(arg)?;
             return self.cast_value(value, &signature.return_type);
         }
-        let mut values = prefix.into_iter().collect::<Vec<_>>();
+        let prefix_values = prefix.into_iter().collect::<Vec<_>>();
+        let prefix_len = prefix_values.len();
+        let mut values = prefix_values.clone();
+        let mut arg_values = Vec::new();
         for arg in args {
-            values.push(self.emit_typed_expr(arg)?);
+            let value = self.emit_typed_expr(arg)?;
+            arg_values.push(value.clone());
+            values.push(value);
         }
         if values.len() < signature.params.len() && values.len() >= signature.required_params {
             for expected in signature.params.iter().skip(values.len()) {
@@ -3096,9 +3136,23 @@ impl LlvmEmitter {
             ));
         }
         let mut rendered_args = Vec::new();
-        for (value, expected) in values.into_iter().zip(&signature.params) {
+        for (value, expected) in prefix_values.into_iter().zip(signature.params.iter()) {
             let value = self.cast_value(value, expected)?;
             rendered_args.push(format!("{} {}", expected.as_ir(), value.value));
+        }
+        let mut casted_arg_values = Vec::new();
+        for (arg_index, value) in arg_values.iter().cloned().enumerate() {
+            let expected = &signature.params[prefix_len + arg_index];
+            let value = self.cast_value(value, expected)?;
+            casted_arg_values.push(value.clone());
+            rendered_args.push(format!("{} {}", expected.as_ir(), value.value));
+        }
+        for expected in signature.params.iter().skip(prefix_len + arg_values.len()) {
+            rendered_args.push(format!(
+                "{} {}",
+                expected.as_ir(),
+                expected.default_value()
+            ));
         }
         if signature.return_type == LlType::Void {
             self.body.push_str(&format!(
@@ -3107,6 +3161,22 @@ impl LlvmEmitter {
                 rendered_args.join(", ")
             ));
             self.emit_exception_check();
+            for (arg_index, ((arg, original_value), casted_value)) in args
+                .iter()
+                .zip(arg_values.iter())
+                .zip(casted_arg_values.iter())
+                .enumerate()
+            {
+                let expected = &signature.params[prefix_len + arg_index];
+                if value_uses_boxed_scalar_temporary(original_value, expected) {
+                    self.body.push_str(&format!(
+                        "  call void @glitch_box_release(ptr {})\n",
+                        casted_value.value
+                    ));
+                } else if should_drop_argument_after_call(arg) {
+                    self.emit_temporary_drop(arg, original_value);
+                }
+            }
             Ok(LlValue {
                 value: "0".to_string(),
                 ty: LlType::I32,
@@ -3120,6 +3190,22 @@ impl LlvmEmitter {
                 rendered_args.join(", ")
             ));
             self.emit_exception_check();
+            for (arg_index, ((arg, original_value), casted_value)) in args
+                .iter()
+                .zip(arg_values.iter())
+                .zip(casted_arg_values.iter())
+                .enumerate()
+            {
+                let expected = &signature.params[prefix_len + arg_index];
+                if value_uses_boxed_scalar_temporary(original_value, expected) {
+                    self.body.push_str(&format!(
+                        "  call void @glitch_box_release(ptr {})\n",
+                        casted_value.value
+                    ));
+                } else if should_drop_argument_after_call(arg) {
+                    self.emit_temporary_drop(arg, original_value);
+                }
+            }
             Ok(LlValue {
                 value: tmp,
                 ty: signature.return_type,
@@ -4763,7 +4849,7 @@ impl LlvmEmitter {
             let report_label = self.next_label("report_leaks");
             let return_label = self.next_label("main_return");
             self.body.push_str(&format!(
-                "  {live} = load atomic i64, ptr @glitch_live_allocations seq_cst, align 8\n  {leaked} = icmp ne i64 {live}, 0\n  {exception} = load ptr, ptr @glitch_exception_pending\n  {has_exception} = icmp ne ptr {exception}, null\n  {failed} = or i1 {leaked}, {has_exception}\n  {code} = zext i1 {failed} to i32\n  {report_env} = call ptr @getenv(ptr @.env_report_leaks)\n  {should_report} = icmp ne ptr {report_env}, null\n  br i1 {should_report}, label %{report_label}, label %{return_label}\n{report_label}:\n  call i32 (ptr, ...) @printf(ptr {}, i64 {live})\n  br label %{return_label}\n{return_label}:\n  ret i32 {code}\n",
+                "  {live} = call i64 @GlitchLiveAllocations_Load()\n  {leaked} = icmp ne i64 {live}, 0\n  {exception} = load ptr, ptr @glitch_exception_pending\n  {has_exception} = icmp ne ptr {exception}, null\n  {failed} = or i1 {leaked}, {has_exception}\n  {code} = zext i1 {failed} to i32\n  {report_env} = call ptr @getenv(ptr @.env_report_leaks)\n  {should_report} = icmp ne ptr {report_env}, null\n  br i1 {should_report}, label %{report_label}, label %{return_label}\n{report_label}:\n  call i32 (ptr, ...) @printf(ptr {}, i64 {live})\n  br label %{return_label}\n{return_label}:\n  ret i32 {code}\n",
                 fmt_ptr("i64")
             ));
         } else if self.current_return == LlType::Void {

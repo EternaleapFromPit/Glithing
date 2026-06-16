@@ -1241,6 +1241,19 @@ where
                     .all(|(candidate, other)| candidate <= other)
         })
     }) else {
+        let best_generic_arity = applicable
+            .iter()
+            .map(|(signature, _)| signature.generic_params.len())
+            .min();
+        if let Some(best_generic_arity) = best_generic_arity {
+            let least_generic = applicable
+                .iter()
+                .filter(|(signature, _)| signature.generic_params.len() == best_generic_arity)
+                .collect::<Vec<_>>();
+            if least_generic.len() == 1 {
+                return Ok(Some(least_generic[0].0));
+            }
+        }
         let candidates = applicable
             .iter()
             .map(|(signature, ranks)| {
@@ -1288,6 +1301,19 @@ where
                 .collect::<Vec<_>>();
             if specialized.len() == 1 {
                 return Ok(Some(specialized[0].0));
+            }
+            let best_generic_arity = specialized
+                .iter()
+                .map(|(signature, _)| signature.generic_params.len())
+                .min();
+            if let Some(best_generic_arity) = best_generic_arity {
+                let least_generic = specialized
+                    .into_iter()
+                    .filter(|(signature, _)| signature.generic_params.len() == best_generic_arity)
+                    .collect::<Vec<_>>();
+                if least_generic.len() == 1 {
+                    return Ok(Some(least_generic[0].0));
+                }
             }
         }
         let candidates = applicable

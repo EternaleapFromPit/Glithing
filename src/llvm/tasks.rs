@@ -12,7 +12,10 @@ pub(super) fn emit_task_run_inline(
 
     let result_ty = match return_type {
         IrType::Task(inner) => inner.as_ref().clone(),
-        _ => IrType::Void,
+        _ => match &worker_expr.ty {
+            IrType::Function { return_type, .. } => return_type.as_ref().clone(),
+            _ => IrType::Void,
+        },
     };
 
     let result_llvm_type = llvm_ir_type(&result_ty);
@@ -66,7 +69,7 @@ pub(super) fn emit_task_from_result_inline(
 
     let result_ty = match return_type {
         IrType::Task(inner) => inner.as_ref().clone(),
-        _ => IrType::Void,
+        _ => val_expr.ty.clone(),
     };
 
     let result_llvm_type = llvm_ir_type(&result_ty);

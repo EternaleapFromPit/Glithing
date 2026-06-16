@@ -52,17 +52,29 @@ public static class Assert {
     public static void True(bool condition, string message) {
         if (!condition) throw new AssertionFailedException(message);
     }
+    public static void Equal(long expected, long actual) {
+        if (expected != actual) throw new AssertionFailedException("");
+    }
+    public static void Equal(long expected, long actual, string message) {
+        if (expected != actual) throw new AssertionFailedException(message);
+    }
     public static void Equal<T>(T expected, T actual) {
-        if (!object.Equals(expected, actual)) throw new AssertionFailedException("");
+        if (expected != actual) throw new AssertionFailedException("");
     }
     public static void Equal<T>(T expected, T actual, string message) {
-        if (!object.Equals(expected, actual)) throw new AssertionFailedException(message);
+        if (expected != actual) throw new AssertionFailedException(message);
+    }
+    public static void NotEqual(long notExpected, long actual) {
+        if (notExpected == actual) throw new AssertionFailedException("");
+    }
+    public static void NotEqual(long notExpected, long actual, string message) {
+        if (notExpected == actual) throw new AssertionFailedException(message);
     }
     public static void NotEqual<T>(T notExpected, T actual) {
-        if (object.Equals(notExpected, actual)) throw new AssertionFailedException("");
+        if (notExpected == actual) throw new AssertionFailedException("");
     }
     public static void NotEqual<T>(T notExpected, T actual, string message) {
-        if (object.Equals(notExpected, actual)) throw new AssertionFailedException(message);
+        if (notExpected == actual) throw new AssertionFailedException(message);
     }
     public static void NotNull(object value) {
         if (object.Equals(value, null)) throw new AssertionFailedException("");

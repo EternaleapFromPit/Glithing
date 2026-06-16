@@ -187,6 +187,12 @@ cargo run -- examples\system_threading_tasks.cs
 cargo run -- examples\scopes.gl
 ```
 
+VS Code syntax highlighting:
+
+- a lightweight VS Code extension now lives at [editor/vscode/glitching-language-support](/D:/Repos/Glitching/editor/vscode/glitching-language-support)
+- it registers `.gl` as a Glitching language and reuses the Microsoft C# extension grammar where possible
+- it adds Glitching-specific tokens like `fn`, `let`, `move`, `borrow`, `package`, `native`, `shared<T>`, and `XUNIT_FACT(...)`
+
 Emit LLVM IR:
 
 ```powershell

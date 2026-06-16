@@ -51,6 +51,47 @@ fn log_line(args: std::fmt::Arguments<'_>) {
 extern "C" {
     fn malloc(size: usize) -> *mut c_void;
     fn free(ptr: *mut c_void);
+    fn GlitchLiveAllocations_Add(delta: i64) -> i64;
+    fn GlitchLiveAllocations_Load() -> i64;
+    fn GetModuleHandleA(name: *const u8) -> *mut c_void;
+    fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+}
+
+type TakePendingExceptionFn = unsafe extern "C" fn() -> *mut c_void;
+type DropObjectFn = unsafe extern "C" fn(*mut c_void);
+
+unsafe fn lookup_symbol(name: &'static [u8]) -> *mut c_void {
+    let module = GetModuleHandleA(std::ptr::null());
+    if module.is_null() {
+        return std::ptr::null_mut();
+    }
+    GetProcAddress(module, name.as_ptr())
+}
+
+unsafe fn take_pending_exception() -> *mut c_void {
+    let symbol = lookup_symbol(b"glitch_take_pending_exception\0");
+    if symbol.is_null() {
+        return std::ptr::null_mut();
+    }
+    let callback: TakePendingExceptionFn = std::mem::transmute(symbol);
+    callback()
+}
+
+unsafe fn drop_object(value: *mut c_void) {
+    let symbol = lookup_symbol(b"glitch_object_drop\0");
+    if symbol.is_null() {
+        return;
+    }
+    let callback: DropObjectFn = std::mem::transmute(symbol);
+    callback(value);
+}
+
+fn trace_live_allocations(phase: &str) {
+    if std::env::var_os("GLITCH_TRACE_ALLOC").is_none() {
+        return;
+    }
+    let live = unsafe { GlitchLiveAllocations_Load() };
+    log_line(format_args!("[xUnit] live allocations after {phase}: {live}"));
 }
 
 #[no_mangle]
@@ -81,6 +122,9 @@ pub unsafe extern "C" fn XUnit_AddTest(
         env_ptr,
         delegate_ptr: test as *mut c_void,
     };
+    if !entry.delegate_ptr.is_null() {
+        unsafe { retain_registered_delegate(entry.delegate_ptr) };
+    }
     log_line(format_args!(
         "[xUnit] AddTest strings {}.{}",
         entry.class_name, entry.test_name
@@ -90,10 +134,12 @@ pub unsafe extern "C" fn XUnit_AddTest(
         entry.class_name, entry.test_name
     ));
     tests().lock().unwrap().push(entry);
+    trace_live_allocations("XUnit_AddTest");
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn XUnit_RunAllTests() {
+    trace_live_allocations("XUnit_RunAllTests start");
     let snapshot = tests().lock().unwrap().clone();
     log_line(format_args!("[xUnit] Running {} tests...", snapshot.len()));
 
@@ -106,19 +152,26 @@ pub unsafe extern "C" fn XUnit_RunAllTests() {
         let result = catch_unwind(AssertUnwindSafe(|| unsafe {
             (entry.fn_ptr)(entry.env_ptr);
         }));
-        if result.is_ok() {
+        let pending_exception = unsafe { take_pending_exception() };
+        let has_pending_exception = !pending_exception.is_null();
+        if has_pending_exception {
+            unsafe { drop_object(pending_exception) };
+        }
+        if result.is_ok() && !has_pending_exception {
             log_line(format_args!("[xUnit] PASS"));
         } else {
             failed += 1;
             log_line(format_args!("[xUnit] FAIL"));
         }
     }
+    trace_live_allocations("XUnit_RunAllTests after test execution");
     tests().lock().unwrap().clear();
     for entry in &snapshot {
         if !entry.delegate_ptr.is_null() {
             unsafe { release_registered_delegate(entry.delegate_ptr) };
         }
     }
+    trace_live_allocations("XUnit_RunAllTests cleanup");
 
     let allocated = MALLOC_COUNT.load(Ordering::SeqCst);
     let freed = FREE_COUNT.load(Ordering::SeqCst);
@@ -203,4 +256,17 @@ unsafe fn release_registered_delegate(value: *mut c_void) {
         destroy((*delegate).env_ptr);
     }
     free(value);
+    GlitchLiveAllocations_Add(-1);
+}
+
+unsafe fn retain_registered_delegate(value: *mut c_void) {
+    if value.is_null() {
+        return;
+    }
+    let delegate = value as *mut OwnedDelegateAbi;
+    let refs = (*delegate).ref_count.load(Ordering::SeqCst);
+    if refs >= 1_000_000 {
+        return;
+    }
+    (*delegate).ref_count.fetch_add(1, Ordering::SeqCst);
 }

@@ -1,0 +1,160 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Glitching",
+  "scopeName": "source.glitching",
+  "patterns": [
+    {
+      "include": "#hash-comments"
+    },
+    {
+      "include": "#package-declaration"
+    },
+    {
+      "include": "#inline-native"
+    },
+    {
+      "include": "#block-native"
+    },
+    {
+      "include": "#glitching-keywords"
+    },
+    {
+      "include": "#glitching-generic-modifiers"
+    },
+    {
+      "include": "#glitching-macros"
+    },
+    {
+      "include": "source.cs"
+    }
+  ],
+  "repository": {
+    "hash-comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.glitching",
+          "match": "^\\s*#.*$"
+        }
+      ]
+    },
+    "package-declaration": {
+      "patterns": [
+        {
+          "name": "meta.package.glitching",
+          "begin": "\\b(package)\\b",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.other.namespace.glitching"
+            }
+          },
+          "end": ";",
+          "patterns": [
+            {
+              "name": "entity.name.namespace.glitching",
+              "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*\\b"
+            }
+          ]
+        }
+      ]
+    },
+    "inline-native": {
+      "patterns": [
+        {
+          "name": "meta.native.inline.glitching",
+          "match": "\\b(native)\\b\\s*(\"(?:[^\"\\\\]|\\\\.)*\")",
+          "captures": {
+            "1": {
+              "name": "keyword.control.glitching"
+            },
+            "2": {
+              "name": "string.quoted.double.glitching"
+            }
+          }
+        }
+      ]
+    },
+    "block-native": {
+      "patterns": [
+        {
+          "name": "meta.native.block.glitching",
+          "begin": "^\\s*(native)\\b\\s*\"\\s*$",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.glitching"
+            }
+          },
+          "end": "^\\s*\"\\s*;\\s*$",
+          "patterns": [
+            {
+              "name": "comment.line.double-slash.c",
+              "match": "//.*$"
+            },
+            {
+              "name": "comment.block.c",
+              "begin": "/\\*",
+              "end": "\\*/"
+            },
+            {
+              "name": "string.quoted.double.c",
+              "begin": "\"",
+              "end": "\"",
+              "patterns": [
+                {
+                  "name": "constant.character.escape.c",
+                  "match": "\\\\."
+                }
+              ]
+            },
+            {
+              "name": "string.quoted.single.c",
+              "begin": "'",
+              "end": "'",
+              "patterns": [
+                {
+                  "name": "constant.character.escape.c",
+                  "match": "\\\\."
+                }
+              ]
+            },
+            {
+              "name": "keyword.control.c",
+              "match": "\\b(if|else|for|while|switch|case|break|continue|return|struct|typedef|enum|static|const|void|char|short|int|long|float|double|unsigned|signed|sizeof)\\b"
+            },
+            {
+              "name": "entity.name.function.preprocessor.c",
+              "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
+            }
+          ]
+        }
+      ]
+    },
+    "glitching-keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.glitching",
+          "match": "\\b(fn|let|move|borrow|macro|native|package)\\b"
+        },
+        {
+          "name": "storage.modifier.glitching",
+          "match": "\\b(shared|view|owned|weakref)\\b"
+        }
+      ]
+    },
+    "glitching-generic-modifiers": {
+      "patterns": [
+        {
+          "name": "storage.type.generic.glitching",
+          "match": "\\b(shared|borrow|view|owned|weakref)(?=\\s*<)"
+        }
+      ]
+    },
+    "glitching-macros": {
+      "patterns": [
+        {
+          "name": "entity.name.function.preprocessor.glitching",
+          "match": "\\b[A-Z][A-Z0-9_]*(?=\\s*\\()"
+        }
+      ]
+    }
+  }
+}

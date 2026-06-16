@@ -335,6 +335,13 @@ impl LlvmEmitter {
         ) {
             return;
         }
+        if matches!(expr.kind, TypedExprKind::FunctionSymbol(_)) {
+            self.body.push_str(&format!(
+                "  call void @glitch_delegate_release(ptr {})\n",
+                value.value
+            ));
+            return;
+        }
         if let IrType::Nullable(inner) = &expr.ty {
             let type_name = LlvmEmitter::nullable_type_name(inner);
             if self.object_types.contains_key(&type_name) {
