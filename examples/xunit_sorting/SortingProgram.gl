@@ -1,0 +1,70 @@
+using System.Collections.Generic;
+
+public static class NumberAlgorithms {
+    public static List<int> Clone(List<int> source) {
+        List<int> copy = new List<int>();
+        int index = 0;
+        while (index < source.Count) {
+            copy.Add(source[index]);
+            index = index + 1;
+        }
+        return copy;
+    }
+
+    public static List<int> BubbleSort(List<int> source) {
+        List<int> values = Clone(source);
+        int outer = 0;
+        while (outer < values.Count) {
+            int inner = 0;
+            while (inner + 1 < values.Count - outer) {
+                if (values[inner] > values[inner + 1]) {
+                    int temp = values[inner];
+                    values[inner] = values[inner + 1];
+                    values[inner + 1] = temp;
+                }
+                inner = inner + 1;
+            }
+            outer = outer + 1;
+        }
+        return values;
+    }
+
+    public static int Sum(List<int> values) {
+        int total = 0;
+        int index = 0;
+        while (index < values.Count) {
+            total = total + values[index];
+            index = index + 1;
+        }
+        return total;
+    }
+
+    public static bool IsSorted(List<int> values) {
+        int index = 0;
+        while (index + 1 < values.Count) {
+            if (values[index] > values[index + 1]) {
+                return false;
+            }
+            index = index + 1;
+        }
+        return true;
+    }
+
+    public static int BinarySearch(List<int> sorted, int value) {
+        int left = 0;
+        int right = sorted.Count - 1;
+        while (left <= right) {
+            int middle = (left + right) / 2;
+            int current = sorted[middle];
+            if (current == value) {
+                return middle;
+            }
+            if (current < value) {
+                left = middle + 1;
+            } else {
+                right = middle - 1;
+            }
+        }
+        return -1;
+    }
+}

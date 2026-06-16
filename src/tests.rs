@@ -153,6 +153,56 @@ fn specializes_transitive_generic_package_methods_into_concrete_llvm_bodies() {
 }
 
 #[test]
+fn specializes_generic_methods_on_concrete_generic_owner_types() {
+    let source = r#"
+            class Box<T> {
+                public U Echo<U>(U value) {
+                    return value;
+                }
+            }
+
+            fn main() {
+                Box<int> box = new Box<int>();
+                string name = box.Echo("Ada");
+                print(name);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("generic methods on concrete generic owners should specialize");
+
+    assert!(llvm_ir.contains("Box__g1__t0_Echo__g1__owner_int__string"));
+    assert!(llvm_ir.contains("call ptr @Box__g1__t0_Echo__g1__owner_int__string"));
+}
+
+#[test]
+fn specializes_transitive_generic_methods_on_concrete_generic_owner_types() {
+    let source = r#"
+            class Box<T> {
+                public U Inner<U>(U value) {
+                    return value;
+                }
+
+                public U Outer<U>(U value) {
+                    return this.Inner(value);
+                }
+            }
+
+            fn main() {
+                Box<int> box = new Box<int>();
+                string name = box.Outer("Ada");
+                print(name);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("transitive owner generic methods should specialize");
+
+    assert!(llvm_ir.contains("Box__g1__t0_Outer__g1__owner_int__string"));
+    assert!(llvm_ir.contains("Box__g1__t0_Inner__g1__owner_int__string"));
+}
+
+#[test]
 fn compiles_valuetask_from_result_like_task() {
     let source = r#"
             using System.Threading.Tasks;
@@ -3818,6 +3868,18 @@ fn auto_discovers_csharp_xunit_fact_methods_and_runs_them() {
     let llvm_ir = output.llvm_ir().expect("LLVM IR should be present");
 
     assert!(llvm_ir.contains("XUnit_AddTest"));
+    assert!(llvm_ir.contains("RunAllTests"));
+}
+
+#[test]
+fn compiles_gl_xunit_sorting_fixture_directory() {
+    let llvm_ir = compile_llvm_ir_from_path("examples/xunit_sorting")
+        .expect("GL sorting + xUnit fixture directory should compile through LLVM");
+
+    assert!(llvm_ir.contains("XUnit_AddTest"));
+    assert!(llvm_ir.contains("BubbleSort_OrdersValues"));
+    assert!(llvm_ir.contains("BinarySearch_ReturnsMinusOneForMissingValue"));
+    assert!(llvm_ir.contains("NumberAlgorithms"));
     assert!(llvm_ir.contains("RunAllTests"));
 }
 

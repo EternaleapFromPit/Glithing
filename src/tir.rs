@@ -1419,6 +1419,15 @@ fn substitute_generic_args_in_ir_type(
 fn substitute_ir_type_with_map(ty: &IrType, subst: &HashMap<String, IrType>) -> IrType {
     match ty {
         IrType::Unknown(name) => subst.get(name).cloned().unwrap_or_else(|| ty.clone()),
+        IrType::Struct(name) => substitute_object_ir_type_name(name, subst)
+            .map(IrType::Struct)
+            .unwrap_or_else(|| ty.clone()),
+        IrType::Class(name) => substitute_object_ir_type_name(name, subst)
+            .map(IrType::Class)
+            .unwrap_or_else(|| ty.clone()),
+        IrType::Interface(name) => substitute_object_ir_type_name(name, subst)
+            .map(IrType::Interface)
+            .unwrap_or_else(|| ty.clone()),
         IrType::Array(inner) => IrType::Array(Box::new(substitute_ir_type_with_map(inner, subst))),
         IrType::Ref(inner) => IrType::Ref(Box::new(substitute_ir_type_with_map(inner, subst))),
         IrType::List(inner) => IrType::List(Box::new(substitute_ir_type_with_map(inner, subst))),
@@ -1442,6 +1451,22 @@ fn substitute_ir_type_with_map(ty: &IrType, subst: &HashMap<String, IrType>) -> 
         },
         _ => ty.clone(),
     }
+}
+
+fn substitute_object_ir_type_name(
+    name: &str,
+    subst: &HashMap<String, IrType>,
+) -> Option<String> {
+    let (base, args) = split_monomorphized_type(name)?;
+    let rewritten = args
+        .into_iter()
+        .map(|arg| {
+            let parsed = parse_monomorphized_ir_type(&arg, &TypeEnv::default())
+                .unwrap_or(IrType::Unknown(arg));
+            render_monomorphized_ir_type(&substitute_ir_type_with_map(&parsed, subst))
+        })
+        .collect::<Vec<_>>();
+    Some(format!("{base}<{}>", rewritten.join(",")))
 }
 
 fn substitute_field_signature(
@@ -2214,7 +2239,12 @@ impl OwnershipChecker {
             }
             Stmt::AssignTarget { target, expr } => {
                 let (target_ty, target_ownership) = Self::target_type(target, env, state)
-                    .unwrap_or_else(|| (IrType::Unknown("target".to_string()), Ownership::Shared));
+                    .unwrap_or_else(|| {
+                        (
+                            IrType::Unknown(format!("target:{target:?}")),
+                            Ownership::Shared,
+                        )
+                    });
                 let expr = Self::check_expr(expr, env, state)?;
                 let expr = Self::coerce_for_target(&target_ty, expr);
                 Self::check_assignment_safety(context, env, &target_ty, target_ownership, &expr)?;
@@ -2906,11 +2936,27 @@ impl OwnershipChecker {
     ) -> Option<(IrType, Ownership)> {
         match target {
             Expr::Var(name) => state.get(name).map(|var| (var.ty.clone(), var.ownership.clone())),
+            Expr::Index { target, .. } => {
+                let target = Self::check_expr(target, env, state).ok()?;
+                match target.ty {
+                    IrType::List(inner) | IrType::Array(inner) | IrType::Enumerable(inner) => {
+                        let element = inner.as_ref().clone();
+                        Some((element.clone(), ownership_for_type(&element)))
+                    }
+                    IrType::Dictionary(_, value) => {
+                        let value = value.as_ref().clone();
+                        Some((value.clone(), ownership_for_type(&value)))
+                    }
+                    IrType::String => Some((IrType::Byte, Ownership::Copy)),
+                    _ => None,
+                }
+            }
             Expr::Field { target, name } => {
                 let target = Self::check_expr(target, env, state).ok()?;
                 match target.ty {
-                    IrType::Class(type_name) | IrType::Struct(type_name) => env
+                    IrType::Class(type_name) | IrType::Struct(type_name) | IrType::Interface(type_name) => env
                         .resolve_field(&type_name, name)
+                        .or_else(|| env.resolve_field(base_type_name(&type_name), name))
                         .map(|field| (field.ty, field.ownership)),
                     _ => None,
                 }
@@ -2930,7 +2976,11 @@ impl OwnershipChecker {
             && !matches!(target_ownership, Ownership::Borrowed | Ownership::View)
             && !matches!(
                 target_ty,
-                IrType::Enumerable(_) | IrType::Ref(_) | IrType::String
+                IrType::Enumerable(_)
+                    | IrType::Ref(_)
+                    | IrType::String
+                    | IrType::Class(_)
+                    | IrType::Interface(_)
             )
         {
             return Err(format!(
@@ -4613,8 +4663,46 @@ fn collection_this_type(ty: &TypeDef) -> IrType {
             IrType::Enumerable(Box::new(item))
         }
         _ => match ty.kind {
-            TypeKind::Class | TypeKind::Interface => IrType::Class(ty.name.clone()),
-            _ => IrType::Ref(Box::new(IrType::Struct(ty.name.clone()))),
+            TypeKind::Class => {
+                if ty.generic_params.is_empty() {
+                    IrType::Class(ty.name.clone())
+                } else {
+                    IrType::Class(monomorphized_type_name(
+                        &ty.name,
+                        &ty.generic_params
+                            .iter()
+                            .map(|param| IrType::Unknown(param.name.clone()))
+                            .collect::<Vec<_>>(),
+                    ))
+                }
+            }
+            TypeKind::Interface => {
+                if ty.generic_params.is_empty() {
+                    IrType::Interface(ty.name.clone())
+                } else {
+                    IrType::Interface(monomorphized_type_name(
+                        &ty.name,
+                        &ty.generic_params
+                            .iter()
+                            .map(|param| IrType::Unknown(param.name.clone()))
+                            .collect::<Vec<_>>(),
+                    ))
+                }
+            }
+            _ => {
+                let name = if ty.generic_params.is_empty() {
+                    ty.name.clone()
+                } else {
+                    monomorphized_type_name(
+                        &ty.name,
+                        &ty.generic_params
+                            .iter()
+                            .map(|param| IrType::Unknown(param.name.clone()))
+                            .collect::<Vec<_>>(),
+                    )
+                };
+                IrType::Ref(Box::new(IrType::Struct(name)))
+            }
         },
     }
 }
@@ -5611,16 +5699,32 @@ fn lower_typed_expr_with_expected(
             let expected_types = find_expected_types(&candidates, args);
             let args = lower_call_args(args, &expected_types, env, scopes)?;
             let (ty, _ownership, symbol, resolution) = resolve_method_call(env, &target, name, &args)?;
-            let generic_args = candidates
+            let resolved_signature = candidates
                 .iter()
                 .find(|signature| signature.symbol == symbol)
+                .cloned()
+                .or_else(|| match &target.ty {
+                    IrType::Class(type_name)
+                    | IrType::Struct(type_name)
+                    | IrType::Interface(type_name)
+                    | IrType::Unknown(type_name) => env
+                        .resolve_method_call(type_name, name, &args)
+                        .ok()
+                        .flatten(),
+                    IrType::String => ["string", "String", "System.String"]
+                        .iter()
+                        .find_map(|string_type| env.resolve_method_call(string_type, name, &args).ok().flatten()),
+                    _ => None,
+                })
+                .or_else(|| env.resolve_function_call(name, &args).ok().flatten().cloned());
+            let generic_args = resolved_signature
+                .as_ref()
                 .map(|signature| {
                     infer_generic_args_from_signature_with_expected(signature, &args, expected)
                 })
                 .unwrap_or_default();
-            let ty = candidates
-                .iter()
-                .find(|signature| signature.symbol == symbol)
+            let ty = resolved_signature
+                .as_ref()
                 .map(|signature| {
                     substitute_generic_args_in_ir_type(
                         &signature.return_type,
@@ -5630,9 +5734,7 @@ fn lower_typed_expr_with_expected(
                 })
                 .unwrap_or(ty);
             let ownership = ownership_for_type(&ty);
-            let args = if let Some(signature) =
-                candidates.iter().find(|signature| signature.symbol == symbol)
-            {
+            let args = if let Some(signature) = resolved_signature.as_ref() {
                 pack_params_args(signature, args)
             } else {
                 args

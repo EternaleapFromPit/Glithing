@@ -243,6 +243,11 @@ Rewrite guidance should be specific and actionable:
 18. Ownership-wrapper helpers such as `make_view<T>` now lower as compiler intrinsics at the call site instead of relying on a special generic-specialization path.
    - This keeps the current collection and xUnit package surfaces working while reducing the number of generic helper bodies that need monomorphization.
    - Covered by the existing collection, `Rc<T>`, and xUnit regression tests that exercise `make_view<T>` transitively.
+19. Generic methods on concrete generic owner types now monomorphize through the LLVM worklist, including transitive calls between owner-specialized generic methods.
+   - The generic-specialization pass now tracks owner-specialized generic method templates separately from the base method definitions and discovers instantiations from real typed call sites instead of relying only on the older symbol-only instantiation list.
+   - Generic `this` types on generic owners are now represented as `Owner<T...>` placeholders in TIR and rewritten through owner specialization, which keeps owner-aware method dispatch working inside specialized bodies.
+   - Field-target ownership checking now falls back through monomorphized generic owner names so constructor/primary-constructor assignment checks keep working on framework-heavy generic types.
+   - Covered by regression tests for direct and transitive `Box<int>.Method<string>(...)` specialization, with the full suite green after the Conduit compile-gate regression was fixed.
 
 ## Notes
 

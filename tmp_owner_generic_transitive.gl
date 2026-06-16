@@ -1,0 +1,15 @@
+class Box<T> {
+    public U Inner<U>(U value) {
+        return value;
+    }
+
+    public U Outer<U>(U value) {
+        return this.Inner(value);
+    }
+}
+
+fn main() {
+    Box<int> box = new Box<int>();
+    string name = box.Outer("Ada");
+    print(name);
+}

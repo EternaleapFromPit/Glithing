@@ -1,0 +1,52 @@
+using System.Collections.Generic;
+using Xunit;
+
+public class NumberAlgorithmsTests {
+    private static List<int> BuildSample() {
+        List<int> values = new List<int>();
+        values.Add(5);
+        values.Add(1);
+        values.Add(4);
+        values.Add(2);
+        values.Add(3);
+        return values;
+    }
+
+    [Fact]
+    public void BubbleSort_OrdersValues() {
+        List<int> values = BuildSample();
+        List<int> sorted = NumberAlgorithms.BubbleSort(values);
+
+        Assert.Equal(5, values[0]);
+        Assert.Equal(1, sorted[0]);
+        Assert.Equal(2, sorted[1]);
+        Assert.Equal(3, sorted[2]);
+        Assert.Equal(4, sorted[3]);
+        Assert.Equal(5, sorted[4]);
+        Assert.True(NumberAlgorithms.IsSorted(sorted));
+    }
+
+    [Fact]
+    public void Sum_AddsEveryValue() {
+        List<int> values = BuildSample();
+        Assert.Equal(15, NumberAlgorithms.Sum(values));
+    }
+
+    [Fact]
+    public void BinarySearch_FindsExistingValue() {
+        List<int> sorted = NumberAlgorithms.BubbleSort(BuildSample());
+        Assert.Equal(3, NumberAlgorithms.BinarySearch(sorted, 4));
+        Assert.Equal(0, NumberAlgorithms.BinarySearch(sorted, 1));
+        Assert.Equal(4, NumberAlgorithms.BinarySearch(sorted, 5));
+    }
+
+    [Fact]
+    public void BinarySearch_ReturnsMinusOneForMissingValue() {
+        List<int> sorted = NumberAlgorithms.BubbleSort(BuildSample());
+        Assert.Equal(-1, NumberAlgorithms.BinarySearch(sorted, 9));
+    }
+}
+
+public static void main() {
+    RunAllTests();
+}
