@@ -106,8 +106,13 @@ impl LlvmEmitter {
             ));
         }
         if let Some(constructor) = constructor {
+            let resolved_constructor = self
+                .specialized_instance_symbols
+                .get(&(constructor.to_string(), type_name.to_string()))
+                .cloned()
+                .unwrap_or_else(|| constructor.to_string());
             self.emit_typed_call(
-                constructor,
+                &resolved_constructor,
                 std::iter::once(LlValue {
                     value: value.clone(),
                     ty: LlType::Ptr,

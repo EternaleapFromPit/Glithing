@@ -72,6 +72,8 @@ The current boundary is:
 - The LLVM allocation registry and leak counter are now thread-safe for concurrent workloads by using atomic RMW updates in the runtime prelude and atomic leak-count reads in the exit path.
 - A regression test now checks that the LLVM runtime emits atomic allocation-counter operations instead of plain load/store updates.
 - Nested collection drop recursion now has direct regression coverage for `List<List<string>>`, confirming that recursive LLVM drop glue is preserved for nested owned collections.
+- The `examples/aspnet_load_test.cs` workload now compiles through LLVM and is covered by a direct regression test.
+- A native execution smoke test now runs `examples/llvm_simple.gl` end to end, proving the `emit-exe` path works for supported examples.
 - Public C emission has been removed from the CLI surface, and the default output path now produces a native executable.
 - NuGet/package emission now packages LLVM-native assets and linked source metadata instead of generated C source.
 - Current regression tests cover the native-output path and the package payload shape.
@@ -113,6 +115,7 @@ The current boundary is:
 6. Replace any remaining compatibility stubs with real lowering or real diagnostics, especially in package surfaces that still return typed defaults as placeholders.
 7. Expand framework compatibility in small, test-driven slices where the runtime model already exists, and keep unsupported members on explicit diagnostics with rewrite guidance.
 8. Add additional sample/runtime acceptance work only where a concrete blocker remains after the current compile gates.
+   - The larger ASP.NET smoke sample is still blocked by package/runtime helper gaps such as the generic `Array.Empty<T>()` wrapper and the broader native framework surface used by the RealWorld fixture.
 
 ## C# Standard v7 Gap Analysis
 
@@ -209,16 +212,26 @@ Rewrite guidance should be specific and actionable:
 11. `System.Array.Empty<T>()` now lowers through a dedicated native helper instead of depending on generic array state indexing in the package body.
    - The `System` package now declares `System_Array_Empty_Native`, and the Rust runtime returns a zero-length owned array node that the LLVM path can reuse across concrete instantiations.
    - Covered by a regression test that checks the LLVM IR references the helper.
-12. Borrow-check flow now treats `break` / `continue` as terminating the current path and preserves loop-exit snapshots across nested joins.
+12. Generic specialization now uses a fixed-point worklist and only lowers concrete instantiations.
+   - The LLVM backend now collects newly discovered specializations from already-specialized bodies, which is the missing piece for transitive generic package calls.
+   - It also skips unresolved placeholder instantiations instead of trying to monomorphize abstract `T` arguments directly.
+   - Ownership-wrapper helpers such as `make_view<T>` remain emitted as template-compatible fallbacks for the current package surface, so the compiler still supports the existing generic collection and xUnit slices while moving toward stricter monomorphization.
+   - Covered by a regression test where `Outer<int>` pulls in `Inner<int>` from its own body.
+13. Borrow-check flow now treats `break` / `continue` as terminating the current path and preserves loop-exit snapshots across nested joins.
+14. Concrete generic owner types now survive TIR lowering and emit specialized LLVM layouts plus owner-specialized constructor/method bodies.
+   - User-defined generic object types such as `Box<int>` are no longer collapsed back to the template type during TIR signature and field resolution.
+   - The LLVM backend now collects concrete generic object instantiations, registers concrete object layouts, and redirects constructor/instance-method emission to owner-specialized symbols.
+   - Existing `Rc<T>` / `WeakReference<T>` compatibility lowering remains intact, including nested `Rc<List<int>>` coverage and weak-reference leak-analysis exemptions.
+   - Covered by a regression test for concrete `Box<int>` layout + instance-method lowering, with the full suite green after the compatibility regressions were fixed.
    - The borrow checker now stops analyzing unreachable statements after `break` / `continue` and carries loop-exit state through enclosing joins instead of pretending the path is still live.
    - Covered by a regression test that keeps unreachable code after `break` from poisoning the loop state, plus the existing break-branch regression.
-13. The task-like package surface now exposes the common awaiter/result helpers directly, and those awaiter methods move the underlying wrapper instead of borrowing it unsafely.
+14. The task-like package surface now exposes the common awaiter/result helpers directly, and those awaiter methods move the underlying wrapper instead of borrowing it unsafely.
    - `Task`, `Task<T>`, `ValueTask`, and `ValueTask<T>` now expose `GetAwaiter()` and `GetResult()` where the current async/task lowering expects them.
    - Covered by regression tests that compile direct package-surface calls to `GetResult()` and `GetAwaiter().GetResult()` on `Task<T>` and `ValueTask<T>`.
-14. `List<T>.GetEnumerator()` now returns a real package enumerator backed by a borrowed view of the list.
+15. `List<T>.GetEnumerator()` now returns a real package enumerator backed by a borrowed view of the list.
    - The enumerator uses the existing ownership wrappers so `foreach`-style traversal can read the live list without taking ownership of it.
    - Covered by a regression test that calls `GetEnumerator()`, `MoveNext()`, and `Current` directly on a concrete list.
-15. The compatibility analyzer no longer flags the package-defined list enumerator as an opaque heap layout when it appears in the current collection surface.
+16. The compatibility analyzer no longer flags the package-defined list enumerator as an opaque heap layout when it appears in the current collection surface.
    - This keeps the new enumerator slice from re-triggering the generic-layout warning path used for genuine unknown allocations.
    - Covered indirectly by the existing `Rc<T>` compatibility regression tests remaining warning-free after the collection update.
 16. Nullable value types now produce an explicit warning with rewrite guidance instead of being silently erased to the underlying reference-or-scalar type.
@@ -227,6 +240,9 @@ Rewrite guidance should be specific and actionable:
 17. Reference cycles over owned graphs are now treated as a diagnostic boundary rather than an automatic safety guarantee.
    - The cycle checker reports `GL3007` with a source-specific `Weak<T>` rewrite hint when it finds an ownership loop.
    - The policy is explicit that arbitrary cyclic ownership is not automatically leak-free in the current memory-safe model.
+18. Ownership-wrapper helpers such as `make_view<T>` now lower as compiler intrinsics at the call site instead of relying on a special generic-specialization path.
+   - This keeps the current collection and xUnit package surfaces working while reducing the number of generic helper bodies that need monomorphization.
+   - Covered by the existing collection, `Rc<T>`, and xUnit regression tests that exercise `make_view<T>` transitively.
 
 ## Notes
 

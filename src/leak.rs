@@ -294,6 +294,9 @@ fn is_weak_reference_type_name(name: &str) -> bool {
         || name == "WeakReference"
         || name == "System.WeakReference"
         || name == "System.Ownership.Weak"
+        || name.starts_with("Weak<")
+        || name.starts_with("WeakReference<")
+        || name.starts_with("System.WeakReference<")
         || name.starts_with("WeakReference_")
         || name.starts_with("System_WeakReference_")
         || name.starts_with("System_Ownership_Weak")

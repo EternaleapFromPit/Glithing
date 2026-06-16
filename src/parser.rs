@@ -3237,12 +3237,12 @@ fn type_object_expr(ty: &TypeSyntax) -> Expr {
 
 fn generic_type_name_for_parser(name: &str, args: &[TypeSyntax]) -> String {
     format!(
-        "{}_{}",
+        "{}<{}>",
         name,
         args.iter()
             .map(type_syntax_name)
             .collect::<Vec<_>>()
-            .join("_")
+            .join(",")
     )
 }
 

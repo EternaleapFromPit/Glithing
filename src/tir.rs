@@ -365,6 +365,7 @@ struct DelegateSignature {
 struct TypeEnv {
     kinds: HashMap<String, TypeKind>,
     bases: HashMap<String, Vec<String>>,
+    type_generic_params: HashMap<String, Vec<String>>,
     static_fields: HashMap<(String, String), Expr>,
     enum_values: HashMap<(String, String), i64>,
     delegates: HashMap<String, DelegateSignature>,
@@ -391,6 +392,13 @@ impl TypedProgram {
         for ty in &program.types {
             env.kinds.insert(ty.name.clone(), ty.kind);
             env.bases.insert(ty.name.clone(), ty.bases.clone());
+            env.type_generic_params.insert(
+                ty.name.clone(),
+                ty.generic_params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect(),
+            );
         }
         populate_delegate_signatures(program, &mut env);
         populate_function_signatures(program, &mut env);
@@ -831,14 +839,19 @@ impl TypeEnv {
         type_name: &str,
         method_name: &str,
         arg_types: &[IrType],
-    ) -> Option<&FunctionSignature> {
+    ) -> Option<FunctionSignature> {
         if let Some(signatures) = self
             .methods
             .get(&(type_name.to_string(), method_name.to_string()))
         {
             if let Some(sig) = resolve_signature(signatures, arg_types) {
-                return Some(sig);
+                return Some(sig.clone());
             }
+        }
+        if let Some(signature) =
+            self.resolve_specialized_method_signature(type_name, method_name, arg_types)
+        {
+            return Some(signature);
         }
         self.bases.get(type_name)?.iter().find_map(|base| {
             let simple = base.rsplit('.').next().unwrap_or(base);
@@ -851,8 +864,8 @@ impl TypeEnv {
         type_name: &str,
         method_name: &str,
         args: &[TypedExpr],
-    ) -> Result<Option<&FunctionSignature>, String> {
-        let resolve = |args: &[TypedExpr]| -> Result<Option<&FunctionSignature>, String> {
+    ) -> Result<Option<FunctionSignature>, String> {
+        let resolve = |args: &[TypedExpr]| -> Result<Option<FunctionSignature>, String> {
             if let Some(signatures) = self
                 .methods
                 .get(&(type_name.to_string(), method_name.to_string()))
@@ -863,13 +876,18 @@ impl TypeEnv {
                     |expected, arg| ir_conversion_rank(expected, arg, self),
                     || format!("call to '{}.{}'", type_name, method_name),
                 )? {
-                    return Ok(Some(sig));
+                    return Ok(Some(sig.clone()));
                 }
             }
             Ok(None)
         };
         if let Some(sig) = resolve(args)? {
             return Ok(Some(sig));
+        }
+        if let Some(signature) =
+            self.resolve_specialized_method_call_signature(type_name, method_name, args)?
+        {
+            return Ok(Some(signature));
         }
         if method_name.ends_with("Async") && args.len() > 1 {
             if let Some(sig) = resolve(&args[..args.len() - 1])? {
@@ -893,7 +911,7 @@ impl TypeEnv {
         method_name: &str,
         receiver: &TypedExpr,
         args: &[TypedExpr],
-    ) -> Result<Option<&FunctionSignature>, String> {
+    ) -> Result<Option<FunctionSignature>, String> {
         let Some(signatures) = self
             .extension_methods
             .get(&(type_name.to_string(), method_name.to_string()))
@@ -903,37 +921,44 @@ impl TypeEnv {
         let mut combined = Vec::with_capacity(args.len() + 1);
         combined.push(receiver.clone());
         combined.extend(args.iter().cloned());
-        resolve_call_signature(
+        Ok(resolve_call_signature(
             signatures,
             &combined,
             |expected, arg| ir_conversion_rank(expected, arg, self),
             || format!("extension call to '{}.{}'", type_name, method_name),
-        )
+        )?
+        .cloned())
     }
 
     fn resolve_constructor(
         &self,
         type_name: &str,
         arg_types: &[IrType],
-    ) -> Option<&FunctionSignature> {
-        let signatures = self.constructors.get(type_name)?;
-        resolve_signature(signatures, arg_types)
+    ) -> Option<FunctionSignature> {
+        if let Some(signatures) = self.constructors.get(type_name) {
+            if let Some(signature) = resolve_signature(signatures, arg_types) {
+                return Some(signature.clone());
+            }
+        }
+        self.resolve_specialized_constructor_signature(type_name, arg_types)
     }
 
     fn resolve_constructor_call(
         &self,
         type_name: &str,
         args: &[TypedExpr],
-    ) -> Result<Option<&FunctionSignature>, String> {
-        let Some(signatures) = self.constructors.get(type_name) else {
-            return Ok(None);
-        };
-        resolve_call_signature(
-            signatures,
-            args,
-            |expected, arg| ir_conversion_rank(expected, arg, self),
-            || format!("constructor call '{type_name}'"),
-        )
+    ) -> Result<Option<FunctionSignature>, String> {
+        if let Some(signatures) = self.constructors.get(type_name) {
+            if let Some(signature) = resolve_call_signature(
+                signatures,
+                args,
+                |expected, arg| ir_conversion_rank(expected, arg, self),
+                || format!("constructor call '{type_name}'"),
+            )? {
+                return Ok(Some(signature.clone()));
+            }
+        }
+        self.resolve_specialized_constructor_call_signature(type_name, args)
     }
 
     fn resolve_field(&self, type_name: &str, field_name: &str) -> Option<FieldSignature> {
@@ -942,6 +967,9 @@ impl TypeEnv {
             .get(&(type_name.to_string(), field_name.to_string()))
         {
             return Some(ty.clone());
+        }
+        if let Some(field) = self.resolve_specialized_field(type_name, field_name) {
+            return Some(field);
         }
         self.bases.get(type_name)?.iter().find_map(|base| {
             let simple = base.rsplit('.').next().unwrap_or(base);
@@ -973,7 +1001,124 @@ impl TypeEnv {
                 }
             }
         }
+        if fields.is_empty() {
+            if let Some(specialized_fields) = self.resolve_specialized_all_field_infos(type_name) {
+                return specialized_fields;
+            }
+        }
         fields
+    }
+
+    fn resolve_specialized_field(&self, type_name: &str, field_name: &str) -> Option<FieldSignature> {
+        let (base_name, subst) = self.generic_owner_subst(type_name)?;
+        let field = self.fields.get(&(base_name.clone(), field_name.to_string()))?;
+        Some(substitute_field_signature(field, &subst))
+    }
+
+    fn resolve_specialized_all_field_infos(
+        &self,
+        type_name: &str,
+    ) -> Option<Vec<(String, FieldSignature)>> {
+        let (base_name, subst) = self.generic_owner_subst(type_name)?;
+        let own_fields = self.field_order.get(&base_name)?;
+        let mut fields = Vec::new();
+        if let Some(bases) = self.bases.get(&base_name) {
+            for base in bases {
+                let simple = base.rsplit('.').next().unwrap_or(base);
+                fields.extend(self.all_field_infos(simple));
+            }
+        }
+        for (name, field) in own_fields {
+            let field = substitute_field_signature(field, &subst);
+            if let Some(existing) = fields.iter_mut().find(|(field_name, _)| field_name == name) {
+                *existing = (name.clone(), field);
+            } else {
+                fields.push((name.clone(), field));
+            }
+        }
+        Some(fields)
+    }
+
+    fn resolve_specialized_method_signature(
+        &self,
+        type_name: &str,
+        method_name: &str,
+        arg_types: &[IrType],
+    ) -> Option<FunctionSignature> {
+        let (base_name, subst) = self.generic_owner_subst(type_name)?;
+        let signatures = self.methods.get(&(base_name.clone(), method_name.to_string()))?;
+        let signature = resolve_signature(signatures, arg_types)?;
+        Some(substitute_function_signature(signature, &subst))
+    }
+
+    fn resolve_specialized_method_call_signature(
+        &self,
+        type_name: &str,
+        method_name: &str,
+        args: &[TypedExpr],
+    ) -> Result<Option<FunctionSignature>, String> {
+        let Some((base_name, subst)) = self.generic_owner_subst(type_name) else {
+            return Ok(None);
+        };
+        let Some(signatures) = self.methods.get(&(base_name.clone(), method_name.to_string())) else {
+            return Ok(None);
+        };
+        let signature = resolve_call_signature(
+            signatures,
+            args,
+            |expected, arg| ir_conversion_rank(expected, arg, self),
+            || format!("call to '{}.{}'", type_name, method_name),
+        )?;
+        Ok(signature.map(|sig| substitute_function_signature(sig, &subst)))
+    }
+
+    fn resolve_specialized_constructor_signature(
+        &self,
+        type_name: &str,
+        arg_types: &[IrType],
+    ) -> Option<FunctionSignature> {
+        let (base_name, subst) = self.generic_owner_subst(type_name)?;
+        let signatures = self.constructors.get(&base_name)?;
+        let signature = resolve_signature(signatures, arg_types)?;
+        Some(substitute_function_signature(signature, &subst))
+    }
+
+    fn resolve_specialized_constructor_call_signature(
+        &self,
+        type_name: &str,
+        args: &[TypedExpr],
+    ) -> Result<Option<FunctionSignature>, String> {
+        let Some((base_name, subst)) = self.generic_owner_subst(type_name) else {
+            return Ok(None);
+        };
+        let Some(signatures) = self.constructors.get(&base_name) else {
+            return Ok(None);
+        };
+        let signature = resolve_call_signature(
+            signatures,
+            args,
+            |expected, arg| ir_conversion_rank(expected, arg, self),
+            || format!("constructor call '{type_name}'"),
+        )?;
+        Ok(signature.map(|sig| substitute_function_signature(sig, &subst)))
+    }
+
+    fn generic_owner_subst(&self, type_name: &str) -> Option<(String, HashMap<String, IrType>)> {
+        let (base, args) = split_monomorphized_type(type_name)?;
+        let base_name = base_type_name(base).to_string();
+        let generic_params = self.type_generic_params.get(&base_name)?;
+        if generic_params.len() != args.len() || generic_params.is_empty() {
+            return None;
+        }
+        let args = args
+            .into_iter()
+            .map(|arg| parse_monomorphized_ir_type(&arg, self))
+            .collect::<Option<Vec<_>>>()?;
+        let mut subst = HashMap::new();
+        for (name, arg) in generic_params.iter().cloned().zip(args) {
+            subst.insert(name, arg);
+        }
+        Some((base_name, subst))
     }
 }
 
@@ -1296,6 +1441,40 @@ fn substitute_ir_type_with_map(ty: &IrType, subst: &HashMap<String, IrType>) -> 
             return_type: Box::new(substitute_ir_type_with_map(return_type, subst)),
         },
         _ => ty.clone(),
+    }
+}
+
+fn substitute_field_signature(
+    field: &FieldSignature,
+    subst: &HashMap<String, IrType>,
+) -> FieldSignature {
+    FieldSignature {
+        ty: substitute_ir_type_with_map(&field.ty, subst),
+        ownership: field.ownership.clone(),
+    }
+}
+
+fn substitute_function_signature(
+    signature: &FunctionSignature,
+    subst: &HashMap<String, IrType>,
+) -> FunctionSignature {
+    FunctionSignature {
+        generic_params: signature.generic_params.clone(),
+        params: signature
+            .params
+            .iter()
+            .map(|param| substitute_ir_type_with_map(param, subst))
+            .collect(),
+        param_ownerships: signature.param_ownerships.clone(),
+        required_params: signature.required_params,
+        params_element_type: signature
+            .params_element_type
+            .as_ref()
+            .map(|ty| substitute_ir_type_with_map(ty, subst)),
+        return_type: substitute_ir_type_with_map(&signature.return_type, subst),
+        return_ownership: signature.return_ownership.clone(),
+        symbol: signature.symbol.clone(),
+        is_static: signature.is_static,
     }
 }
 
@@ -2521,7 +2700,8 @@ impl OwnershipChecker {
                 .iter()
                 .map(|arg| Self::check_expr(arg, env, state))
                 .collect::<Result<Vec<_>, _>>()?;
-            let signature = env.resolve_function(
+            let signature = env
+                .resolve_function(
                 name,
                 checked_args
                     .iter()
@@ -2529,18 +2709,20 @@ impl OwnershipChecker {
                     .collect::<Vec<_>>()
                     .as_slice(),
             )
-            .or_else(|| {
-                current_enclosing_type_from_state(state).and_then(|current_type| {
-                    env.resolve_method(
-                        &current_type,
-                        name,
-                        &checked_args
-                            .iter()
-                            .map(|arg| arg.ty.clone())
-                            .collect::<Vec<_>>(),
-                    )
+                .cloned()
+                .or_else(|| {
+                    current_enclosing_type_from_state(state).and_then(|current_type| {
+                        env.resolve_method(
+                            &current_type,
+                            name,
+                            &checked_args
+                                .iter()
+                                .map(|arg| arg.ty.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
                 })
-            });
+            ;
             let (ty, ownership) = signature
                 .map(|signature| {
                     (
@@ -3048,6 +3230,212 @@ pub(crate) fn ir_symbol_suffix(ty: &IrType) -> String {
     }
 }
 
+fn render_monomorphized_ir_type(ty: &IrType) -> String {
+    match ty {
+        IrType::Bool => "bool".to_string(),
+        IrType::Byte => "byte".to_string(),
+        IrType::Short => "short".to_string(),
+        IrType::Int => "int".to_string(),
+        IrType::Long => "long".to_string(),
+        IrType::UInt => "uint".to_string(),
+        IrType::Double => "double".to_string(),
+        IrType::Decimal => "decimal".to_string(),
+        IrType::String => "string".to_string(),
+        IrType::Void => "void".to_string(),
+        IrType::Array(inner) => format!("{}[]", render_monomorphized_ir_type(inner)),
+        IrType::Ref(inner) => format!("ref {}", render_monomorphized_ir_type(inner)),
+        IrType::Struct(name) | IrType::Class(name) | IrType::Interface(name) | IrType::Unknown(name) => {
+            name.clone()
+        }
+        IrType::List(inner) => format!("List<{}>", render_monomorphized_ir_type(inner)),
+        IrType::Dictionary(key, value) => format!(
+            "Dictionary<{},{}>",
+            render_monomorphized_ir_type(key),
+            render_monomorphized_ir_type(value)
+        ),
+        IrType::Enumerable(inner) => {
+            format!("IEnumerable<{}>", render_monomorphized_ir_type(inner))
+        }
+        IrType::Thread => "Thread".to_string(),
+        IrType::Task(inner) => format!("Task<{}>", render_monomorphized_ir_type(inner)),
+        IrType::Nullable(inner) => format!("Nullable<{}>", render_monomorphized_ir_type(inner)),
+        IrType::Function { params, return_type } => {
+            let mut all = params
+                .iter()
+                .map(render_monomorphized_ir_type)
+                .collect::<Vec<_>>();
+            all.push(render_monomorphized_ir_type(return_type));
+            format!("Func<{}>", all.join(","))
+        }
+        IrType::Exception => "Exception".to_string(),
+        IrType::Weak(inner) => format!("Weak<{}>", render_monomorphized_ir_type(inner)),
+    }
+}
+
+fn monomorphized_type_name(name: &str, args: &[IrType]) -> String {
+    format!(
+        "{}<{}>",
+        name,
+        args.iter()
+            .map(render_monomorphized_ir_type)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn rc_runtime_type_name(inner: &IrType) -> String {
+    let rendered = render_monomorphized_ir_type(inner);
+    let mut suffix = String::new();
+    for ch in rendered.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            suffix.push(ch);
+        } else {
+            suffix.push('_');
+        }
+    }
+    format!("Rc_{suffix}")
+}
+
+fn is_weak_reference_type_name(name: &str) -> bool {
+    name.starts_with("Weak_")
+        || name.starts_with("System_WeakReference_")
+        || name.starts_with("WeakReference_")
+        || name.starts_with("Weak<")
+        || name.starts_with("WeakReference<")
+        || name.starts_with("System.WeakReference<")
+}
+
+fn base_type_name(name: &str) -> &str {
+    name.split('<')
+        .next()
+        .unwrap_or(name)
+        .rsplit('.')
+        .next()
+        .unwrap_or(name)
+}
+
+fn split_monomorphized_type(text: &str) -> Option<(&str, Vec<String>)> {
+    let mut depth = 0usize;
+    let mut open = None;
+    let mut close = None;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '<' => {
+                if depth == 0 {
+                    open = Some(index);
+                }
+                depth += 1;
+            }
+            '>' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let open = open?;
+    let close = close?;
+    let base = &text[..open];
+    let args = &text[open + 1..close];
+    let mut parsed_args = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for ch in args.chars() {
+        match ch {
+            '<' => {
+                depth += 1;
+                current.push(ch);
+            }
+            '>' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                parsed_args.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        parsed_args.push(current.trim().to_string());
+    }
+    Some((base, parsed_args))
+}
+
+fn parse_monomorphized_ir_type(text: &str, env: &TypeEnv) -> Option<IrType> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    match text {
+        "bool" => Some(IrType::Bool),
+        "byte" => Some(IrType::Byte),
+        "short" => Some(IrType::Short),
+        "int" => Some(IrType::Int),
+        "long" => Some(IrType::Long),
+        "uint" => Some(IrType::UInt),
+        "double" => Some(IrType::Double),
+        "decimal" => Some(IrType::Decimal),
+        "string" => Some(IrType::String),
+        "void" => Some(IrType::Void),
+        "Exception" | "System.Exception" => Some(IrType::Exception),
+        _ => {
+            if let Some(inner) = text.strip_suffix("[]") {
+                return Some(IrType::Array(Box::new(parse_monomorphized_ir_type(inner, env)?)));
+            }
+            if let Some((base, args)) = split_monomorphized_type(text) {
+                let base_name = base_type_name(base);
+                return match base_name {
+                    "List" => Some(IrType::List(Box::new(parse_monomorphized_ir_type(
+                        args.first()?,
+                        env,
+                    )?))),
+                    "Dictionary" => Some(IrType::Dictionary(
+                        Box::new(parse_monomorphized_ir_type(args.first()?, env)?),
+                        Box::new(parse_monomorphized_ir_type(args.get(1)?, env)?),
+                    )),
+                    "IEnumerable" | "ICollection" => Some(IrType::Enumerable(Box::new(
+                        parse_monomorphized_ir_type(args.first()?, env)?,
+                    ))),
+                    "Task" | "ValueTask" => Some(IrType::Task(Box::new(
+                        parse_monomorphized_ir_type(args.first()?, env)?,
+                    ))),
+                    "Weak" | "WeakReference" => Some(IrType::Weak(Box::new(
+                        parse_monomorphized_ir_type(args.first()?, env)?,
+                    ))),
+                    "Nullable" => Some(IrType::Nullable(Box::new(
+                        parse_monomorphized_ir_type(args.first()?, env)?,
+                    ))),
+                    _ => {
+                        let kind = env.kinds.get(base_name).copied()?;
+                        Some(match kind {
+                            TypeKind::Class => IrType::Class(text.to_string()),
+                            TypeKind::Interface => IrType::Interface(text.to_string()),
+                            TypeKind::Enum => IrType::Int,
+                            TypeKind::Struct | TypeKind::RefStruct => {
+                                IrType::Struct(text.to_string())
+                            }
+                        })
+                    }
+                };
+            }
+            match env.kinds.get(base_type_name(text)).copied() {
+                Some(TypeKind::Class) => Some(IrType::Class(text.to_string())),
+                Some(TypeKind::Interface) => Some(IrType::Interface(text.to_string())),
+                Some(TypeKind::Enum) => Some(IrType::Int),
+                Some(TypeKind::Struct | TypeKind::RefStruct) => {
+                    Some(IrType::Struct(text.to_string()))
+                }
+                None => Some(IrType::Unknown(text.to_string())),
+            }
+        }
+    }
+}
+
 fn sanitize_ir_symbol(value: &str) -> String {
     value
         .chars()
@@ -3142,14 +3530,26 @@ fn collect_generic_call_instantiations(
     }
 
     for function in functions {
-        collect_generic_call_instantiations_function(function, &generic_symbols, output);
+        collect_generic_call_instantiations_function(
+            function,
+            &generic_symbols,
+            output,
+        );
     }
     for ty in types {
         for constructor in &ty.constructors {
-            collect_generic_call_instantiations_function(constructor, &generic_symbols, output);
+            collect_generic_call_instantiations_function(
+                constructor,
+                &generic_symbols,
+                output,
+            );
         }
         for method in &ty.methods {
-            collect_generic_call_instantiations_function(method, &generic_symbols, output);
+            collect_generic_call_instantiations_function(
+                method,
+                &generic_symbols,
+                output,
+            );
         }
     }
 }
@@ -3159,7 +3559,11 @@ fn collect_generic_call_instantiations_function(
     generic_symbols: &HashSet<String>,
     output: &mut Vec<GenericInstantiation>,
 ) {
-    collect_generic_call_instantiations_stmts(&function.body, generic_symbols, output);
+    collect_generic_call_instantiations_stmts(
+        &function.body,
+        generic_symbols,
+        output,
+    );
 }
 
 fn collect_generic_call_instantiations_stmts(
@@ -3171,33 +3575,65 @@ fn collect_generic_call_instantiations_stmts(
         match &stmt.kind {
             TypedStmtKind::Let { binding, expr } => {
                 collect_instantiation(&binding.ty, output);
-                collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+                collect_generic_call_instantiations_expr(
+                    expr,
+                    generic_symbols,
+                    output,
+                );
             }
             TypedStmtKind::Assign { expr, .. }
             | TypedStmtKind::Print(expr)
             | TypedStmtKind::Expr(expr)
             | TypedStmtKind::Return(Some(expr))
             | TypedStmtKind::Throw(expr) => {
-                collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+                collect_generic_call_instantiations_expr(
+                    expr,
+                    generic_symbols,
+                    output,
+                );
             }
             TypedStmtKind::AssignTarget { target, expr } => {
-                collect_generic_call_instantiations_expr(target, generic_symbols, output);
-                collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+                collect_generic_call_instantiations_expr(
+                    target,
+                    generic_symbols,
+                    output,
+                );
+                collect_generic_call_instantiations_expr(
+                    expr,
+                    generic_symbols,
+                    output,
+                );
             }
             TypedStmtKind::Block(body)
             | TypedStmtKind::While { body, .. }
             | TypedStmtKind::For { body, .. }
             | TypedStmtKind::ForEach { body, .. } => {
-                collect_generic_call_instantiations_stmts(body, generic_symbols, output);
+                collect_generic_call_instantiations_stmts(
+                    body,
+                    generic_symbols,
+                    output,
+                );
             }
             TypedStmtKind::If {
                 condition,
                 then_body,
                 else_body,
             } => {
-                collect_generic_call_instantiations_expr(condition, generic_symbols, output);
-                collect_generic_call_instantiations_stmts(then_body, generic_symbols, output);
-                collect_generic_call_instantiations_stmts(else_body, generic_symbols, output);
+                collect_generic_call_instantiations_expr(
+                    condition,
+                    generic_symbols,
+                    output,
+                );
+                collect_generic_call_instantiations_stmts(
+                    then_body,
+                    generic_symbols,
+                    output,
+                );
+                collect_generic_call_instantiations_stmts(
+                    else_body,
+                    generic_symbols,
+                    output,
+                );
             }
             TypedStmtKind::Try {
                 try_body,
@@ -3205,17 +3641,45 @@ fn collect_generic_call_instantiations_stmts(
                 finally_body,
                 ..
             } => {
-                collect_generic_call_instantiations_stmts(try_body, generic_symbols, output);
-                collect_generic_call_instantiations_stmts(catch_body, generic_symbols, output);
-                collect_generic_call_instantiations_stmts(finally_body, generic_symbols, output);
+                collect_generic_call_instantiations_stmts(
+                    try_body,
+                    generic_symbols,
+                    output,
+                );
+                collect_generic_call_instantiations_stmts(
+                    catch_body,
+                    generic_symbols,
+                    output,
+                );
+                collect_generic_call_instantiations_stmts(
+                    finally_body,
+                    generic_symbols,
+                    output,
+                );
             }
             TypedStmtKind::Switch { expr, cases, default } => {
-                collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+                collect_generic_call_instantiations_expr(
+                    expr,
+                    generic_symbols,
+                    output,
+                );
                 for case in cases {
-                    collect_generic_call_instantiations_expr(&case.value, generic_symbols, output);
-                    collect_generic_call_instantiations_stmts(&case.body, generic_symbols, output);
+                    collect_generic_call_instantiations_expr(
+                        &case.value,
+                        generic_symbols,
+                        output,
+                    );
+                    collect_generic_call_instantiations_stmts(
+                        &case.body,
+                        generic_symbols,
+                        output,
+                    );
                 }
-                collect_generic_call_instantiations_stmts(default, generic_symbols, output);
+                collect_generic_call_instantiations_stmts(
+                    default,
+                    generic_symbols,
+                    output,
+                );
             }
             TypedStmtKind::Return(None) | TypedStmtKind::Break | TypedStmtKind::Continue => {}
         }
@@ -5221,7 +5685,7 @@ fn lower_typed_expr_with_expected(
                 env.resolve_method_call(current_type, name, &args).ok().flatten()
             });
             let function_signature = if method_signature.is_none() {
-                env.resolve_function_call(name, &args)?
+                env.resolve_function_call(name, &args)?.cloned()
             } else {
                 None
             };
@@ -5296,10 +5760,27 @@ fn lower_typed_expr_with_expected(
             }
             let expected_types = find_expected_types(&candidates, args);
             let args = lower_call_args(args, &expected_types, env, scopes)?;
-            if type_name.starts_with("Weak_")
-                || type_name.starts_with("System_WeakReference_")
-                || type_name.starts_with("WeakReference_")
-            {
+            if let Some((base, generic_args)) = split_monomorphized_type(type_name) {
+                if base_type_name(base) == "Rc" {
+                    let inner_ty = generic_args
+                        .first()
+                        .and_then(|arg| parse_monomorphized_ir_type(arg, env))
+                        .unwrap_or(IrType::Unknown("T".to_string()));
+                    let runtime_name = rc_runtime_type_name(&inner_ty);
+                    let ty = IrType::Struct(runtime_name.clone());
+                    return Ok(typed_expr_with_ownership(
+                        TypedExprKind::NewObject {
+                            type_name: runtime_name,
+                            constructor: None,
+                            args,
+                            fields: Vec::new(),
+                        },
+                        ty.clone(),
+                        ownership_for_type(&ty),
+                    ));
+                }
+            }
+            if is_weak_reference_type_name(type_name) {
                 let inner_ty = if let Some(arg) = args.first() {
                     arg.ty.clone()
                 } else {
@@ -7182,6 +7663,17 @@ fn type_syntax_to_ir_with_subst(
             }
         }
         TypeSyntax::GenericNamed { name, args }
+            if name == "Rc" || name == "System.Ownership.Rc" =>
+        {
+            if let Some(first_arg) = args.first() {
+                IrType::Struct(rc_runtime_type_name(&type_syntax_to_ir_with_subst(
+                    first_arg, env, subst,
+                )))
+            } else {
+                IrType::Struct("Rc_T".to_string())
+            }
+        }
+        TypeSyntax::GenericNamed { name, args }
             if name == "Weak"
                 || name == "WeakReference"
                 || name == "System.WeakReference"
@@ -7264,19 +7756,17 @@ fn type_syntax_to_ir_with_subst(
                     );
                 }
             }
+            let concrete_args = args
+                .iter()
+                .map(|arg| type_syntax_to_ir_with_subst(arg, env, subst))
+                .collect::<Vec<_>>();
+            let concrete_name = monomorphized_type_name(name, &concrete_args);
             match env.kinds.get(name) {
-                Some(TypeKind::Class) => IrType::Class(name.clone()),
-                Some(TypeKind::Interface) => IrType::Interface(name.clone()),
+                Some(TypeKind::Class) => IrType::Class(concrete_name),
+                Some(TypeKind::Interface) => IrType::Interface(concrete_name),
                 Some(TypeKind::Enum) => IrType::Int,
-                Some(_) => IrType::Struct(name.clone()),
-                None => IrType::Unknown(format!(
-                    "{}<{}>",
-                    name,
-                    args.iter()
-                        .map(|arg| ir_symbol_suffix(&type_syntax_to_ir_with_subst(arg, env, subst)))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )),
+                Some(_) => IrType::Struct(concrete_name),
+                None => IrType::Unknown(concrete_name),
             }
         }
         TypeSyntax::List(inner) => {

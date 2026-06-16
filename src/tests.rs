@@ -1,5 +1,7 @@
 use super::*;
 use std::fs;
+use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn compiles_csharp_control_flow_smoke() {
@@ -122,6 +124,32 @@ fn specializes_generic_package_methods_into_concrete_llvm_bodies() {
     assert!(llvm_ir.contains("__g1__long"));
     assert!(llvm_ir.contains("__g1__string"));
     assert!(llvm_ir.contains("GenericOps__g0__t0_Echo__g1__long"));
+}
+
+#[test]
+fn specializes_transitive_generic_package_methods_into_concrete_llvm_bodies() {
+    let source = r#"
+            class GenericOps {
+                public static T Inner<T>(T value) {
+                    return value;
+                }
+
+                public static T Outer<T>(T value) {
+                    return GenericOps.Inner(value);
+                }
+            }
+
+            fn main() {
+                int number = GenericOps.Outer(42);
+                print(number);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("transitive generic package methods should specialize");
+
+    assert!(llvm_ir.contains("GenericOps__g0__t0_Outer__g1__long"));
+    assert!(llvm_ir.contains("GenericOps__g0__t0_Inner__g1__long"));
 }
 
 #[test]
@@ -265,6 +293,53 @@ fn compiles_tiny_aspnet_like_supported_subset() {
     assert!(llvm_ir.contains("glitch_endpoint_handlers_invoke"));
     assert!(llvm_ir.contains("JsonSerializer_SerializeString"));
     assert!(report.contains("No obvious owned temporary leaks detected."));
+}
+
+#[test]
+fn compiles_aspnet_load_test_example_through_llvm() {
+    let source = include_str!("../examples/aspnet_load_test.cs");
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("aspnet load test example should compile to LLVM IR");
+
+    assert!(llvm_ir.contains("WebApplication_Handle"));
+    assert!(llvm_ir.contains("System_Console_WriteLine_I64"));
+    assert!(llvm_ir.contains("glitch_live_allocations"));
+}
+
+#[test]
+fn runs_llvm_simple_example_natively() {
+    let source = include_str!("../examples/llvm_simple.gl");
+    let compiled =
+        compile_source_with_options(source, true, false).expect("llvm simple example should compile to LLVM IR");
+    let llvm_ir = compiled.llvm_ir().expect("LLVM IR should be available");
+    let output_exe = temp_smoke_executable("llvm-simple");
+    let _ = fs::remove_file(&output_exe);
+    crate::toolchain::emit_native_executable(
+        llvm_ir,
+        output_exe
+            .to_str()
+            .expect("temporary smoke path should be valid UTF-8"),
+    )
+    .expect("llvm simple example should emit a native executable");
+
+    let output = Command::new(&output_exe)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("should run the native example");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("42"));
+}
+
+fn temp_smoke_executable(stem: &str) -> std::path::PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("glitching-{stem}-{stamp}.exe"))
 }
 
 #[test]
@@ -1136,6 +1211,7 @@ fn compiles_system_array_empty_and_bool_parse_surface() {
     let llvm_ir = compile_llvm_ir(source).expect("System.Array.Empty and bool.Parse should lower");
 
     assert!(llvm_ir.contains("System_Array_Empty_Native"));
+    assert!(!llvm_ir.is_empty());
 }
 
 #[test]
@@ -2524,6 +2600,36 @@ fn warns_on_generic_placeholder_indexing_with_actionable_diagnostic() {
     assert!(diagnostics.contains("warning GL3008"));
     assert!(diagnostics.contains("generic placeholder"));
     assert!(diagnostics.contains("specialized method body"));
+}
+
+#[test]
+fn lowers_concrete_generic_box_layout_and_instance_methods_in_llvm() {
+    let source = r#"
+            class Box<T> {
+                public T Value;
+
+                public Box(T value) {
+                    this.Value = value;
+                }
+
+                public T Get() {
+                    return this.Value;
+                }
+            }
+
+            fn main() {
+                Box<int> box = new Box<int>(42);
+                print(box.Get());
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("concrete generic box should lower to LLVM");
+
+    assert!(llvm_ir.contains("%glitch.Box_int___g0__t0 = type { i64, ptr, i32 }"));
+    assert!(llvm_ir.contains("define void @Box__g1__t0_ctor__owner_int"));
+    assert!(llvm_ir.contains("define i32 @Box__g1__t0_Get__g0__owner_int"));
+    assert!(llvm_ir.contains("call void @Box__g1__t0_ctor__owner_int"));
+    assert!(llvm_ir.contains("call i32 @Box__g1__t0_Get__g0__owner_int"));
 }
 
 #[test]

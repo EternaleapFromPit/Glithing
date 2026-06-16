@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::ast::*;
 use crate::tir::*;
@@ -102,6 +102,15 @@ fn is_string_like_type(ty: &IrType) -> bool {
     }
 }
 
+fn is_weak_reference_type_name(name: &str) -> bool {
+    name.starts_with("Weak_")
+        || name.starts_with("System_WeakReference_")
+        || name.starts_with("WeakReference_")
+        || name.starts_with("Weak<")
+        || name.starts_with("WeakReference<")
+        || name.starts_with("System.WeakReference<")
+}
+
 pub(crate) struct LlvmEmitter {
     type_defs: Vec<String>,
     globals: Vec<String>,
@@ -109,6 +118,7 @@ pub(crate) struct LlvmEmitter {
     vars: HashMap<String, LlVar>,
     functions: HashMap<String, LlFunctionSig>,
     specialized_symbols: HashMap<(String, Vec<IrType>), String>,
+    specialized_instance_symbols: HashMap<(String, String), String>,
     specialized_functions: Vec<TypedFunction>,
     object_types: HashMap<String, LlObjectType>,
     nullable_layouts: HashSet<String>,
@@ -141,6 +151,7 @@ impl LlvmEmitter {
             vars: HashMap::new(),
             functions: HashMap::new(),
             specialized_symbols: HashMap::new(),
+            specialized_instance_symbols: HashMap::new(),
             specialized_functions: Vec::new(),
             object_types: HashMap::new(),
             nullable_layouts: HashSet::new(),
@@ -161,6 +172,7 @@ impl LlvmEmitter {
             emitter.register_object_type(ty);
         }
         emitter.register_rc_instantiations(program);
+        emitter.register_generic_type_specializations(program)?;
         emitter.register_generic_specializations(program)?;
         for function in &program.functions {
             emitter.register_function(function);
@@ -595,49 +607,158 @@ impl LlvmEmitter {
         &mut self,
         program: &TypedProgram,
     ) -> Result<(), String> {
-        let mut pending = Vec::new();
+        let mut generic_symbols = HashSet::new();
+        for function in &program.functions {
+            if !function.generic_params.is_empty() {
+                generic_symbols.insert(function.symbol.clone());
+            }
+        }
+        for ty in &program.types {
+            for constructor in &ty.constructors {
+                if !constructor.generic_params.is_empty() {
+                    generic_symbols.insert(constructor.symbol.clone());
+                }
+            }
+            for method in &ty.methods {
+                if !method.generic_params.is_empty() {
+                    generic_symbols.insert(method.symbol.clone());
+                }
+            }
+        }
+
+        let mut queue = VecDeque::new();
+        let mut queued = HashSet::new();
         for instantiation in &program.generic_instantiations {
+            if !is_concrete_instantiation(&instantiation.args) {
+                continue;
+            }
+            let key = (instantiation.name.clone(), instantiation.args.clone());
+            if queued.insert(key) {
+                queue.push_back(instantiation.clone());
+            }
+        }
+
+        let mut pending = Vec::new();
+        while let Some(instantiation) = queue.pop_front() {
             if instantiation.args.is_empty() {
                 continue;
             }
-            if let Some(definition) = find_generic_definition(program, &instantiation.name) {
-                if definition.generic_params.len() != instantiation.args.len() {
-                    continue;
-                }
-                let key = (definition.symbol.clone(), instantiation.args.clone());
-                if self.specialized_symbols.contains_key(&key) {
-                    continue;
-                }
-                let suffix = instantiation
-                    .args
-                    .iter()
-                    .map(ir_symbol_suffix)
-                    .collect::<Vec<_>>()
-                    .join("_");
-                let specialized_symbol = if suffix.is_empty() {
-                    format!("{}__specialized", definition.symbol)
-                } else {
-                    format!("{}__{}", definition.symbol, suffix)
-                };
-                self.specialized_symbols
-                    .insert(key, specialized_symbol.clone());
-                let mut subst = HashMap::new();
-                for (name, ty) in definition
-                    .generic_params
-                    .iter()
-                    .cloned()
-                    .zip(instantiation.args.iter().cloned())
-                {
-                    subst.insert(name, ty);
-                }
-                pending.push(specialize_typed_function(
-                    definition,
-                    &subst,
-                    specialized_symbol,
-                ));
+            let Some(definition) = find_generic_definition(program, &instantiation.name) else {
+                continue;
+            };
+            if definition.is_extern || definition.body.is_empty() {
+                continue;
             }
+            if definition.generic_params.len() != instantiation.args.len() {
+                continue;
+            }
+            if !is_concrete_instantiation(&instantiation.args)
+                && !is_safe_generic_wrapper_symbol(&definition.symbol)
+            {
+                continue;
+            }
+            let key = (definition.symbol.clone(), instantiation.args.clone());
+            if self.specialized_symbols.contains_key(&key) {
+                continue;
+            }
+            let suffix = instantiation
+                .args
+                .iter()
+                .map(ir_symbol_suffix)
+                .collect::<Vec<_>>()
+                .join("_");
+            let specialized_symbol = if suffix.is_empty() {
+                format!("{}__specialized", definition.symbol)
+            } else {
+                format!("{}__{}", definition.symbol, suffix)
+            };
+            self.specialized_symbols
+                .insert(key, specialized_symbol.clone());
+            let mut subst = HashMap::new();
+            for (name, ty) in definition
+                .generic_params
+                .iter()
+                .cloned()
+                .zip(instantiation.args.iter().cloned())
+            {
+                subst.insert(name, ty);
+            }
+            let specialized = specialize_typed_function(definition, &subst, specialized_symbol);
+            let mut discovered = Vec::new();
+            collect_generic_instantiations_from_function(
+                &specialized,
+                &generic_symbols,
+                &mut discovered,
+            );
+            for next in discovered {
+                if !is_concrete_instantiation(&next.args) {
+                    continue;
+                }
+                let next_key = (next.name.clone(), next.args.clone());
+                if self.specialized_symbols.contains_key(&next_key) || !queued.insert(next_key) {
+                    continue;
+                }
+                queue.push_back(next);
+            }
+            pending.push(specialized);
         }
         self.specialized_functions.extend(pending);
+        Ok(())
+    }
+
+    fn register_generic_type_specializations(
+        &mut self,
+        program: &TypedProgram,
+    ) -> Result<(), String> {
+        let mut instantiations = HashSet::new();
+        collect_generic_object_instantiations_program(program, &mut instantiations);
+        for type_name in instantiations {
+            if self.object_types.contains_key(&type_name) {
+                continue;
+            }
+            let Some((base_name, args)) = split_monomorphized_type(&type_name) else {
+                continue;
+            };
+            let base_name = base_type_name(base_name);
+            let Some(template) = program.types.iter().find(|ty| {
+                ty.name == base_name
+                    && !ty.generic_params.is_empty()
+                    && ty.generic_params.len() == args.len()
+            }) else {
+                continue;
+            };
+            let generic_args = args
+                .into_iter()
+                .map(|arg| parse_monomorphized_rc_inner_type(&arg, &self.object_types))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    format!(
+                        "LLVM TIR backend: could not parse generic type instantiation '{type_name}'"
+                    )
+                })?;
+            let specialized = specialize_typed_type_owner(template, &type_name, &generic_args);
+            for (template_constructor, constructor) in
+                template.constructors.iter().zip(specialized.constructors.iter())
+            {
+                self.specialized_instance_symbols.insert(
+                    (template_constructor.symbol.clone(), type_name.clone()),
+                    constructor.symbol.clone(),
+                );
+                self.register_function(constructor);
+            }
+            for (template_method, method) in template.methods.iter().zip(specialized.methods.iter()) {
+                self.specialized_instance_symbols.insert(
+                    (template_method.symbol.clone(), type_name.clone()),
+                    method.symbol.clone(),
+                );
+                self.register_function(method);
+            }
+            self.register_object_type(&specialized);
+            self.specialized_functions
+                .extend(specialized.constructors.iter().cloned());
+            self.specialized_functions
+                .extend(specialized.methods.iter().cloned());
+        }
         Ok(())
     }
 
@@ -868,6 +989,7 @@ impl LlvmEmitter {
             vars: HashMap::new(),
             functions: HashMap::new(),
             specialized_symbols: HashMap::new(),
+            specialized_instance_symbols: HashMap::new(),
             specialized_functions: Vec::new(),
             object_types: HashMap::new(),
             nullable_layouts: HashSet::new(),
@@ -2152,9 +2274,7 @@ impl LlvmEmitter {
                 constructor: _,
                 args,
                 fields: _,
-            } if type_name.starts_with("Weak_")
-                || type_name.starts_with("System_WeakReference_")
-                || type_name.starts_with("WeakReference_") =>
+            } if is_weak_reference_type_name(type_name) =>
             {
                 if let Some(target) = args.first() {
                     self.emit_typed_expr(target)
@@ -2499,6 +2619,16 @@ impl LlvmEmitter {
                     } => match resolution {
                         CallResolution::InstanceMethod => {
                             let resolved_symbol = match &target.ty {
+                                IrType::Class(type_name)
+                                | IrType::Struct(type_name)
+                                | IrType::Interface(type_name)
+                                    if type_name.contains('<') =>
+                                {
+                                    self.specialized_instance_symbols
+                                        .get(&(symbol.clone(), type_name.clone()))
+                                        .cloned()
+                                        .unwrap_or_else(|| symbol.clone())
+                                }
                                 IrType::Interface(interface_name) => self
                                     .resolve_interface_method_symbol(
                                         interface_name,
@@ -2860,6 +2990,15 @@ impl LlvmEmitter {
             self.functions.get(&resolved_name).cloned().ok_or_else(|| {
                 format!("LLVM TIR backend: function '{name}' has no lowered body")
             })?;
+        if is_safe_generic_wrapper_symbol(&resolved_name) {
+            let [arg] = args else {
+                return Err(format!(
+                    "LLVM TIR backend: wrapper '{name}' expects one argument"
+                ));
+            };
+            let value = self.emit_typed_expr(arg)?;
+            return self.cast_value(value, &signature.return_type);
+        }
         let mut values = prefix.into_iter().collect::<Vec<_>>();
         for arg in args {
             values.push(self.emit_typed_expr(arg)?);
@@ -4844,6 +4983,282 @@ fn find_generic_definition<'a>(program: &'a TypedProgram, symbol: &str) -> Optio
         })
 }
 
+fn is_concrete_instantiation(args: &[IrType]) -> bool {
+    args.iter().all(is_concrete_ir_type)
+}
+
+fn is_safe_generic_wrapper_symbol(symbol: &str) -> bool {
+    matches!(
+        symbol,
+        s if s.starts_with("make_view__g")
+            || s.starts_with("make_owned__g")
+            || s.starts_with("make_shared__g")
+            || s.starts_with("make_borrow__g")
+    )
+}
+
+fn is_concrete_ir_type(ty: &IrType) -> bool {
+    match ty {
+        IrType::Unknown(_) => false,
+        IrType::Array(inner)
+        | IrType::Ref(inner)
+        | IrType::Weak(inner)
+        | IrType::List(inner)
+        | IrType::Enumerable(inner)
+        | IrType::Task(inner)
+        | IrType::Nullable(inner) => is_concrete_ir_type(inner),
+        IrType::Dictionary(key, value) => is_concrete_ir_type(key) && is_concrete_ir_type(value),
+        IrType::Function { params, return_type } => {
+            params.iter().all(is_concrete_ir_type) && is_concrete_ir_type(return_type)
+        }
+        _ => true,
+    }
+}
+
+fn collect_generic_instantiations_from_function(
+    function: &TypedFunction,
+    generic_symbols: &HashSet<String>,
+    output: &mut Vec<GenericInstantiation>,
+) {
+    collect_llvm_instantiation(&function.return_type, output);
+    for param in &function.params {
+        collect_llvm_instantiation(&param.ty, output);
+    }
+    for local in &function.locals {
+        collect_llvm_instantiation(&local.ty, output);
+    }
+    collect_generic_call_instantiations_stmts(
+        &function.body,
+        generic_symbols,
+        output,
+    );
+}
+
+fn collect_llvm_instantiation(ty: &IrType, output: &mut Vec<GenericInstantiation>) {
+    let instantiation = match ty {
+        IrType::List(inner) => {
+            collect_llvm_instantiation(inner, output);
+            Some(GenericInstantiation {
+                name: "List".to_string(),
+                args: vec![inner.as_ref().clone()],
+            })
+        }
+        IrType::Dictionary(key, value) => {
+            collect_llvm_instantiation(key, output);
+            collect_llvm_instantiation(value, output);
+            Some(GenericInstantiation {
+                name: "Dictionary".to_string(),
+                args: vec![key.as_ref().clone(), value.as_ref().clone()],
+            })
+        }
+        IrType::Enumerable(inner) => {
+            collect_llvm_instantiation(inner, output);
+            Some(GenericInstantiation {
+                name: "IEnumerable".to_string(),
+                args: vec![inner.as_ref().clone()],
+            })
+        }
+        IrType::Task(inner) => {
+            collect_llvm_instantiation(inner, output);
+            Some(GenericInstantiation {
+                name: "Task".to_string(),
+                args: vec![inner.as_ref().clone()],
+            })
+        }
+        IrType::Array(inner) | IrType::Ref(inner) | IrType::Weak(inner) => {
+            collect_llvm_instantiation(inner, output);
+            None
+        }
+        IrType::Function {
+            params,
+            return_type,
+        } => {
+            for param in params {
+                collect_llvm_instantiation(param, output);
+            }
+            collect_llvm_instantiation(return_type, output);
+            None
+        }
+        _ => None,
+    };
+    if let Some(instantiation) = instantiation {
+        if !output.contains(&instantiation) {
+            output.push(instantiation);
+        }
+    }
+}
+
+fn collect_generic_call_instantiations_stmts(
+    stmts: &[TypedStmt],
+    generic_symbols: &HashSet<String>,
+    output: &mut Vec<GenericInstantiation>,
+) {
+    for stmt in stmts {
+        match &stmt.kind {
+            TypedStmtKind::Let { binding, expr } => {
+                collect_llvm_instantiation(&binding.ty, output);
+                collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+            }
+            TypedStmtKind::Assign { expr, .. }
+            | TypedStmtKind::Print(expr)
+            | TypedStmtKind::Expr(expr)
+            | TypedStmtKind::Return(Some(expr))
+            | TypedStmtKind::Throw(expr) => {
+                collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+            }
+            TypedStmtKind::AssignTarget { target, expr } => {
+                collect_generic_call_instantiations_expr(target, generic_symbols, output);
+                collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+            }
+            TypedStmtKind::Block(body)
+            | TypedStmtKind::While { body, .. }
+            | TypedStmtKind::For { body, .. }
+            | TypedStmtKind::ForEach { body, .. } => {
+                collect_generic_call_instantiations_stmts(body, generic_symbols, output);
+            }
+            TypedStmtKind::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_generic_call_instantiations_expr(condition, generic_symbols, output);
+                collect_generic_call_instantiations_stmts(then_body, generic_symbols, output);
+                collect_generic_call_instantiations_stmts(else_body, generic_symbols, output);
+            }
+            TypedStmtKind::Try {
+                try_body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
+                collect_generic_call_instantiations_stmts(try_body, generic_symbols, output);
+                collect_generic_call_instantiations_stmts(catch_body, generic_symbols, output);
+                collect_generic_call_instantiations_stmts(finally_body, generic_symbols, output);
+            }
+            TypedStmtKind::Switch { expr, cases, default } => {
+                collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+                for case in cases {
+                    collect_generic_call_instantiations_expr(&case.value, generic_symbols, output);
+                    collect_generic_call_instantiations_stmts(&case.body, generic_symbols, output);
+                }
+                collect_generic_call_instantiations_stmts(default, generic_symbols, output);
+            }
+            TypedStmtKind::Return(None) | TypedStmtKind::Break | TypedStmtKind::Continue => {}
+        }
+    }
+}
+
+fn collect_generic_call_instantiations_expr(
+    expr: &TypedExpr,
+    generic_symbols: &HashSet<String>,
+    output: &mut Vec<GenericInstantiation>,
+) {
+    match &expr.kind {
+        TypedExprKind::NullableSome(value) => {
+            collect_generic_call_instantiations_expr(value, generic_symbols, output);
+        }
+        TypedExprKind::ArrayLiteral(values) => {
+            for value in values {
+                collect_generic_call_instantiations_expr(value, generic_symbols, output);
+            }
+        }
+        TypedExprKind::NewArray { length, values, .. } => {
+            if let Some(length) = length {
+                collect_generic_call_instantiations_expr(length, generic_symbols, output);
+            }
+            for value in values {
+                collect_generic_call_instantiations_expr(value, generic_symbols, output);
+            }
+        }
+        TypedExprKind::Index { target, index } => {
+            collect_generic_call_instantiations_expr(target, generic_symbols, output);
+            collect_generic_call_instantiations_expr(index, generic_symbols, output);
+        }
+        TypedExprKind::Field { target, .. } => {
+            collect_generic_call_instantiations_expr(target, generic_symbols, output);
+        }
+        TypedExprKind::IsPattern { expr, .. } => {
+            collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+        }
+        TypedExprKind::Throw(expr) | TypedExprKind::Await(expr) => {
+            collect_generic_call_instantiations_expr(expr, generic_symbols, output);
+        }
+        TypedExprKind::Assign { target, value } => {
+            collect_generic_call_instantiations_expr(target, generic_symbols, output);
+            collect_generic_call_instantiations_expr(value, generic_symbols, output);
+        }
+        TypedExprKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            collect_generic_call_instantiations_expr(condition, generic_symbols, output);
+            collect_generic_call_instantiations_expr(when_true, generic_symbols, output);
+            collect_generic_call_instantiations_expr(when_false, generic_symbols, output);
+        }
+        TypedExprKind::Binary { left, right, .. } => {
+            collect_generic_call_instantiations_expr(left, generic_symbols, output);
+            collect_generic_call_instantiations_expr(right, generic_symbols, output);
+        }
+        TypedExprKind::Unary { expr: inner, .. }
+        | TypedExprKind::IncDec { target: inner, .. } => {
+            collect_generic_call_instantiations_expr(inner, generic_symbols, output);
+        }
+        TypedExprKind::Lambda { body, .. } => {
+            collect_generic_call_instantiations_expr(body, generic_symbols, output);
+        }
+        TypedExprKind::Call(call) => {
+            match &call.kind {
+                TypedCallKind::Function { symbol, .. } => {
+                    if generic_symbols.contains(symbol) && !call.generic_args.is_empty() {
+                        let instantiation = GenericInstantiation {
+                            name: symbol.clone(),
+                            args: call.generic_args.clone(),
+                        };
+                        if !output.contains(&instantiation) {
+                            output.push(instantiation);
+                        }
+                    }
+                }
+                TypedCallKind::Method { target, symbol, .. } => {
+                    collect_generic_call_instantiations_expr(target, generic_symbols, output);
+                    if generic_symbols.contains(symbol) && !call.generic_args.is_empty() {
+                        let instantiation = GenericInstantiation {
+                            name: symbol.clone(),
+                            args: call.generic_args.clone(),
+                        };
+                        if !output.contains(&instantiation) {
+                            output.push(instantiation);
+                        }
+                    }
+                }
+            }
+            for arg in &call.args {
+                collect_generic_call_instantiations_expr(arg, generic_symbols, output);
+            }
+        }
+        TypedExprKind::NewObject { args, fields, .. } => {
+            for arg in args {
+                collect_generic_call_instantiations_expr(arg, generic_symbols, output);
+            }
+            for field in fields {
+                collect_generic_call_instantiations_expr(&field.expr, generic_symbols, output);
+            }
+        }
+        TypedExprKind::NewCollection(_)
+        | TypedExprKind::NewThread(_)
+        | TypedExprKind::Int(_)
+        | TypedExprKind::Float(_)
+        | TypedExprKind::Bool(_)
+        | TypedExprKind::Null
+        | TypedExprKind::String(_)
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FunctionSymbol(_)
+        | TypedExprKind::Move(_)
+        | TypedExprKind::Borrow { .. } => {}
+    }
+}
+
 fn specialize_typed_function(
     function: &TypedFunction,
     subst: &HashMap<String, IrType>,
@@ -5167,6 +5582,321 @@ fn substitute_ir_type(ty: &IrType, subst: &HashMap<String, IrType>) -> IrType {
         },
         IrType::Weak(inner) => IrType::Weak(Box::new(substitute_ir_type(inner, subst))),
         _ => ty.clone(),
+    }
+}
+
+fn specialize_typed_type_owner(
+    ty: &TypedType,
+    concrete_name: &str,
+    generic_args: &[IrType],
+) -> TypedType {
+    let mut subst = HashMap::new();
+    for (name, arg) in ty.generic_params.iter().cloned().zip(generic_args.iter().cloned()) {
+        subst.insert(name, arg);
+    }
+    let owner_suffix = generic_args
+        .iter()
+        .map(ir_symbol_suffix)
+        .collect::<Vec<_>>()
+        .join("_");
+    TypedType {
+        name: concrete_name.to_string(),
+        namespace: ty.namespace.clone(),
+        generic_params: Vec::new(),
+        symbol_id: ty.symbol_id,
+        is_extension: ty.is_extension,
+        kind: ty.kind,
+        bases: ty.bases.clone(),
+        fields: ty
+            .fields
+            .iter()
+            .cloned()
+            .map(|binding| specialize_typed_binding(binding, &subst))
+            .collect(),
+        constructors: ty
+            .constructors
+            .iter()
+            .cloned()
+            .map(|constructor| specialize_typed_function_owner(constructor, &subst, &owner_suffix))
+            .collect(),
+        methods: ty
+            .methods
+            .iter()
+            .cloned()
+            .map(|method| specialize_typed_function_owner(method, &subst, &owner_suffix))
+            .collect(),
+    }
+}
+
+fn specialize_typed_function_owner(
+    mut function: TypedFunction,
+    subst: &HashMap<String, IrType>,
+    owner_suffix: &str,
+) -> TypedFunction {
+    function.symbol = if owner_suffix.is_empty() {
+        format!("{}__owner", function.symbol)
+    } else {
+        format!("{}__owner_{}", function.symbol, owner_suffix)
+    };
+    function.return_type = substitute_ir_type(&function.return_type, subst);
+    function.return_ownership = ownership_for_type(&function.return_type);
+    function.params = function
+        .params
+        .into_iter()
+        .map(|binding| specialize_typed_binding(binding, subst))
+        .collect();
+    function.locals = function
+        .locals
+        .into_iter()
+        .map(|binding| specialize_typed_binding(binding, subst))
+        .collect();
+    function.body = function
+        .body
+        .into_iter()
+        .map(|stmt| specialize_typed_stmt(stmt, subst))
+        .collect();
+    function
+}
+
+fn collect_generic_object_instantiations_program(
+    program: &TypedProgram,
+    out: &mut HashSet<String>,
+) {
+    for function in &program.functions {
+        collect_generic_object_instantiations_function(function, out);
+    }
+    for ty in &program.types {
+        for field in &ty.fields {
+            collect_generic_object_instantiation_type(&field.ty, out);
+        }
+        for constructor in &ty.constructors {
+            collect_generic_object_instantiations_function(constructor, out);
+        }
+        for method in &ty.methods {
+            collect_generic_object_instantiations_function(method, out);
+        }
+    }
+}
+
+fn collect_generic_object_instantiations_function(
+    function: &TypedFunction,
+    out: &mut HashSet<String>,
+) {
+    collect_generic_object_instantiation_type(&function.return_type, out);
+    for param in &function.params {
+        collect_generic_object_instantiation_type(&param.ty, out);
+    }
+    for local in &function.locals {
+        collect_generic_object_instantiation_type(&local.ty, out);
+    }
+    collect_generic_object_instantiations_stmts(&function.body, out);
+}
+
+fn collect_generic_object_instantiations_stmts(stmts: &[TypedStmt], out: &mut HashSet<String>) {
+    for stmt in stmts {
+        match &stmt.kind {
+            TypedStmtKind::Let { binding, expr } => {
+                collect_generic_object_instantiation_type(&binding.ty, out);
+                collect_generic_object_instantiations_expr(expr, out);
+            }
+            TypedStmtKind::Assign { expr, .. }
+            | TypedStmtKind::Print(expr)
+            | TypedStmtKind::Expr(expr)
+            | TypedStmtKind::Return(Some(expr))
+            | TypedStmtKind::Throw(expr) => collect_generic_object_instantiations_expr(expr, out),
+            TypedStmtKind::AssignTarget { target, expr } => {
+                collect_generic_object_instantiations_expr(target, out);
+                collect_generic_object_instantiations_expr(expr, out);
+            }
+            TypedStmtKind::Block(body) | TypedStmtKind::While { body, .. } => {
+                collect_generic_object_instantiations_stmts(body, out)
+            }
+            TypedStmtKind::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_generic_object_instantiations_expr(condition, out);
+                collect_generic_object_instantiations_stmts(then_body, out);
+                collect_generic_object_instantiations_stmts(else_body, out);
+            }
+            TypedStmtKind::Try {
+                try_body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
+                collect_generic_object_instantiations_stmts(try_body, out);
+                collect_generic_object_instantiations_stmts(catch_body, out);
+                collect_generic_object_instantiations_stmts(finally_body, out);
+            }
+            TypedStmtKind::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                collect_generic_object_instantiations_expr(expr, out);
+                for case in cases {
+                    collect_generic_object_instantiations_expr(&case.value, out);
+                    collect_generic_object_instantiations_stmts(&case.body, out);
+                }
+                collect_generic_object_instantiations_stmts(default, out);
+            }
+            TypedStmtKind::For {
+                init,
+                condition,
+                increment,
+                body,
+            } => {
+                if let Some(init) = init {
+                    collect_generic_object_instantiations_stmts(std::slice::from_ref(init), out);
+                }
+                if let Some(condition) = condition {
+                    collect_generic_object_instantiations_expr(condition, out);
+                }
+                if let Some(increment) = increment {
+                    collect_generic_object_instantiations_stmts(std::slice::from_ref(increment), out);
+                }
+                collect_generic_object_instantiations_stmts(body, out);
+            }
+            TypedStmtKind::ForEach {
+                item,
+                collection,
+                body,
+            } => {
+                collect_generic_object_instantiation_type(&item.ty, out);
+                collect_generic_object_instantiations_expr(collection, out);
+                collect_generic_object_instantiations_stmts(body, out);
+            }
+            TypedStmtKind::Return(None) | TypedStmtKind::Break | TypedStmtKind::Continue => {}
+        }
+    }
+}
+
+fn collect_generic_object_instantiations_expr(expr: &TypedExpr, out: &mut HashSet<String>) {
+    collect_generic_object_instantiation_type(&expr.ty, out);
+    match &expr.kind {
+        TypedExprKind::NullableSome(value) | TypedExprKind::Await(value) | TypedExprKind::Throw(value) => {
+            collect_generic_object_instantiations_expr(value, out);
+        }
+        TypedExprKind::ArrayLiteral(values) => {
+            for value in values {
+                collect_generic_object_instantiations_expr(value, out);
+            }
+        }
+        TypedExprKind::NewArray {
+            element_type,
+            length,
+            values,
+        } => {
+            collect_generic_object_instantiation_type(element_type, out);
+            if let Some(length) = length {
+                collect_generic_object_instantiations_expr(length, out);
+            }
+            for value in values {
+                collect_generic_object_instantiations_expr(value, out);
+            }
+        }
+        TypedExprKind::Index { target, index } => {
+            collect_generic_object_instantiations_expr(target, out);
+            collect_generic_object_instantiations_expr(index, out);
+        }
+        TypedExprKind::Field { target, .. } => collect_generic_object_instantiations_expr(target, out),
+        TypedExprKind::IsPattern { expr, binding } => {
+            collect_generic_object_instantiations_expr(expr, out);
+            if let Some(binding) = binding {
+                collect_generic_object_instantiation_type(&binding.ty, out);
+            }
+        }
+        TypedExprKind::Assign { target, value } => {
+            collect_generic_object_instantiations_expr(target, out);
+            collect_generic_object_instantiations_expr(value, out);
+        }
+        TypedExprKind::Call(call) => {
+            match &call.kind {
+                TypedCallKind::Method { target, .. } => collect_generic_object_instantiations_expr(target, out),
+                TypedCallKind::Function { .. } => {}
+            }
+            for arg in &call.args {
+                collect_generic_object_instantiations_expr(arg, out);
+            }
+            for arg in &call.generic_args {
+                collect_generic_object_instantiation_type(arg, out);
+            }
+        }
+        TypedExprKind::NewObject {
+            type_name,
+            args,
+            fields,
+            ..
+        } => {
+            if type_name.contains('<') {
+                out.insert(type_name.clone());
+            }
+            for arg in args {
+                collect_generic_object_instantiations_expr(arg, out);
+            }
+            for field in fields {
+                collect_generic_object_instantiations_expr(&field.expr, out);
+            }
+        }
+        TypedExprKind::Borrow { .. }
+        | TypedExprKind::NewCollection(_)
+        | TypedExprKind::NewThread(_)
+        | TypedExprKind::Int(_)
+        | TypedExprKind::Float(_)
+        | TypedExprKind::Bool(_)
+        | TypedExprKind::Null
+        | TypedExprKind::String(_)
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FunctionSymbol(_)
+        | TypedExprKind::Move(_) => {}
+        TypedExprKind::Lambda { body, .. } => {
+            collect_generic_object_instantiations_expr(body, out);
+        }
+        TypedExprKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            collect_generic_object_instantiations_expr(condition, out);
+            collect_generic_object_instantiations_expr(when_true, out);
+            collect_generic_object_instantiations_expr(when_false, out);
+        }
+        TypedExprKind::Unary { expr, .. } => collect_generic_object_instantiations_expr(expr, out),
+        TypedExprKind::IncDec { target, .. } => collect_generic_object_instantiations_expr(target, out),
+        TypedExprKind::Binary { left, right, .. } => {
+            collect_generic_object_instantiations_expr(left, out);
+            collect_generic_object_instantiations_expr(right, out);
+        }
+    }
+}
+
+fn collect_generic_object_instantiation_type(ty: &IrType, out: &mut HashSet<String>) {
+    match ty {
+        IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {
+            if name.contains('<') {
+                out.insert(name.clone());
+            }
+        }
+        IrType::Array(inner)
+        | IrType::Ref(inner)
+        | IrType::List(inner)
+        | IrType::Enumerable(inner)
+        | IrType::Task(inner)
+        | IrType::Nullable(inner)
+        | IrType::Weak(inner) => collect_generic_object_instantiation_type(inner, out),
+        IrType::Dictionary(key, value) => {
+            collect_generic_object_instantiation_type(key, out);
+            collect_generic_object_instantiation_type(value, out);
+        }
+        IrType::Function { params, return_type } => {
+            for param in params {
+                collect_generic_object_instantiation_type(param, out);
+            }
+            collect_generic_object_instantiation_type(return_type, out);
+        }
+        _ => {}
     }
 }
 

@@ -627,7 +627,7 @@ object FirstOrDefaultAsync(object target) { return target; }
 object FirstOrDefaultAsync(object target, object predicate) { return target; }
 object SingleOrDefaultAsync(object target) { return target; }
 object SingleOrDefaultAsync(object target, object predicate) { return target; }
-Task<int> SaveChangesAsync() { return Task.FromResult(0); }
+Task<int> SaveChangesAsync() { return new Task<int> { Result = 0 }; }
 object SaveChangesAsync(object target) { return target; }
 object AddRangeAsync(object target, object entities) { return target; }
 object AddAsync(object target, object entity) { return target; }
