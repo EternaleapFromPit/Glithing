@@ -2169,8 +2169,14 @@ impl LlvmEmitter {
                     if matches!(name.as_str(), "IsCompleted" | "IsCompletedSuccessfully")
                         && matches!(target.ty, IrType::Task(_))
                     {
+                        let task_val = self.emit_typed_expr(target)?;
+                        let completed = self.tmp();
+                        self.body.push_str(&format!(
+                            "  {} = call i1 @glitch_task_is_completed(ptr {})\n",
+                            completed, task_val.value
+                        ));
                         return Ok(LlValue {
-                            value: "true".to_string(),
+                            value: completed,
                             ty: LlType::I1,
                         });
                     }
@@ -2579,6 +2585,12 @@ impl LlvmEmitter {
                     if is_task && name == "FromResult" {
                         return self.emit_task_from_result_inline(call, &expr.ty);
                     }
+                    if is_task && name == "WhenAll" {
+                        return self.emit_task_when_all_inline(call);
+                    }
+                    if is_task && name == "CompletedTask" && call.args.is_empty() {
+                        return Ok(self.emit_task_completed_inline());
+                    }
                 }
                 match &call.kind {
                     TypedCallKind::Function { name, symbol } => {
@@ -2801,6 +2813,12 @@ impl LlvmEmitter {
                                 if name == "FromResult" {
                                     return self.emit_task_from_result_inline(call, &expr.ty);
                                 }
+                                if name == "WhenAll" {
+                                    return self.emit_task_when_all_inline(call);
+                                }
+                                if name == "CompletedTask" && call.args.is_empty() {
+                                    return Ok(self.emit_task_completed_inline());
+                                }
                             }
                             if self.functions.contains_key(symbol) {
                                 self.emit_typed_function_call(symbol, &call.generic_args, &call.args)
@@ -2903,6 +2921,16 @@ impl LlvmEmitter {
                         helper_name,
                         task_val.value
                     ));
+                    if is_string_like_type(&result_ty) {
+                        self.body.push_str(&format!(
+                            "  call void @glitch_string_retain(ptr {})\n",
+                            call_res
+                        ));
+                    } else if let Some(type_name) = object_type_name(&result_ty) {
+                        if self.object_types.contains_key(type_name) {
+                            self.emit_retain(type_name, &call_res);
+                        }
+                    }
                     Ok(LlValue {
                         value: call_res,
                         ty: result_llvm_type,
@@ -3831,12 +3859,20 @@ impl LlvmEmitter {
         tasks::emit_task_run_inline(self, call, return_type)
     }
 
+    fn emit_task_completed_inline(&mut self) -> LlValue {
+        tasks::emit_task_completed_inline(self)
+    }
+
     fn emit_task_from_result_inline(
         &mut self,
         call: &TypedCall,
         return_type: &IrType,
     ) -> Result<LlValue, String> {
         tasks::emit_task_from_result_inline(self, call, return_type)
+    }
+
+    fn emit_task_when_all_inline(&mut self, call: &TypedCall) -> Result<LlValue, String> {
+        tasks::emit_task_when_all_inline(self, call)
     }
 
     fn emit_delegate_invoke(
@@ -3917,6 +3953,8 @@ impl LlvmEmitter {
         let _ = args;
         let task_val = self.emit_typed_expr(target)?;
         if name == "Wait" {
+            self.body
+                .push_str(&format!("  call void @glitch_task_wait(ptr {})\n", task_val.value));
             Ok(void_value())
         } else if name == "GetResult" || name == "GetAwaiter" || name == "AsTask" {
             if name == "GetAwaiter" {
@@ -3943,6 +3981,16 @@ impl LlvmEmitter {
                         helper_name,
                         task_val.value
                     ));
+                    if is_string_like_type(&result_ty) {
+                        self.body.push_str(&format!(
+                            "  call void @glitch_string_retain(ptr {})\n",
+                            call_res
+                        ));
+                    } else if let Some(type_name) = object_type_name(&result_ty) {
+                        if self.object_types.contains_key(type_name) {
+                            self.emit_retain(type_name, &call_res);
+                        }
+                    }
                     Ok(LlValue {
                         value: call_res,
                         ty: result_llvm_type,

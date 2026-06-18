@@ -455,6 +455,121 @@ fn emits_task_aware_compatibility_hint_for_missing_async_member() {
 }
 
 #[test]
+fn warns_for_configuration_manager_stub_members() {
+    let source = r#"
+            using Glitching.AspNetCore;
+
+            fn main() {
+                WebApplicationBuilder builder = CreateBuilder(new string[] { });
+                int port = builder.Configuration.GetValue<int>("port");
+                print(port);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("configuration stub access should still compile with a warning");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3013"));
+    assert!(diagnostics.contains("ConfigurationManager"));
+    assert!(diagnostics.contains("compatibility stub"));
+}
+
+#[test]
+fn warns_for_service_provider_lookup_stubs() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+
+            class Service {
+                public string Name;
+            }
+
+            fn main() {
+                ServiceCollection services = new ServiceCollection();
+                ServiceProvider provider = services.BuildServiceProvider();
+                Service service = provider.GetRequiredService<Service>();
+                print(service == null);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("service-provider stub access should still compile with a warning");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3013"));
+    assert!(diagnostics.contains("dependency-injection lookup is still a compatibility stub"));
+}
+
+#[test]
+fn warns_for_automapper_map_stub_members() {
+    let source = r#"
+            using AutoMapper;
+
+            class Person {
+                public string Name;
+            }
+
+            class User {
+                public string Name;
+            }
+
+            fn main() {
+                Mapper mapper = new Mapper();
+                User user = mapper.Map<Person, User>(new Person { Name = "Ada" });
+                print(user == null);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("AutoMapper stub access should still compile with a warning");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3013"));
+    assert!(diagnostics.contains("AutoMapper `Map(...)`"));
+}
+
+#[test]
+fn warns_for_noop_swagger_host_configuration_members() {
+    let source = r#"
+            using Glitching.AspNetCore;
+
+            fn main() {
+                WebApplication app = new WebApplication();
+                app.UseSwagger();
+                app.UseSwaggerUI();
+                print(app != null);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("Swagger host configuration markers should still compile with a warning");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3013"));
+    assert!(diagnostics.contains("no-op compatibility surface"));
+}
+
+#[test]
+fn warns_for_dictionary_enumerator_stub_members() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            fn main() {
+                Dictionary<string, int> values = new Dictionary<string, int>();
+                IEnumerator<KeyValuePair<string, int>> e = values.GetEnumerator();
+                print(e == null);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("dictionary enumerator stub access should still compile with a warning");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3013"));
+    assert!(diagnostics.contains("dictionary enumeration is not lowered yet"));
+}
+
+#[test]
 fn supports_lambda_lowering_without_compatibility_warning_on_llvm_path() {
     let source = r#"
             class Runner {

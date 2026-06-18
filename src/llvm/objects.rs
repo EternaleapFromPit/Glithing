@@ -601,7 +601,7 @@ impl LlvmEmitter {
         let result_ptr = self.tmp();
         let result = self.tmp();
         self.body.push_str(&format!(
-            "  {is_null} = icmp eq ptr {task_value}, null\n  br i1 {is_null}, label %{done_label}, label %{release_label}\n{release_label}:\n  {result_ptr} = getelementptr inbounds %glitch.task, ptr {task_value}, i32 0, i32 1\n  {result} = load ptr, ptr {result_ptr}\n"
+            "  {is_null} = icmp eq ptr {task_value}, null\n  br i1 {is_null}, label %{done_label}, label %{release_label}\n{release_label}:\n  call void @glitch_task_wait(ptr {task_value})\n  {result_ptr} = getelementptr inbounds %glitch.task, ptr {task_value}, i32 0, i32 1\n  {result} = load ptr, ptr {result_ptr}\n"
         ));
         match inner {
             IrType::String => self.body.push_str(&format!(
@@ -620,7 +620,7 @@ impl LlvmEmitter {
             }
         }
         self.body.push_str(&format!(
-            "  call void @glitch_free(ptr {task_value})\n  br label %{done_label}\n{done_label}:\n"
+            "  call void @GlitchTask_Destroy(ptr {task_value})\n  call void @glitch_free(ptr {task_value})\n  br label %{done_label}\n{done_label}:\n"
         ));
     }
 

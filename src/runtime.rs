@@ -1,9 +1,16 @@
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::thread::JoinHandle;
 use std::time::Duration;
+
+#[allow(dead_code)]
+unsafe extern "C" {
+    fn free(ptr: *mut c_void);
+    fn calloc(count: usize, size: usize) -> *mut c_void;
+}
 
 // ---------------------------------------------------------------------------
 // Thread-safe string-registry lock
@@ -59,6 +66,203 @@ pub unsafe extern "C" fn GlitchString_Unlock(token: *mut std::ffi::c_void) {
     }
 }
 
+#[repr(C)]
+struct GlitchDelegate {
+    refs: i64,
+    invoke: *mut c_void,
+    env: *mut c_void,
+    destroy: *mut c_void,
+}
+
+#[repr(C)]
+struct GlitchTask {
+    completed: i32,
+    result: *mut c_void,
+    state: *mut GlitchTaskState,
+}
+
+struct GlitchTaskState {
+    worker: Mutex<Option<JoinHandle<u64>>>,
+    delegate: *mut GlitchDelegate,
+}
+
+unsafe fn glitch_delegate_release_owned(delegate: *mut GlitchDelegate) {
+    if delegate.is_null() {
+        return;
+    }
+    let refs_ptr = std::ptr::addr_of_mut!((*delegate).refs).cast::<AtomicI64>();
+    let old_refs = (*refs_ptr).fetch_sub(1, Ordering::SeqCst);
+    if old_refs != 1 {
+        return;
+    }
+    let destroy = (*delegate).destroy;
+    if !destroy.is_null() {
+        let destroy_fn: unsafe extern "C" fn(*mut c_void) = std::mem::transmute(destroy);
+        destroy_fn((*delegate).env);
+    }
+    free(delegate.cast::<c_void>());
+    GlitchLiveAllocations_Add(-1);
+}
+
+unsafe fn task_state_finished(state: *mut GlitchTaskState) -> bool {
+    if state.is_null() {
+        return true;
+    }
+    let guard = match (*state).worker.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.as_ref().map(|worker| worker.is_finished()).unwrap_or(true)
+}
+
+unsafe fn task_wait(task: *mut GlitchTask) {
+    if task.is_null() || (*task).completed != 0 {
+        return;
+    }
+    let state = (*task).state;
+    if state.is_null() {
+        (*task).completed = 1;
+        return;
+    }
+    let handle = {
+        let mut guard = match (*state).worker.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.take()
+    };
+    let result_bits = match handle {
+        Some(worker) => worker.join().unwrap_or_default(),
+        None => 0,
+    };
+    (*task).result = result_bits as usize as *mut c_void;
+    (*task).completed = 1;
+    glitch_delegate_release_owned((*state).delegate);
+    drop(Box::from_raw(state));
+    (*task).state = std::ptr::null_mut();
+    GlitchLiveAllocations_Add(-1);
+}
+
+unsafe fn task_spawn<F>(task: *mut GlitchTask, delegate: *mut GlitchDelegate, worker: F)
+where
+    F: FnOnce(*mut GlitchDelegate) -> u64 + Send + 'static,
+{
+    if task.is_null() {
+        glitch_delegate_release_owned(delegate);
+        return;
+    }
+    (*task).completed = 0;
+    (*task).result = std::ptr::null_mut();
+    let delegate_addr = delegate as usize;
+    let handle = std::thread::spawn(move || worker(delegate_addr as *mut GlitchDelegate));
+    let state = Box::new(GlitchTaskState {
+        worker: Mutex::new(Some(handle)),
+        delegate,
+    });
+    (*task).state = Box::into_raw(state);
+    GlitchLiveAllocations_Add(1);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchTask_RunVoid(task: *mut c_void, delegate: *mut c_void) {
+    let task = task as *mut GlitchTask;
+    let delegate = delegate as *mut GlitchDelegate;
+    task_spawn(task, delegate, |delegate| {
+        let invoke: unsafe extern "C" fn(*mut c_void) = std::mem::transmute((*delegate).invoke);
+        let _ = std::panic::catch_unwind(|| invoke((*delegate).env));
+        0
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchTask_RunI32(task: *mut c_void, delegate: *mut c_void) {
+    let task = task as *mut GlitchTask;
+    let delegate = delegate as *mut GlitchDelegate;
+    task_spawn(task, delegate, |delegate| {
+        let invoke: unsafe extern "C" fn(*mut c_void) -> i32 =
+            std::mem::transmute((*delegate).invoke);
+        let value = std::panic::catch_unwind(|| invoke((*delegate).env)).unwrap_or_default();
+        value as u32 as u64
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchTask_RunI64(task: *mut c_void, delegate: *mut c_void) {
+    let task = task as *mut GlitchTask;
+    let delegate = delegate as *mut GlitchDelegate;
+    task_spawn(task, delegate, |delegate| {
+        let invoke: unsafe extern "C" fn(*mut c_void) -> i64 =
+            std::mem::transmute((*delegate).invoke);
+        let value = std::panic::catch_unwind(|| invoke((*delegate).env)).unwrap_or_default();
+        value as u64
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchTask_RunDouble(task: *mut c_void, delegate: *mut c_void) {
+    let task = task as *mut GlitchTask;
+    let delegate = delegate as *mut GlitchDelegate;
+    task_spawn(task, delegate, |delegate| {
+        let invoke: unsafe extern "C" fn(*mut c_void) -> f64 =
+            std::mem::transmute((*delegate).invoke);
+        let value = std::panic::catch_unwind(|| invoke((*delegate).env)).unwrap_or_default();
+        value.to_bits()
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchTask_RunPtr(task: *mut c_void, delegate: *mut c_void) {
+    let task = task as *mut GlitchTask;
+    let delegate = delegate as *mut GlitchDelegate;
+    task_spawn(task, delegate, |delegate| {
+        let invoke: unsafe extern "C" fn(*mut c_void) -> *mut c_void =
+            std::mem::transmute((*delegate).invoke);
+        let value = std::panic::catch_unwind(|| invoke((*delegate).env))
+            .unwrap_or(std::ptr::null_mut());
+        value as usize as u64
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchTask_Wait(task: *mut c_void) {
+    task_wait(task as *mut GlitchTask);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchTask_IsCompleted(task: *mut c_void) -> bool {
+    let task = task as *mut GlitchTask;
+    if task.is_null() {
+        return true;
+    }
+    if (*task).completed != 0 {
+        return true;
+    }
+    let state = (*task).state;
+    if state.is_null() {
+        return false;
+    }
+    if task_state_finished(state) {
+        task_wait(task);
+        true
+    } else {
+        false
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchTask_Destroy(task: *mut c_void) {
+    let task = task as *mut GlitchTask;
+    if task.is_null() {
+        return;
+    }
+    task_wait(task);
+    if !(*task).state.is_null() {
+        drop(Box::from_raw((*task).state));
+        (*task).state = std::ptr::null_mut();
+        GlitchLiveAllocations_Add(-1);
+    }
+}
+
 type RequestHandler =
     unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char) -> *mut c_char;
 type StringRelease = unsafe extern "C" fn(*mut c_char);
@@ -101,32 +305,32 @@ fn run_host(
     eprintln!("Glitching HTTP host listening on port {port}");
 
     // Thread-safe request counter. If max_requests <= 0, run forever.
-    let remaining = Arc::new(AtomicI32::new(max_requests));
+    let mut workers = Vec::new();
+    let mut handled = 0i32;
 
-    for connection in listener.incoming() {
-        let Ok(stream) = connection else {
+    loop {
+        if max_requests > 0 && handled >= max_requests {
+            break;
+        }
+
+        let Ok((stream, _)) = listener.accept() else {
             continue;
         };
-
-        // Check and decrement remaining before spawning.
-        if max_requests > 0 {
-            let prev = remaining.fetch_sub(1, Ordering::SeqCst);
-            if prev <= 0 {
-                break;
-            }
-        }
+        handled += 1;
 
         // Each connection is handled on its own thread.
         // Handler and release are function pointers — they may be called
         // concurrently; the gl program's own synchronisation must protect
         // shared mutable state (e.g. the string-allocation registry).
-        let remaining_clone = remaining.clone();
         let app_addr = app as usize;
-        let _ = std::thread::spawn(move || {
+        workers.push(std::thread::spawn(move || {
             let mut stream = stream;
             handle_connection(app_addr as *mut c_void, &mut stream, handler, release);
-            drop(remaining_clone);
-        });
+        }));
+    }
+
+    for worker in workers {
+        let _ = worker.join();
     }
 }
 
@@ -617,4 +821,143 @@ pub extern "C" fn System_Console_WriteLine_Double(value: f64) {
 #[no_mangle]
 pub extern "C" fn System_Console_WriteLine_Bool(value: bool) {
     println!("{value}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+    unsafe extern "C" fn test_handler(
+        _app: *mut c_void,
+        _method: *const c_char,
+        path: *const c_char,
+        _body: *const c_char,
+    ) -> *mut c_char {
+        static HEALTH: &[u8] = b"{\"status\":\"ok\"}\0";
+        static HELLO: &[u8] = b"{\"message\":\"hi\"}\0";
+        let path = if path.is_null() {
+            ""
+        } else {
+            CStr::from_ptr(path).to_str().unwrap_or("")
+        };
+        if path.starts_with("/health") {
+            HEALTH.as_ptr() as *mut c_char
+        } else {
+            HELLO.as_ptr() as *mut c_char
+        }
+    }
+
+    unsafe extern "C" fn test_release(_value: *mut c_char) {}
+
+    fn free_tcp_port() -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("should reserve a free TCP port");
+        let port = listener
+            .local_addr()
+            .expect("reserved TCP port should have an address")
+            .port();
+        drop(listener);
+        port
+    }
+
+    fn wait_for_port(port: u16) {
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
+                Ok(_) => return,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25))
+                }
+                Err(error) => panic!("host did not accept connections on {addr}: {error}"),
+            }
+        }
+    }
+
+    fn http_get(port: u16, path: &str) -> String {
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream =
+            TcpStream::connect_timeout(&addr, Duration::from_secs(5)).expect("should connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("should set read timeout");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .expect("should set write timeout");
+        let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+        stream
+            .write_all(request.as_bytes())
+            .expect("should write request");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("should read response");
+        response
+    }
+
+    #[test]
+    fn host_serves_multiple_requests_and_waits_for_workers() {
+        let port = free_tcp_port();
+        let worker = std::thread::spawn(move || {
+            run_host(std::ptr::null_mut(), port as i32, 3, test_handler, test_release);
+        });
+
+        wait_for_port(port);
+        let first = http_get(port, "/health");
+        let second = http_get(port, "/hello");
+
+        assert!(first.starts_with("HTTP/1.1 200 OK"));
+        assert!(first.contains("{\"status\":\"ok\"}"));
+        assert!(second.starts_with("HTTP/1.1 200 OK"));
+        assert!(second.contains("{\"message\":\"hi\"}"));
+
+        worker.join().expect("host thread should exit cleanly");
+    }
+
+    static TASK_STARTED: AtomicBool = AtomicBool::new(false);
+
+    unsafe extern "C" fn delayed_i32(_env: *mut c_void) -> i32 {
+        TASK_STARTED.store(true, AtomicOrdering::SeqCst);
+        std::thread::sleep(Duration::from_millis(80));
+        42
+    }
+
+    #[test]
+    fn task_runtime_runs_work_on_background_thread_and_waits_for_result() {
+        TASK_STARTED.store(false, AtomicOrdering::SeqCst);
+
+        let mut task = GlitchTask {
+            completed: 0,
+            result: std::ptr::null_mut(),
+            state: std::ptr::null_mut(),
+        };
+        let delegate = unsafe { calloc(1, std::mem::size_of::<GlitchDelegate>()) as *mut GlitchDelegate };
+        assert!(!delegate.is_null());
+
+        unsafe {
+            (*delegate).refs = 1;
+            (*delegate).invoke = delayed_i32 as *mut c_void;
+            (*delegate).env = std::ptr::null_mut();
+            (*delegate).destroy = std::ptr::null_mut();
+
+            GlitchTask_RunI32(
+                (&mut task as *mut GlitchTask).cast::<c_void>(),
+                delegate.cast::<c_void>(),
+            );
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(TASK_STARTED.load(AtomicOrdering::SeqCst));
+        assert!(!unsafe { GlitchTask_IsCompleted((&mut task as *mut GlitchTask).cast::<c_void>()) });
+
+        unsafe {
+            GlitchTask_Wait((&mut task as *mut GlitchTask).cast::<c_void>());
+        }
+
+        assert!(unsafe { GlitchTask_IsCompleted((&mut task as *mut GlitchTask).cast::<c_void>()) });
+        assert_eq!(task.result as usize as i32, 42);
+        assert!(task.state.is_null());
+    }
 }

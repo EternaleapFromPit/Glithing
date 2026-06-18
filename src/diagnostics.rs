@@ -332,6 +332,11 @@ impl<'a> CompatibilityAnalyzer<'a> {
                         symbol,
                         resolution,
                     } => {
+                        if let Some((message, help)) =
+                            placeholder_member_diagnostic(&target.ty, name, &expr.ty)
+                        {
+                            self.emit("GL3013", &format!(".{name}"), message, help);
+                        }
                         if matches!(resolution, tir::CallResolution::Unknown)
                             || (matches!(resolution, tir::CallResolution::InstanceMethod)
                                 && !self.symbols.contains(symbol))
@@ -730,6 +735,60 @@ fn missing_member_suggestion(name: &str, return_type: &tir::IrType) -> String {
         )
     };
     rewrite
+}
+
+fn placeholder_member_diagnostic(
+    target_type: &tir::IrType,
+    name: &str,
+    return_type: &tir::IrType,
+) -> Option<(String, String)> {
+    let type_name = match target_type {
+        tir::IrType::Class(name) | tir::IrType::Struct(name) | tir::IrType::Interface(name) => {
+            name.as_str()
+        }
+        tir::IrType::Dictionary(_, _) => "Dictionary",
+        _ => return None,
+    };
+
+    match (type_name, name) {
+        ("ConfigurationManager", "Get")
+        | ("ConfigurationManager", "GetValue")
+        | ("ConfigurationManager", "GetSection")
+        | ("ConfigurationManager", "GetConnectionString") => Some((
+            format!(
+                "member '{name}' on {type_name} is still a compatibility stub; the current package returns {}",
+                typed_default_description(return_type)
+            ),
+            "bind concrete startup settings explicitly or add a real `.gl` package implementation for the requested configuration source".to_string(),
+        )),
+        ("ServiceProvider", "GetRequiredService")
+        | ("ServiceProvider", "GetService")
+        | ("IServiceProvider", "GetRequiredService")
+        | ("IServiceProvider", "GetService") => Some((
+            "dependency-injection lookup is still a compatibility stub; the current package returns a single stored object instead of resolving a scoped service graph".to_string(),
+            "construct the dependency explicitly, or add a real service-registration/runtime implementation before relying on container lookups".to_string(),
+        )),
+        ("Mapper", "Map") | ("IMapper", "Map") => Some((
+            "AutoMapper `Map(...)` is still a compatibility stub; the current package returns a typed default instead of projecting fields".to_string(),
+            "rewrite this call as an explicit object construction/copy, or add a real mapping implementation in the AutoMapper package".to_string(),
+        )),
+        ("WebApplication", "UseSwagger")
+        | ("WebApplication", "UseSwaggerUI")
+        | ("WebApplication", "UseStaticFiles")
+        | ("IApplicationBuilder", "UseSwagger")
+        | ("IApplicationBuilder", "UseSwaggerUI")
+        | ("IApplicationBuilder", "UseStaticFiles") => Some((
+            "this ASP.NET-style host configuration member is still a no-op compatibility surface; the current runtime does not expose the corresponding middleware behavior".to_string(),
+            "keep the call only as a compile-time marker, or add a real middleware/runtime implementation before depending on the configured behavior".to_string(),
+        )),
+        ("Dictionary", "GetEnumerator")
+        | ("IDictionary", "GetEnumerator")
+        | ("IReadOnlyDictionary", "GetEnumerator") => Some((
+            "dictionary enumeration is not lowered yet; the current package surface returns an inert placeholder enumerator".to_string(),
+            "iterate a supported concrete view instead, or add a real dictionary enumerator/runtime helper before using `foreach` over dictionaries".to_string(),
+        )),
+        _ => None,
+    }
 }
 
 fn ir_type_display(ty: &tir::IrType) -> String {

@@ -109,14 +109,24 @@ The current boundary is:
 - Generic method inference now treats C#-style integer literals as `int` when they fit and `long` when they do not, which keeps concrete LLVM specializations aligned with default numeric literal behavior without retyping the whole expression pipeline.
 - The supported collection runtime slice now has native execution coverage, including a direct `List`/`Dictionary` example and a larger collection workload that runs through the LLVM-native path with leak reporting enabled.
 - Native `bool` printing on the LLVM executable path now emits `true` / `false` text through LLVM-side formatting instead of numeric `1` / `0`, while preserving output order with the existing `printf`-based runtime.
+- The Rust socket-host runtime now joins spawned request-worker threads before returning from the host loop, and a direct runtime unit test covers multi-request handling on the current host path.
+- Borrow/ownership loop-flow handling now distinguishes `break` from `continue` for `for` loops, so unreachable increment paths after `break` no longer poison state while `continue` still flows through the increment step.
+- Known package stubs now surface explicit `GL3013` diagnostics for the current `ConfigurationManager.Get*`, AutoMapper `Map(...)`, and dictionary-enumerator placeholder surfaces instead of silently looking implemented just because a package method body exists.
+- The LLVM task/runtime slice now lowers `Task.WhenAll(...)`, `Task.Wait()`, and task completion-status checks through explicit runtime helpers instead of package no-ops, and there is native execution coverage for the `WhenAll + Wait + IsCompletedSuccessfully` path with leak reporting enabled.
+- `Task.FromResult(...)` now retains pointer-backed lvalue payloads on the LLVM path before storing them into task results, which closes the obvious double-release/use-after-free edge for shared string/class-style sources in the current synchronous task model.
+- `Task.Run(...)` now uses a Rust worker-thread runtime for the supported zero-argument delegate slice instead of invoking delegates inline in the LLVM backend, and `await` / `GetResult()` / `Wait()` now join that task handle before reading the result slot.
+- The task runtime now owns delegate lifetimes across worker threads and destroys captured lambda environments after completion, with direct runtime coverage for background execution plus native compiler tests for delegate cleanup and leak reporting.
+- `try` / `catch` / `finally` ownership flow now propagates `finally` effects into recorded loop-exit snapshots, so `break` / `continue` paths no longer skip cleanup or moves performed in `finally`.
+- Additional package placeholders now produce explicit `GL3013` diagnostics for DI lookup stubs (`GetRequiredService` / `GetService`) and ASP.NET-style no-op host configuration markers such as `UseSwagger` / `UseSwaggerUI` / `UseStaticFiles`.
+- The native test harness now recovers cleanly from a transient runtime-library build failure by retrying the Rust runtime build and ignoring a poisoned in-process native-build mutex.
 
 ## Next work items
 
-1. Finish the remaining async/await and socket-host runtime slice needed for concurrent request handling.
+1. Finish the remaining async/await and socket-host runtime slice needed for state-machine scheduling and non-blocking composition beyond `Task.Run` worker threads.
 2. Harden nested collection drop glue so recursive owned graphs release correctly in all supported collection shapes.
-3. Improve framework compatibility for collections, tasks, delegates, and async lowering.
-4. Add stronger borrow-check analysis across any remaining control-flow joins that still need explicit tracking beyond the current loop-exit and early-return handling.
-5. Replace any remaining compatibility stubs with real lowering or real diagnostics, especially in package surfaces that still return typed defaults as placeholders.
+3. Improve framework compatibility for collections, tasks, delegates, and async lowering beyond the current synchronous task surface.
+4. Add stronger borrow-check analysis across any remaining control-flow joins that still need explicit tracking beyond the current loop-exit, early-return, and `finally`-propagation handling.
+5. Replace any remaining compatibility stubs with real lowering or real diagnostics, especially in package surfaces that still return typed defaults or behave as no-op placeholders.
 6. Expand framework compatibility in small, test-driven slices where the runtime model already exists, and keep unsupported members on explicit diagnostics with rewrite guidance.
 7. Add additional sample/runtime acceptance work only where a concrete blocker remains after the current compile gates.
    - The next useful acceptance step is still a native ASP.NET-style host smoke path once the remaining async/runtime and package-helper gaps are closed.

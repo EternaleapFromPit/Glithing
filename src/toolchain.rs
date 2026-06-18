@@ -234,23 +234,26 @@ fn runtime_source_dependencies() -> Vec<PathBuf> {
 
 fn build_runtime_library(target_dir: &Path) -> Result<(), String> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let mut command = Command::new(&cargo);
-    command.current_dir(env!("CARGO_MANIFEST_DIR"));
-    command.arg("build");
-    command.arg("--lib");
-    command.arg("--target-dir");
-    command.arg(target_dir);
-    let output = command
-        .output()
-        .map_err(|err| format!("failed to run cargo build --lib for the native runtime: {err}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "failed to build Rust native runtime: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
+    let mut last_error = String::new();
+    for attempt in 0..3 {
+        let mut command = Command::new(&cargo);
+        command.current_dir(env!("CARGO_MANIFEST_DIR"));
+        command.arg("build");
+        command.arg("--lib");
+        command.arg("--target-dir");
+        command.arg(target_dir);
+        let output = command.output().map_err(|err| {
+            format!("failed to run cargo build --lib for the native runtime: {err}")
+        })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        last_error = String::from_utf8_lossy(&output.stderr).into_owned();
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
     }
+    Err(format!("failed to build Rust native runtime: {last_error}"))
 }
 
 fn require_llvm_tool(name: &str) -> Result<PathBuf, String> {

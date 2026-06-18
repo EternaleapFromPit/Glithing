@@ -1,7 +1,13 @@
 use super::*;
 use std::fs;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+fn native_build_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn emit_native_executable_from_source(stem: &str, source: &str) -> std::path::PathBuf {
     let compiled = compile_source_with_options(source, true, false)
@@ -17,6 +23,10 @@ fn emit_native_executable_from_path(stem: &str, input: &str) -> std::path::PathB
 }
 
 fn emit_native_executable_from_ir(stem: &str, llvm_ir: &str) -> std::path::PathBuf {
+    let _guard = match native_build_lock().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     let output_exe = temp_smoke_executable(stem);
     let _ = fs::remove_file(&output_exe);
     crate::toolchain::emit_native_executable(

@@ -113,6 +113,48 @@ fn borrow_checker_rejects_use_after_break_branch_move() {
 }
 
 #[test]
+fn borrow_checker_ignores_for_increment_after_break() {
+    let source = r#"
+            void Consume(string value) {
+            }
+
+            fn main() {
+                string name = "Ada";
+                for (; true; Consume(move name)) {
+                    break;
+                }
+                print(name);
+            }
+        "#;
+
+    compile_source_with_options(source, true, false)
+        .expect("for-loop increment after break should be unreachable");
+}
+
+#[test]
+fn borrow_checker_applies_for_increment_after_continue() {
+    let source = r#"
+            void Consume(string value) {
+            }
+
+            fn main() {
+                string name = "Ada";
+                bool first = true;
+                for (; first; Consume(move name)) {
+                    first = false;
+                    continue;
+                }
+                print(name);
+            }
+        "#;
+
+    let error = compile_source_with_options(source, true, false)
+        .expect_err("continue should still flow through the for-loop increment");
+
+    assert!(error.contains("borrow checker: use of moved value 'name'"));
+}
+
+#[test]
 fn borrow_checker_rejects_use_after_try_move() {
     let source = r#"
             fn main() {
@@ -127,6 +169,31 @@ fn borrow_checker_rejects_use_after_try_move() {
 
     let error =
         compile_source_with_options(source, true, false).expect_err("try/finally move should poison the join state");
+
+    assert!(error.contains("borrow checker: use of moved value 'name'"));
+}
+
+#[test]
+fn borrow_checker_propagates_finally_effects_into_break_exit_state() {
+    let source = r#"
+            void Consume(string value) {
+            }
+
+            fn main() {
+                string name = "Ada";
+                while (true) {
+                    try {
+                        break;
+                    } finally {
+                        Consume(move name);
+                    }
+                }
+                print(name);
+            }
+        "#;
+
+    let error = compile_source_with_options(source, true, false)
+        .expect_err("finally should execute on break paths before the loop exit merges");
 
     assert!(error.contains("borrow checker: use of moved value 'name'"));
 }

@@ -288,7 +288,7 @@ fn lowers_task_run_delegate_invocation_in_llvm() {
     let llvm_ir = compile_llvm_ir(source).expect("Task.Run should lower to LLVM IR");
 
     assert!(llvm_ir.contains("glitch_delegate_wrapper_Compute"));
-    assert!(llvm_ir.contains("glitch_task_from_result_i32"));
+    assert!(llvm_ir.contains("glitch_task_run_i32"));
 }
 
 #[test]
@@ -309,7 +309,7 @@ fn tasks_retain_and_release_string_results_in_llvm() {
 
     let llvm_ir = compile_llvm_ir(source).expect("Task<string> should lower to LLVM IR");
 
-    assert!(llvm_ir.contains("glitch_task_from_result_ptr"));
+    assert!(llvm_ir.contains("glitch_task_run_ptr"));
     assert!(llvm_ir.contains("glitch_task_get_result_ptr"));
     assert!(llvm_ir.contains("glitch_string_retain"));
     assert!(llvm_ir.contains("glitch_string_release"));
@@ -388,4 +388,5 @@ fn runs_llvm_simple_example_natively() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("42"));
 }
+
 

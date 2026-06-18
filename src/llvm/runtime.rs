@@ -26,6 +26,14 @@ pub(super) fn finish_module(emitter: &LlvmEmitter) -> Result<String, String> {
         out.push_str("declare void @System_Console_WriteLine_I64(i64)\n");
         out.push_str("declare void @System_Console_WriteLine_Double(double)\n");
         out.push_str("declare void @System_Console_WriteLine_Bool(i1)\n");
+        out.push_str("declare void @GlitchTask_RunVoid(ptr, ptr)\n");
+        out.push_str("declare void @GlitchTask_RunI32(ptr, ptr)\n");
+        out.push_str("declare void @GlitchTask_RunI64(ptr, ptr)\n");
+        out.push_str("declare void @GlitchTask_RunDouble(ptr, ptr)\n");
+        out.push_str("declare void @GlitchTask_RunPtr(ptr, ptr)\n");
+        out.push_str("declare void @GlitchTask_Wait(ptr)\n");
+        out.push_str("declare i1 @GlitchTask_IsCompleted(ptr)\n");
+        out.push_str("declare void @GlitchTask_Destroy(ptr)\n");
         out.push_str("declare ptr @GlitchString_Lock()\n");
         out.push_str("declare void @GlitchString_Unlock(ptr)\n");
         out.push_str("declare i64 @GlitchLiveAllocations_Add(i64)\n");
@@ -41,14 +49,93 @@ call_drop:\n  call void %drop_ptr(ptr %value)\n  br label %done\n\
 done:\n  ret void\n}\n",
         );
         out.push_str(
-            "%glitch.task = type { i32, ptr }\n\
+            "%glitch.task = type { i32, ptr, ptr }\n\
             define ptr @glitch_task_from_result_ptr(ptr %result) {\n\
             entry:\n\
-              %task = call ptr @glitch_calloc(i64 1, i64 16)\n\
+              %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
+              %task_size = ptrtoint ptr %task_size_ptr to i64\n\
+              %task = call ptr @glitch_calloc(i64 1, i64 %task_size)\n\
               %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
               store i32 1, ptr %completed_ptr\n\
               %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
               store ptr %result, ptr %result_ptr\n\
+              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
+              store ptr null, ptr %state_ptr\n\
+              ret ptr %task\n\
+            }\n\
+            define ptr @glitch_task_completed() {\n\
+            entry:\n\
+              %task = call ptr @glitch_task_from_result_ptr(ptr null)\n\
+              ret ptr %task\n\
+            }\n\
+            define ptr @glitch_task_run_void(ptr %delegate) {\n\
+            entry:\n\
+              %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
+              %task_size = ptrtoint ptr %task_size_ptr to i64\n\
+              %task = call ptr @glitch_calloc(i64 1, i64 %task_size)\n\
+              %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
+              store i32 0, ptr %completed_ptr\n\
+              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
+              store ptr null, ptr %result_ptr\n\
+              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
+              store ptr null, ptr %state_ptr\n\
+              call void @GlitchTask_RunVoid(ptr %task, ptr %delegate)\n\
+              ret ptr %task\n\
+            }\n\
+            define ptr @glitch_task_run_i32(ptr %delegate) {\n\
+            entry:\n\
+              %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
+              %task_size = ptrtoint ptr %task_size_ptr to i64\n\
+              %task = call ptr @glitch_calloc(i64 1, i64 %task_size)\n\
+              %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
+              store i32 0, ptr %completed_ptr\n\
+              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
+              store ptr null, ptr %result_ptr\n\
+              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
+              store ptr null, ptr %state_ptr\n\
+              call void @GlitchTask_RunI32(ptr %task, ptr %delegate)\n\
+              ret ptr %task\n\
+            }\n\
+            define ptr @glitch_task_run_i64(ptr %delegate) {\n\
+            entry:\n\
+              %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
+              %task_size = ptrtoint ptr %task_size_ptr to i64\n\
+              %task = call ptr @glitch_calloc(i64 1, i64 %task_size)\n\
+              %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
+              store i32 0, ptr %completed_ptr\n\
+              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
+              store ptr null, ptr %result_ptr\n\
+              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
+              store ptr null, ptr %state_ptr\n\
+              call void @GlitchTask_RunI64(ptr %task, ptr %delegate)\n\
+              ret ptr %task\n\
+            }\n\
+            define ptr @glitch_task_run_double(ptr %delegate) {\n\
+            entry:\n\
+              %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
+              %task_size = ptrtoint ptr %task_size_ptr to i64\n\
+              %task = call ptr @glitch_calloc(i64 1, i64 %task_size)\n\
+              %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
+              store i32 0, ptr %completed_ptr\n\
+              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
+              store ptr null, ptr %result_ptr\n\
+              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
+              store ptr null, ptr %state_ptr\n\
+              call void @GlitchTask_RunDouble(ptr %task, ptr %delegate)\n\
+              ret ptr %task\n\
+            }\n\
+            define ptr @glitch_task_run_ptr(ptr %delegate) {\n\
+            entry:\n\
+              %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
+              %task_size = ptrtoint ptr %task_size_ptr to i64\n\
+              %task = call ptr @glitch_calloc(i64 1, i64 %task_size)\n\
+              %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
+              store i32 0, ptr %completed_ptr\n\
+              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
+              store ptr null, ptr %result_ptr\n\
+              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
+              store ptr null, ptr %state_ptr\n\
+              call void @GlitchTask_RunPtr(ptr %task, ptr %delegate)\n\
               ret ptr %task\n\
             }\n\
             define ptr @glitch_task_from_result_i32(i32 %result) {\n\
@@ -77,6 +164,7 @@ done:\n  ret void\n}\n",
             null_case:\n\
               ret ptr null\n\
             normal_case:\n\
+              call void @GlitchTask_Wait(ptr %task)\n\
               %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
               %result = load ptr, ptr %result_ptr\n\
               ret ptr %result\n\
@@ -99,6 +187,28 @@ done:\n  ret void\n}\n",
               %val = ptrtoint ptr %ptr to i64\n\
               %res = bitcast i64 %val to double\n\
               ret double %res\n\
+            }\n\
+            define void @glitch_task_wait(ptr %task) {\n\
+            entry:\n\
+              call void @GlitchTask_Wait(ptr %task)\n\
+              ret void\n\
+            }\n\
+            define i1 @glitch_task_is_completed(ptr %task) {\n\
+            entry:\n\
+              %completed = call i1 @GlitchTask_IsCompleted(ptr %task)\n\
+              ret i1 %completed\n\
+            }\n\
+            define ptr @glitch_task_when_all2(ptr %left, ptr %right) {\n\
+            entry:\n\
+              call void @glitch_task_wait(ptr %left)\n\
+              call void @glitch_task_wait(ptr %right)\n\
+              %task = call ptr @glitch_task_completed()\n\
+              ret ptr %task\n\
+            }\n\
+            define ptr @glitch_task_when_all_array(ptr %tasks) {\n\
+            entry:\n\
+              %task = call ptr @glitch_task_completed()\n\
+              ret ptr %task\n\
             }\n",
         );
         out.push_str(

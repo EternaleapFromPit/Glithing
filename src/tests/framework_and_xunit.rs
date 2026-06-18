@@ -657,6 +657,8 @@ fn compiles_task_when_all_and_completed_task_surface() {
     let llvm_ir = compile_llvm_ir(source).expect("Task.WhenAll and CompletedTask should compile on the LLVM path");
 
     assert!(!llvm_ir.is_empty());
+    assert!(llvm_ir.contains("glitch_task_when_all2"));
+    assert!(llvm_ir.contains("glitch_task_is_completed"));
 }
 
 #[test]
@@ -673,7 +675,8 @@ fn compiles_task_when_all_array_surface() {
             }
         "#;
 
-    compile_llvm_ir(source).expect("Task[] WhenAll should lower");
+    let llvm_ir = compile_llvm_ir(source).expect("Task[] WhenAll should lower");
+    assert!(llvm_ir.contains("glitch_task_when_all_array"));
 }
 
 #[test]
@@ -690,7 +693,8 @@ fn compiles_task_when_all_generic_array_surface() {
             }
         "#;
 
-    compile_llvm_ir(source).expect("Task<T>[] WhenAll should lower");
+    let llvm_ir = compile_llvm_ir(source).expect("Task<T>[] WhenAll should lower");
+    assert!(llvm_ir.contains("glitch_task_when_all_array"));
 }
 
 #[test]
@@ -717,6 +721,7 @@ fn compiles_task_run_and_completed_task_package_surface() {
     let llvm_ir = compile_llvm_ir(source).expect("Task.Run and CompletedTask should lower");
 
     assert!(!llvm_ir.is_empty());
+    assert!(llvm_ir.contains("glitch_task_completed"));
 }
 
 #[test]
@@ -740,6 +745,8 @@ fn compiles_task_wait_getawaiter_and_success_properties() {
     let llvm_ir = compile_llvm_ir(source).expect("Task.Wait and GetAwaiter should lower");
 
     assert!(!llvm_ir.is_empty());
+    assert!(llvm_ir.contains("glitch_task_wait"));
+    assert!(llvm_ir.contains("glitch_task_is_completed"));
     assert!(llvm_ir.contains("glitch_task_get_result_i32"));
 }
 
@@ -769,6 +776,26 @@ fn compiles_task_and_valuetask_result_methods_from_package_surface() {
 }
 
 #[test]
+fn task_from_result_retains_lvalue_string_payloads() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            fn main() {
+                string name = "Ada";
+                Task<string> task = Task.FromResult(name);
+                print(task.Result);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("Task.FromResult should retain pointer-backed lvalue payloads");
+
+    assert!(llvm_ir.contains("glitch_task_from_result_ptr"));
+    assert!(llvm_ir.contains("glitch_string_retain"));
+    assert!(llvm_ir.contains("glitch_string_release"));
+}
+
+#[test]
 fn compiles_valuetask_wait_completed_task_and_getawaiter_surface() {
     let source = r#"
             using System.Threading.Tasks;
@@ -791,6 +818,41 @@ fn compiles_valuetask_wait_completed_task_and_getawaiter_surface() {
     let llvm_ir = compile_llvm_ir(source).expect("ValueTask helpers should lower");
 
     assert!(!llvm_ir.is_empty());
+    assert!(llvm_ir.contains("glitch_task_wait"));
+    assert!(llvm_ir.contains("glitch_task_is_completed"));
+}
+
+#[test]
+fn native_task_when_all_wait_surface_releases_tasks() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int First() {
+                return 1;
+            }
+
+            int Second() {
+                return 2;
+            }
+
+            fn main() {
+                Task<int> first = Task.Run(First);
+                Task<int> second = Task.Run(Second);
+                Task merged = Task.WhenAll(first, second);
+                merged.Wait();
+                print(merged.IsCompletedSuccessfully);
+                print(first.Result + second.Result);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("native-task-whenall", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("true"));
+    assert!(stdout.contains("3"));
+    assert!(stdout.contains("0"));
 }
 
 #[test]
