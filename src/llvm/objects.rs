@@ -1,4 +1,5 @@
-use super::*;
+﻿use super::*;
+use super::helpers::*;
 
 impl LlvmEmitter {
     pub(super) fn emit_equality(&mut self, ty: &IrType, left: &str, right: &str, result: &str) {
@@ -625,3 +626,4 @@ impl LlvmEmitter {
 
 
 }
+

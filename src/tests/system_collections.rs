@@ -368,6 +368,36 @@ fn compiles_hashset_package_surface() {
 }
 
 #[test]
+fn runs_native_collection_example() {
+    let output_exe =
+        emit_native_executable_from_path("llvm-collections", "examples/llvm_collections.gl");
+    let output = run_native_executable_with_leak_report(&output_exe);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "native collection example should exit cleanly\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, "2\r\n20\r\ntrue\r\n2\r\n100\r\ntrue\r\ntrue\r\n50\r\n0\r\n");
+}
+
+#[test]
+fn runs_native_collection_workload_without_leaks() {
+    let output_exe =
+        emit_native_executable_from_path("collection-workload", "examples/collection_workload.gl");
+    let output = run_native_executable_with_leak_report(&output_exe);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "native collection workload should exit cleanly\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, "200050000\r\n0\r\n");
+}
+
+#[test]
 fn preserves_namespace_and_attribute_metadata() {
     let source = r#"
             namespace Demo.Api {

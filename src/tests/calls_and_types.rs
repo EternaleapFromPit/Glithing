@@ -669,7 +669,7 @@ fn native_object_equals_compares_boxed_scalars_and_strings() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines = stdout.lines().collect::<Vec<_>>();
-    assert_eq!(lines, vec!["1", "0", "1", "0", "0"]);
+    assert_eq!(lines, vec!["true", "false", "true", "false", "0"]);
 }
 
 #[test]

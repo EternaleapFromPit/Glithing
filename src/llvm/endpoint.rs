@@ -1,4 +1,6 @@
-use super::*;
+﻿use super::*;
+use super::helpers::*;
+use super::support::*;
 
 impl LlvmEmitter {
     pub(super) fn emit_endpoint_dispatch(&mut self) -> Result<(), String> {
@@ -1088,3 +1090,4 @@ fn request_type_matches(object_name: &str, request_name: &str) -> bool {
         || object_base.ends_with(request_base)
         || request_base.ends_with(object_base)
 }
+

@@ -107,6 +107,8 @@ The current boundary is:
 - Native xUnit execution is now part of the example acceptance path for the stable sorting fixture, and the broader runtime-surface fixture is kept as a `.gl` source-level LLVM gate until the remaining task/runtime-accounting gaps are closed.
 - The testing split is now explicit: Rust tests keep the compiler/product gates (`.csproj`, package linking, LLVM/native output, diagnostics), while broader semantic coverage moves into `.gl` / `.cs` fixtures that the compiler can compile directly and, where the runtime slice is stable, execute natively.
 - Generic method inference now treats C#-style integer literals as `int` when they fit and `long` when they do not, which keeps concrete LLVM specializations aligned with default numeric literal behavior without retyping the whole expression pipeline.
+- The supported collection runtime slice now has native execution coverage, including a direct `List`/`Dictionary` example and a larger collection workload that runs through the LLVM-native path with leak reporting enabled.
+- Native `bool` printing on the LLVM executable path now emits `true` / `false` text through LLVM-side formatting instead of numeric `1` / `0`, while preserving output order with the existing `printf`-based runtime.
 
 ## Next work items
 
