@@ -630,6 +630,7 @@ object SingleOrDefaultAsync(object target, object predicate) { return target; }
 Task<int> SaveChangesAsync() { return new Task<int> { Result = 0 }; }
 object SaveChangesAsync(object target) { return target; }
 object AddRangeAsync(object target, object entities) { return target; }
+Task AddRangeAsync(object target, object entities, object cancellationToken) { return Task.CompletedTask; }
 object AddAsync(object target, object entity) { return target; }
 object AsNoTrackingWithIdentityResolution(object target) { return target; }
 object FromSqlRaw(object target, string sql, object parameters) { return target; }

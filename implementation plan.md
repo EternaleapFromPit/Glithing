@@ -106,18 +106,18 @@ The current boundary is:
 - The README and this plan have been synchronized with the current compiler and package behavior.
 - Native xUnit execution is now part of the example acceptance path for the stable sorting fixture, and the broader runtime-surface fixture is kept as a `.gl` source-level LLVM gate until the remaining task/runtime-accounting gaps are closed.
 - The testing split is now explicit: Rust tests keep the compiler/product gates (`.csproj`, package linking, LLVM/native output, diagnostics), while broader semantic coverage moves into `.gl` / `.cs` fixtures that the compiler can compile directly and, where the runtime slice is stable, execute natively.
+- Generic method inference now treats C#-style integer literals as `int` when they fit and `long` when they do not, which keeps concrete LLVM specializations aligned with default numeric literal behavior without retyping the whole expression pipeline.
 
 ## Next work items
 
-1. Make the allocation registry and leak counter thread-safe for concurrent HTTP workloads.
-2. Finish the remaining async/await and socket-host runtime slice needed for concurrent request handling.
-3. Harden nested collection drop glue so recursive owned graphs release correctly in all supported collection shapes.
-4. Improve framework compatibility for collections, tasks, delegates, and async lowering.
-5. Add stronger borrow-check analysis across any remaining control-flow joins that still need explicit tracking beyond the current loop-exit and early-return handling.
-6. Replace any remaining compatibility stubs with real lowering or real diagnostics, especially in package surfaces that still return typed defaults as placeholders.
-7. Expand framework compatibility in small, test-driven slices where the runtime model already exists, and keep unsupported members on explicit diagnostics with rewrite guidance.
-8. Add additional sample/runtime acceptance work only where a concrete blocker remains after the current compile gates.
-   - The larger ASP.NET smoke sample is still blocked by package/runtime helper gaps such as the generic `Array.Empty<T>()` wrapper and the broader native framework surface used by the RealWorld fixture.
+1. Finish the remaining async/await and socket-host runtime slice needed for concurrent request handling.
+2. Harden nested collection drop glue so recursive owned graphs release correctly in all supported collection shapes.
+3. Improve framework compatibility for collections, tasks, delegates, and async lowering.
+4. Add stronger borrow-check analysis across any remaining control-flow joins that still need explicit tracking beyond the current loop-exit and early-return handling.
+5. Replace any remaining compatibility stubs with real lowering or real diagnostics, especially in package surfaces that still return typed defaults as placeholders.
+6. Expand framework compatibility in small, test-driven slices where the runtime model already exists, and keep unsupported members on explicit diagnostics with rewrite guidance.
+7. Add additional sample/runtime acceptance work only where a concrete blocker remains after the current compile gates.
+   - The next useful acceptance step is still a native ASP.NET-style host smoke path once the remaining async/runtime and package-helper gaps are closed.
 
 ## C# Standard v7 Gap Analysis
 

@@ -113,6 +113,18 @@ fn is_task_surface_type(ty: &IrType) -> bool {
     )
 }
 
+fn is_object_surface_type(ty: &IrType) -> bool {
+    matches!(
+        ty,
+        IrType::Unknown(name) | IrType::Class(name)
+            if matches!(base_type_name(name), "object" | "Object")
+    )
+}
+
+fn is_null_literal_expr(expr: &TypedExpr) -> bool {
+    matches!(expr.kind, TypedExprKind::Null)
+}
+
 fn should_drop_argument_after_call(expr: &TypedExpr) -> bool {
     matches!(
         expr.kind,
@@ -132,6 +144,20 @@ fn should_drop_argument_after_call(expr: &TypedExpr) -> bool {
 
 fn value_uses_boxed_scalar_temporary(value: &LlValue, expected: &LlType) -> bool {
     *expected == LlType::Ptr && (value.ty.is_integer() || value.ty == LlType::Double)
+}
+
+fn boxed_scalar_tag(ty: &IrType) -> Option<i32> {
+    match ty {
+        IrType::Bool => Some(1),
+        IrType::Byte => Some(2),
+        IrType::Short => Some(3),
+        IrType::Int => Some(4),
+        IrType::UInt => Some(5),
+        IrType::Long => Some(6),
+        IrType::Double => Some(7),
+        IrType::Decimal => Some(8),
+        _ => None,
+    }
 }
 
 fn is_weak_reference_type_name(name: &str) -> bool {
@@ -596,7 +622,7 @@ impl LlvmEmitter {
         let type_name = Self::boxed_scalar_type_name(ty)?;
         if !self.object_types.contains_key(&type_name) {
             self.type_defs.push(format!(
-                "%{} = type {{ i64, ptr, {} }}\n",
+                "%{} = type {{ i64, ptr, i32, {} }}\n",
                 llvm_object_name(&type_name),
                 llvm_ir_type(ty).as_ir()
             ));
@@ -604,7 +630,7 @@ impl LlvmEmitter {
             fields.insert(
                 "Value".to_string(),
                 LlField {
-                    index: 2,
+                    index: 3,
                     ty: ty.clone(),
                     drop_kind: drop_kind_for_type(ty, &Ownership::Owned),
                 },
@@ -620,19 +646,6 @@ impl LlvmEmitter {
                     constructor_params: Vec::new(),
                 },
             );
-            let llvm_name = llvm_object_name(&type_name);
-            let retain_name = retain_symbol(&type_name);
-            let drop_name = drop_symbol(&type_name);
-            let destroy_name = destroy_symbol(&type_name);
-            self.globals.push(format!(
-                "define void @{retain_name}(ptr %object) {{\nentry:\n  %is_null = icmp eq ptr %object, null\n  br i1 %is_null, label %done, label %retain\nretain:\n  %rc_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 0\n  %rc = load i64, ptr %rc_ptr\n  %next = add i64 %rc, 1\n  store i64 %next, ptr %rc_ptr\n  br label %done\ndone:\n  ret void\n}}\n\n"
-            ));
-            self.globals.push(format!(
-                "define void @{drop_name}(ptr %object) {{\nentry:\n  %is_null = icmp eq ptr %object, null\n  br i1 %is_null, label %done, label %release\nrelease:\n  %rc_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 0\n  %rc = load i64, ptr %rc_ptr\n  %next = sub i64 %rc, 1\n  %destroy = icmp eq i64 %next, 0\n  br i1 %destroy, label %destroy_object, label %keep\ndestroy_object:\n  call void @glitch_free(ptr %object)\n  br label %done\nkeep:\n  store i64 %next, ptr %rc_ptr\n  br label %done\ndone:\n  ret void\n}}\n\n"
-            ));
-            self.globals.push(format!(
-                "define void @{destroy_name}(ptr %object) {{\nentry:\n  ret void\n}}\n\n"
-            ));
         }
         Some(type_name)
     }
@@ -1047,6 +1060,9 @@ impl LlvmEmitter {
                 ty
             ));
         };
+        let tag = boxed_scalar_tag(ty).ok_or_else(|| {
+            format!("LLVM backend: unsupported boxed scalar tag for type {:?}", ty)
+        })?;
         let llvm_name = llvm_object_name(&type_name);
         let size_ptr = self.tmp();
         let size = self.tmp();
@@ -1056,13 +1072,13 @@ impl LlvmEmitter {
         ));
         let rc_ptr = self.tmp();
         let drop_ptr = self.tmp();
+        let tag_ptr = self.tmp();
         self.body.push_str(&format!(
-            "  {rc_ptr} = getelementptr inbounds %{llvm_name}, ptr {object}, i32 0, i32 0\n  store i64 1, ptr {rc_ptr}\n  {drop_ptr} = getelementptr inbounds %{llvm_name}, ptr {object}, i32 0, i32 1\n  store ptr @{}, ptr {drop_ptr}\n",
-            destroy_symbol(&type_name)
+            "  {rc_ptr} = getelementptr inbounds %{llvm_name}, ptr {object}, i32 0, i32 0\n  store i64 1, ptr {rc_ptr}\n  {drop_ptr} = getelementptr inbounds %{llvm_name}, ptr {object}, i32 0, i32 1\n  store ptr @glitch_destroy_boxed_scalar, ptr {drop_ptr}\n  {tag_ptr} = getelementptr inbounds %{llvm_name}, ptr {object}, i32 0, i32 2\n  store i32 {tag}, ptr {tag_ptr}\n"
         ));
         let payload_ptr = self.tmp();
         self.body.push_str(&format!(
-            "  {payload_ptr} = getelementptr inbounds %{llvm_name}, ptr {object}, i32 0, i32 2\n  store {} {}, ptr {payload_ptr}\n",
+            "  {payload_ptr} = getelementptr inbounds %{llvm_name}, ptr {object}, i32 0, i32 3\n  store {} {}, ptr {payload_ptr}\n",
             llvm_ir_type(ty).as_ir(),
             value.value
         ));
@@ -2719,6 +2735,12 @@ impl LlvmEmitter {
                         resolution,
                     } => match resolution {
                         CallResolution::InstanceMethod => {
+                            if is_object_surface_type(&target.ty)
+                                && name == "Equals"
+                                && call.args.len() == 1
+                            {
+                                return self.emit_intrinsic_equals_pair(target, &call.args[0]);
+                            }
                             let resolved_symbol = match &target.ty {
                                 IrType::Class(type_name)
                                 | IrType::Struct(type_name)
@@ -2754,6 +2776,15 @@ impl LlvmEmitter {
                             }
                         }
                         CallResolution::StaticFunction => {
+                            if is_object_surface_type(&target.ty)
+                                && name == "Equals"
+                                && call.args.len() == 2
+                            {
+                                return self.emit_intrinsic_equals_pair(
+                                    &call.args[0],
+                                    &call.args[1],
+                                );
+                            }
                             if is_task_surface_type(&target.ty) {
                                 if name == "Run" {
                                     return self.emit_task_run_inline(call, &expr.ty);
@@ -3211,6 +3242,51 @@ impl LlvmEmitter {
                 ty: signature.return_type,
             })
         }
+    }
+
+    fn emit_intrinsic_equals_pair(
+        &mut self,
+        left_expr: &TypedExpr,
+        right_expr: &TypedExpr,
+    ) -> Result<LlValue, String> {
+        let left_value = self.emit_typed_expr(left_expr)?;
+        let right_value = self.emit_typed_expr(right_expr)?;
+        let left_ptr = self.cast_value(left_value.clone(), &LlType::Ptr)?;
+        let right_ptr = self.cast_value(right_value.clone(), &LlType::Ptr)?;
+
+        let helper = if (is_string_like_type(&left_expr.ty) && is_string_like_type(&right_expr.ty))
+            || (is_string_like_type(&left_expr.ty) && is_null_literal_expr(right_expr))
+            || (is_string_like_type(&right_expr.ty) && is_null_literal_expr(left_expr))
+        {
+            "glitch_string_equals"
+        } else {
+            "glitch_object_equals"
+        };
+
+        let result = self.tmp();
+        self.body.push_str(&format!(
+            "  {result} = call i1 @{helper}(ptr {}, ptr {})\n",
+            left_ptr.value, right_ptr.value
+        ));
+
+        for (expr, original, casted) in [
+            (left_expr, &left_value, &left_ptr),
+            (right_expr, &right_value, &right_ptr),
+        ] {
+            if value_uses_boxed_scalar_temporary(original, &LlType::Ptr) {
+                self.body.push_str(&format!(
+                    "  call void @glitch_box_release(ptr {})\n",
+                    casted.value
+                ));
+            } else if should_drop_argument_after_call(expr) {
+                self.emit_temporary_drop(expr, original);
+            }
+        }
+
+        Ok(LlValue {
+            value: result,
+            ty: LlType::I1,
+        })
     }
 
     fn emit_typed_try(

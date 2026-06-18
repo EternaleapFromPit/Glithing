@@ -1,0 +1,934 @@
+; ModuleID = 'glitching'
+%glitch.array = type { i64, ptr }
+%glitch.list = type { i64, i64, ptr }
+%glitch.dict = type { i64, i64, ptr, ptr }
+%glitch.string_node = type { i64, i64, [0 x i8] }
+%glitch.delegate = type { i64, ptr, ptr, ptr }
+%glitch.Box_long = type { i64, ptr, i32, i64 }
+declare i32 @printf(ptr, ...)
+declare ptr @calloc(i64, i64)
+declare ptr @realloc(ptr, i64)
+declare void @free(ptr)
+declare i32 @strcmp(ptr, ptr)
+declare i32 @strncmp(ptr, ptr, i64)
+declare i64 @strlen(ptr)
+declare i64 @strtoll(ptr, ptr, i32)
+declare double @strtod(ptr, ptr)
+declare ptr @strstr(ptr, ptr)
+declare i32 @snprintf(ptr, i64, ptr, ...)
+declare ptr @memcpy(ptr, ptr, i64)
+declare ptr @getenv(ptr)
+declare void @GlitchRestHost_Run(ptr, i32, i32, ptr, ptr)
+declare ptr @System_IO_File_ReadAllText(ptr)
+declare void @System_IO_File_WriteAllText(ptr, ptr)
+declare void @System_Console_WriteLine_String(ptr)
+declare void @System_Console_WriteLine_I64(i64)
+declare void @System_Console_WriteLine_Double(double)
+declare void @System_Console_WriteLine_Bool(i1)
+declare ptr @GlitchString_Lock()
+declare void @GlitchString_Unlock(ptr)
+declare i64 @GlitchLiveAllocations_Add(i64)
+declare i64 @GlitchLiveAllocations_Load()
+@glitch_exception_pending = internal global ptr null
+define ptr @glitch_take_pending_exception() {
+entry:
+  %value = load ptr, ptr @glitch_exception_pending
+  store ptr null, ptr @glitch_exception_pending
+  ret ptr %value
+}
+define void @glitch_object_drop(ptr %value) {
+entry:
+  %is_null = icmp eq ptr %value, null
+  br i1 %is_null, label %done, label %drop
+drop:
+  %drop_ptr_ptr = getelementptr inbounds { i64, ptr }, ptr %value, i32 0, i32 1
+  %drop_ptr = load ptr, ptr %drop_ptr_ptr
+  %has_drop = icmp ne ptr %drop_ptr, null
+  br i1 %has_drop, label %call_drop, label %done
+call_drop:
+  call void %drop_ptr(ptr %value)
+  br label %done
+done:
+  ret void
+}
+%glitch.task = type { i32, ptr }
+define ptr @glitch_task_from_result_ptr(ptr %result) {
+entry:
+%task = call ptr @glitch_calloc(i64 1, i64 16)
+%completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0
+store i32 1, ptr %completed_ptr
+%result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1
+store ptr %result, ptr %result_ptr
+ret ptr %task
+}
+define ptr @glitch_task_from_result_i32(i32 %result) {
+entry:
+%val_ptr = inttoptr i32 %result to ptr
+%task = call ptr @glitch_task_from_result_ptr(ptr %val_ptr)
+ret ptr %task
+}
+define ptr @glitch_task_from_result_i64(i64 %result) {
+entry:
+%val_ptr = inttoptr i64 %result to ptr
+%task = call ptr @glitch_task_from_result_ptr(ptr %val_ptr)
+ret ptr %task
+}
+define ptr @glitch_task_from_result_double(double %result) {
+entry:
+%cast = bitcast double %result to i64
+%val_ptr = inttoptr i64 %cast to ptr
+%task = call ptr @glitch_task_from_result_ptr(ptr %val_ptr)
+ret ptr %task
+}
+define ptr @glitch_task_get_result_ptr(ptr %task) {
+entry:
+%is_null = icmp eq ptr %task, null
+br i1 %is_null, label %null_case, label %normal_case
+null_case:
+ret ptr null
+normal_case:
+%result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1
+%result = load ptr, ptr %result_ptr
+ret ptr %result
+}
+define i32 @glitch_task_get_result_i32(ptr %task) {
+entry:
+%ptr = call ptr @glitch_task_get_result_ptr(ptr %task)
+%val = ptrtoint ptr %ptr to i32
+ret i32 %val
+}
+define i64 @glitch_task_get_result_i64(ptr %task) {
+entry:
+%ptr = call ptr @glitch_task_get_result_ptr(ptr %task)
+%val = ptrtoint ptr %ptr to i64
+ret i64 %val
+}
+define double @glitch_task_get_result_double(ptr %task) {
+entry:
+%ptr = call ptr @glitch_task_get_result_ptr(ptr %task)
+%val = ptrtoint ptr %ptr to i64
+%res = bitcast i64 %val to double
+ret double %res
+}
+define ptr @glitch_calloc(i64 %count, i64 %size) {
+entry:
+  %value = call ptr @calloc(i64 %count, i64 %size)
+  %is_null = icmp eq ptr %value, null
+  br i1 %is_null, label %done, label %count_alloc
+count_alloc:
+  %live = call i64 @GlitchLiveAllocations_Add(i64 1)
+  br label %done
+done:
+  ret ptr %value
+}
+define ptr @glitch_realloc(ptr %old, i64 %size) {
+entry:
+  %value = call ptr @realloc(ptr %old, i64 %size)
+  %old_null = icmp eq ptr %old, null
+  %new_valid = icmp ne ptr %value, null
+  %count_it = and i1 %old_null, %new_valid
+  br i1 %count_it, label %count_alloc, label %done
+count_alloc:
+  %live = call i64 @GlitchLiveAllocations_Add(i64 1)
+  br label %done
+done:
+  ret ptr %value
+}
+define void @glitch_free(ptr %value) {
+entry:
+  %is_null = icmp eq ptr %value, null
+  br i1 %is_null, label %done, label %release
+release:
+  call void @free(ptr %value)
+  %live = call i64 @GlitchLiveAllocations_Add(i64 -1)
+  br label %done
+done:
+  ret void
+}
+define i64 @glitch_string_length(ptr %value) {
+entry:
+  %is_null = icmp eq ptr %value, null
+  br i1 %is_null, label %empty, label %read_len
+empty:
+  ret i64 0
+read_len:
+  %length_ptr = getelementptr i8, ptr %value, i64 -8
+  %length = load i64, ptr %length_ptr
+  ret i64 %length
+}
+define i1 @glitch_route_match(ptr %template, ptr %path) {
+entry:
+  %template_index = alloca i64
+  %path_index = alloca i64
+  store i64 0, ptr %template_index
+  store i64 0, ptr %path_index
+  br label %scan
+scan:
+  %ti = load i64, ptr %template_index
+  %pi = load i64, ptr %path_index
+  %template_ptr = getelementptr inbounds i8, ptr %template, i64 %ti
+  %path_ptr = getelementptr inbounds i8, ptr %path, i64 %pi
+  %template_char = load i8, ptr %template_ptr
+  %path_char = load i8, ptr %path_ptr
+  %template_done = icmp eq i8 %template_char, 0
+  br i1 %template_done, label %finish, label %inspect
+inspect:
+  %parameter_start = icmp eq i8 %template_char, 123
+  br i1 %parameter_start, label %skip_parameter_name, label %literal
+literal:
+  %same = icmp eq i8 %template_char, %path_char
+  br i1 %same, label %advance_both, label %no_match
+advance_both:
+  %ti_next = add i64 %ti, 1
+  %pi_next = add i64 %pi, 1
+  store i64 %ti_next, ptr %template_index
+  store i64 %pi_next, ptr %path_index
+  br label %scan
+skip_parameter_name:
+  %parameter_template_index = alloca i64
+  %after_open = add i64 %ti, 1
+  store i64 %after_open, ptr %parameter_template_index
+  br label %parameter_name_loop
+parameter_name_loop:
+  %parameter_ti = load i64, ptr %parameter_template_index
+  %parameter_template_ptr = getelementptr inbounds i8, ptr %template, i64 %parameter_ti
+  %parameter_template_char = load i8, ptr %parameter_template_ptr
+  %parameter_name_done = icmp eq i8 %parameter_template_char, 125
+  %parameter_template_done = icmp eq i8 %parameter_template_char, 0
+  br i1 %parameter_template_done, label %no_match, label %parameter_name_check
+parameter_name_check:
+  br i1 %parameter_name_done, label %consume_parameter, label %advance_parameter_name
+advance_parameter_name:
+  %parameter_ti_next = add i64 %parameter_ti, 1
+  store i64 %parameter_ti_next, ptr %parameter_template_index
+  br label %parameter_name_loop
+consume_parameter:
+  %after_close = add i64 %parameter_ti, 1
+  store i64 %after_close, ptr %template_index
+  %parameter_path_start = load i64, ptr %path_index
+  %parameter_first_ptr = getelementptr inbounds i8, ptr %path, i64 %parameter_path_start
+  %parameter_first = load i8, ptr %parameter_first_ptr
+  %parameter_empty = icmp eq i8 %parameter_first, 0
+  %parameter_slash = icmp eq i8 %parameter_first, 47
+  %parameter_invalid = or i1 %parameter_empty, %parameter_slash
+  br i1 %parameter_invalid, label %no_match, label %parameter_path_loop
+parameter_path_loop:
+  %parameter_pi = load i64, ptr %path_index
+  %parameter_path_ptr = getelementptr inbounds i8, ptr %path, i64 %parameter_pi
+  %parameter_path_char = load i8, ptr %parameter_path_ptr
+  %parameter_path_done = icmp eq i8 %parameter_path_char, 0
+  %parameter_path_query = icmp eq i8 %parameter_path_char, 63
+  %parameter_path_slash = icmp eq i8 %parameter_path_char, 47
+  %parameter_path_end = or i1 %parameter_path_done, %parameter_path_query
+  %parameter_segment_done = or i1 %parameter_path_end, %parameter_path_slash
+  br i1 %parameter_segment_done, label %scan, label %advance_parameter_path
+advance_parameter_path:
+  %parameter_pi_next = add i64 %parameter_pi, 1
+  store i64 %parameter_pi_next, ptr %path_index
+  br label %parameter_path_loop
+finish:
+  %path_done = icmp eq i8 %path_char, 0
+  %path_query = icmp eq i8 %path_char, 63
+  %path_finished = or i1 %path_done, %path_query
+  ret i1 %path_finished
+no_match:
+  ret i1 false
+}
+define ptr @glitch_path_segment_string(ptr %path, i64 %target) {
+entry:
+  %position = alloca i64
+  %segment = alloca i64
+  %start = alloca i64
+  store i64 0, ptr %position
+  store i64 0, ptr %segment
+  br label %skip_slashes
+skip_slashes:
+  %skip_position = load i64, ptr %position
+  %skip_ptr = getelementptr inbounds i8, ptr %path, i64 %skip_position
+  %skip_char = load i8, ptr %skip_ptr
+  %skip_end = icmp eq i8 %skip_char, 0
+  %skip_query = icmp eq i8 %skip_char, 63
+  %skip_done = or i1 %skip_end, %skip_query
+  br i1 %skip_done, label %missing, label %skip_check
+skip_check:
+  %is_slash = icmp eq i8 %skip_char, 47
+  br i1 %is_slash, label %advance_slash, label %begin_segment
+advance_slash:
+  %after_slash = add i64 %skip_position, 1
+  store i64 %after_slash, ptr %position
+  br label %skip_slashes
+begin_segment:
+  store i64 %skip_position, ptr %start
+  %current_segment = load i64, ptr %segment
+  %is_target = icmp eq i64 %current_segment, %target
+  br i1 %is_target, label %scan_target, label %skip_segment
+scan_target:
+  %target_position = load i64, ptr %position
+  %target_ptr = getelementptr inbounds i8, ptr %path, i64 %target_position
+  %target_char = load i8, ptr %target_ptr
+  %target_end = icmp eq i8 %target_char, 0
+  %target_query = icmp eq i8 %target_char, 63
+  %target_slash = icmp eq i8 %target_char, 47
+  %target_path_end = or i1 %target_end, %target_query
+  %target_done = or i1 %target_path_end, %target_slash
+  br i1 %target_done, label %copy_target, label %advance_target
+advance_target:
+  %target_next = add i64 %target_position, 1
+  store i64 %target_next, ptr %position
+  br label %scan_target
+copy_target:
+  %target_start = load i64, ptr %start
+  %target_length = sub i64 %target_position, %target_start
+  %target_data = call ptr @glitch_string_allocate(i64 %target_length)
+  %target_source = getelementptr inbounds i8, ptr %path, i64 %target_start
+  call ptr @memcpy(ptr %target_data, ptr %target_source, i64 %target_length)
+  ret ptr %target_data
+skip_segment:
+  %segment_position = load i64, ptr %position
+  %segment_ptr = getelementptr inbounds i8, ptr %path, i64 %segment_position
+  %segment_char = load i8, ptr %segment_ptr
+  %segment_end = icmp eq i8 %segment_char, 0
+  %segment_query = icmp eq i8 %segment_char, 63
+  %segment_done = or i1 %segment_end, %segment_query
+  br i1 %segment_done, label %missing, label %segment_check
+segment_check:
+  %segment_slash = icmp eq i8 %segment_char, 47
+  br i1 %segment_slash, label %next_segment, label %advance_segment
+advance_segment:
+  %segment_next_position = add i64 %segment_position, 1
+  store i64 %segment_next_position, ptr %position
+  br label %skip_segment
+next_segment:
+  %next_segment_value = add i64 %current_segment, 1
+  store i64 %next_segment_value, ptr %segment
+  br label %skip_slashes
+missing:
+  %empty = call ptr @glitch_string_allocate(i64 0)
+  ret ptr %empty
+}
+define i64 @glitch_path_segment_i64(ptr %path, i64 %target) {
+entry:
+  %text = call ptr @glitch_path_segment_string(ptr %path, i64 %target)
+  %value = call i64 @strtoll(ptr %text, ptr null, i32 10)
+  call void @glitch_string_release(ptr %text)
+  ret i64 %value
+}
+define ptr @glitch_query_value_string(ptr %path, ptr %key, i64 %key_length) {
+entry:
+  %position = alloca i64
+  store i64 0, ptr %position
+  br label %find_query
+find_query:
+  %find_position = load i64, ptr %position
+  %find_ptr = getelementptr inbounds i8, ptr %path, i64 %find_position
+  %find_char = load i8, ptr %find_ptr
+  %find_end = icmp eq i8 %find_char, 0
+  br i1 %find_end, label %query_missing, label %find_check
+find_check:
+  %find_question = icmp eq i8 %find_char, 63
+  br i1 %find_question, label %next_pair, label %advance_find
+advance_find:
+  %find_next = add i64 %find_position, 1
+  store i64 %find_next, ptr %position
+  br label %find_query
+next_pair:
+  %pair_position = load i64, ptr %position
+  %pair_start = add i64 %pair_position, 1
+  store i64 %pair_start, ptr %position
+  br label %inspect_pair
+inspect_pair:
+  %inspect_position = load i64, ptr %position
+  %inspect_ptr = getelementptr inbounds i8, ptr %path, i64 %inspect_position
+  %inspect_char = load i8, ptr %inspect_ptr
+  %inspect_end = icmp eq i8 %inspect_char, 0
+  br i1 %inspect_end, label %query_missing, label %compare_key
+compare_key:
+  %key_cmp = call i32 @strncmp(ptr %inspect_ptr, ptr %key, i64 %key_length)
+  %key_equal = icmp eq i32 %key_cmp, 0
+  %after_key_position = add i64 %inspect_position, %key_length
+  %after_key_ptr = getelementptr inbounds i8, ptr %path, i64 %after_key_position
+  %after_key_char = load i8, ptr %after_key_ptr
+  %has_equals = icmp eq i8 %after_key_char, 61
+  %key_match = and i1 %key_equal, %has_equals
+  br i1 %key_match, label %scan_value, label %skip_pair
+scan_value:
+  %value_start = add i64 %after_key_position, 1
+  store i64 %value_start, ptr %position
+  br label %value_loop
+value_loop:
+  %value_position = load i64, ptr %position
+  %value_ptr = getelementptr inbounds i8, ptr %path, i64 %value_position
+  %value_char = load i8, ptr %value_ptr
+  %value_end = icmp eq i8 %value_char, 0
+  %value_amp = icmp eq i8 %value_char, 38
+  %value_done = or i1 %value_end, %value_amp
+  br i1 %value_done, label %copy_value, label %advance_value
+advance_value:
+  %value_next = add i64 %value_position, 1
+  store i64 %value_next, ptr %position
+  br label %value_loop
+copy_value:
+  %value_length = sub i64 %value_position, %value_start
+  %value_data = call ptr @glitch_string_allocate(i64 %value_length)
+  %value_source = getelementptr inbounds i8, ptr %path, i64 %value_start
+  call ptr @memcpy(ptr %value_data, ptr %value_source, i64 %value_length)
+  ret ptr %value_data
+skip_pair:
+  %skip_pair_position = load i64, ptr %position
+  %skip_pair_ptr = getelementptr inbounds i8, ptr %path, i64 %skip_pair_position
+  %skip_pair_char = load i8, ptr %skip_pair_ptr
+  %skip_pair_end = icmp eq i8 %skip_pair_char, 0
+  br i1 %skip_pair_end, label %query_missing, label %skip_pair_check
+skip_pair_check:
+  %skip_pair_amp = icmp eq i8 %skip_pair_char, 38
+  br i1 %skip_pair_amp, label %next_pair, label %advance_skip_pair
+advance_skip_pair:
+  %skip_pair_next = add i64 %skip_pair_position, 1
+  store i64 %skip_pair_next, ptr %position
+  br label %skip_pair
+query_missing:
+  %query_empty = call ptr @glitch_string_allocate(i64 0)
+  ret ptr %query_empty
+}
+define i64 @glitch_query_value_i64(ptr %path, ptr %key, i64 %key_length) {
+entry:
+  %text = call ptr @glitch_query_value_string(ptr %path, ptr %key, i64 %key_length)
+  %value = call i64 @strtoll(ptr %text, ptr null, i32 10)
+  call void @glitch_string_release(ptr %text)
+  ret i64 %value
+}
+define ptr @glitch_json_value_string(ptr %json, ptr %token, i64 %token_length) {
+entry:
+  %match = call ptr @strstr(ptr %json, ptr %token)
+  %missing = icmp eq ptr %match, null
+  br i1 %missing, label %json_missing, label %after_token
+  
+after_token:
+  %cursor = alloca ptr
+  %token_end = getelementptr inbounds i8, ptr %match, i64 %token_length
+  store ptr %token_end, ptr %cursor
+  br label %find_colon
+find_colon:
+  %colon_ptr = load ptr, ptr %cursor
+  %colon_char = load i8, ptr %colon_ptr
+  %colon_end = icmp eq i8 %colon_char, 0
+  br i1 %colon_end, label %json_missing, label %colon_check
+colon_check:
+  %is_colon = icmp eq i8 %colon_char, 58
+  br i1 %is_colon, label %after_colon, label %advance_colon
+advance_colon:
+  %colon_next = getelementptr inbounds i8, ptr %colon_ptr, i64 1
+  store ptr %colon_next, ptr %cursor
+  br label %find_colon
+after_colon:
+  %value_candidate = getelementptr inbounds i8, ptr %colon_ptr, i64 1
+  store ptr %value_candidate, ptr %cursor
+  br label %skip_json_space
+skip_json_space:
+  %space_ptr = load ptr, ptr %cursor
+  %space_char = load i8, ptr %space_ptr
+  %is_space = icmp eq i8 %space_char, 32
+  %is_tab = icmp eq i8 %space_char, 9
+  %is_cr = icmp eq i8 %space_char, 13
+  %is_lf = icmp eq i8 %space_char, 10
+  %space_a = or i1 %is_space, %is_tab
+  %space_b = or i1 %is_cr, %is_lf
+  %whitespace = or i1 %space_a, %space_b
+  br i1 %whitespace, label %advance_json_space, label %value_kind
+advance_json_space:
+  %space_next = getelementptr inbounds i8, ptr %space_ptr, i64 1
+  store ptr %space_next, ptr %cursor
+  br label %skip_json_space
+value_kind:
+  %is_quote = icmp eq i8 %space_char, 34
+  br i1 %is_quote, label %quoted_start, label %plain_start
+quoted_start:
+  %quoted_value = getelementptr inbounds i8, ptr %space_ptr, i64 1
+  store ptr %quoted_value, ptr %cursor
+  br label %scan_quoted
+scan_quoted:
+  %quoted_ptr = load ptr, ptr %cursor
+  %quoted_char = load i8, ptr %quoted_ptr
+  %quoted_done = icmp eq i8 %quoted_char, 34
+  %quoted_end = icmp eq i8 %quoted_char, 0
+  br i1 %quoted_end, label %json_missing, label %quoted_check
+quoted_check:
+  br i1 %quoted_done, label %copy_quoted, label %advance_quoted
+advance_quoted:
+  %quoted_next = getelementptr inbounds i8, ptr %quoted_ptr, i64 1
+  store ptr %quoted_next, ptr %cursor
+  br label %scan_quoted
+copy_quoted:
+  %quoted_start_int = ptrtoint ptr %quoted_value to i64
+  %quoted_end_int = ptrtoint ptr %quoted_ptr to i64
+  %quoted_length = sub i64 %quoted_end_int, %quoted_start_int
+  %quoted_data = call ptr @glitch_string_allocate(i64 %quoted_length)
+  call ptr @memcpy(ptr %quoted_data, ptr %quoted_value, i64 %quoted_length)
+  ret ptr %quoted_data
+plain_start:
+  store ptr %space_ptr, ptr %cursor
+  br label %scan_plain
+scan_plain:
+  %plain_ptr = load ptr, ptr %cursor
+  %plain_char = load i8, ptr %plain_ptr
+  %plain_end = icmp eq i8 %plain_char, 0
+  %plain_comma = icmp eq i8 %plain_char, 44
+  %plain_brace = icmp eq i8 %plain_char, 125
+  %plain_space = icmp eq i8 %plain_char, 32
+  %plain_a = or i1 %plain_end, %plain_comma
+  %plain_b = or i1 %plain_brace, %plain_space
+  %plain_done = or i1 %plain_a, %plain_b
+  br i1 %plain_done, label %copy_plain, label %advance_plain
+advance_plain:
+  %plain_next = getelementptr inbounds i8, ptr %plain_ptr, i64 1
+  store ptr %plain_next, ptr %cursor
+  br label %scan_plain
+copy_plain:
+  %plain_start_int = ptrtoint ptr %space_ptr to i64
+  %plain_end_int = ptrtoint ptr %plain_ptr to i64
+  %plain_length = sub i64 %plain_end_int, %plain_start_int
+  %plain_data = call ptr @glitch_string_allocate(i64 %plain_length)
+  call ptr @memcpy(ptr %plain_data, ptr %space_ptr, i64 %plain_length)
+  ret ptr %plain_data
+json_missing:
+  %json_empty = call ptr @glitch_string_allocate(i64 0)
+  ret ptr %json_empty
+}
+define i64 @glitch_json_value_i64(ptr %json, ptr %token, i64 %token_length) {
+entry:
+  %text = call ptr @glitch_json_value_string(ptr %json, ptr %token, i64 %token_length)
+  %value = call i64 @strtoll(ptr %text, ptr null, i32 10)
+  call void @glitch_string_release(ptr %text)
+  ret i64 %value
+}
+define double @glitch_json_value_double(ptr %json, ptr %token, i64 %token_length) {
+entry:
+  %text = call ptr @glitch_json_value_string(ptr %json, ptr %token, i64 %token_length)
+  %value = call double @strtod(ptr %text, ptr null)
+  call void @glitch_string_release(ptr %text)
+  ret double %value
+}
+define i1 @glitch_json_value_bool(ptr %json, ptr %token, i64 %token_length) {
+entry:
+  %text = call ptr @glitch_json_value_string(ptr %json, ptr %token, i64 %token_length)
+  %first = load i8, ptr %text
+  %is_t = icmp eq i8 %first, 116
+  %is_T = icmp eq i8 %first, 84
+  %is_one = icmp eq i8 %first, 49
+  %is_true_text = or i1 %is_t, %is_T
+  %value = or i1 %is_true_text, %is_one
+  call void @glitch_string_release(ptr %text)
+  ret i1 %value
+}
+define ptr @glitch_i64_to_string(i64 %value) {
+entry:
+  %buffer = alloca [32 x i8]
+  %buffer_ptr = getelementptr inbounds [32 x i8], ptr %buffer, i64 0, i64 0
+  %length_i32 = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buffer_ptr, i64 32, ptr getelementptr inbounds ([5 x i8], ptr @.fmt_json_i64, i64 0, i64 0), i64 %value)
+  %length = sext i32 %length_i32 to i64
+  %text = call ptr @glitch_string_allocate(i64 %length)
+  call ptr @memcpy(ptr %text, ptr %buffer_ptr, i64 %length)
+  ret ptr %text
+}
+define ptr @glitch_double_to_string(double %value) {
+entry:
+  %buffer = alloca [64 x i8]
+  %buffer_ptr = getelementptr inbounds [64 x i8], ptr %buffer, i64 0, i64 0
+  %length_i32 = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buffer_ptr, i64 64, ptr getelementptr inbounds ([6 x i8], ptr @.fmt_json_double, i64 0, i64 0), double %value)
+  %length = sext i32 %length_i32 to i64
+  %text = call ptr @glitch_string_allocate(i64 %length)
+  call ptr @memcpy(ptr %text, ptr %buffer_ptr, i64 %length)
+  ret ptr %text
+}
+define ptr @glitch_string_allocate(i64 %length) {
+entry:
+  %with_null = add i64 %length, 1
+  %size = add i64 %with_null, 16
+  %node = call ptr @glitch_calloc(i64 1, i64 %size)
+  %refs_ptr = getelementptr inbounds %glitch.string_node, ptr %node, i32 0, i32 0
+  store i64 1, ptr %refs_ptr
+  %length_ptr = getelementptr inbounds %glitch.string_node, ptr %node, i32 0, i32 1
+  store i64 %length, ptr %length_ptr
+  %data = getelementptr inbounds %glitch.string_node, ptr %node, i32 0, i32 2, i64 0
+  ret ptr %data
+}
+define ptr @glitch_string_concat(ptr %left, ptr %right) {
+entry:
+  %left_length = call i64 @glitch_string_length(ptr %left)
+  %right_length = call i64 @glitch_string_length(ptr %right)
+  %length = add i64 %left_length, %right_length
+  %data = call ptr @glitch_string_allocate(i64 %length)
+  %left_empty = icmp eq i64 %left_length, 0
+  br i1 %left_empty, label %copy_right, label %copy_left
+copy_left:
+  call ptr @memcpy(ptr %data, ptr %left, i64 %left_length)
+  br label %copy_right
+copy_right:
+  %right_empty = icmp eq i64 %right_length, 0
+  br i1 %right_empty, label %done, label %copy_right_data
+copy_right_data:
+  %right_target = getelementptr inbounds i8, ptr %data, i64 %left_length
+  call ptr @memcpy(ptr %right_target, ptr %right, i64 %right_length)
+  br label %done
+done:
+  ret ptr %data
+}
+define void @glitch_string_retain(ptr %value) {
+entry:
+  %is_null = icmp eq ptr %value, null
+  br i1 %is_null, label %done, label %retain
+retain:
+  %refs_ptr = getelementptr i8, ptr %value, i64 -16
+  %refs = load i64, ptr %refs_ptr
+  %is_static = icmp uge i64 %refs, 1000000
+  br i1 %is_static, label %done, label %do_retain
+do_retain:
+  %old_refs = atomicrmw add ptr %refs_ptr, i64 1 seq_cst
+  br label %done
+done:
+  ret void
+}
+define void @glitch_string_release(ptr %value) {
+entry:
+  %is_null = icmp eq ptr %value, null
+  br i1 %is_null, label %done, label %release
+release:
+  %refs_ptr = getelementptr i8, ptr %value, i64 -16
+  %refs = load i64, ptr %refs_ptr
+  %is_static = icmp uge i64 %refs, 1000000
+  br i1 %is_static, label %done, label %do_release
+do_release:
+  %old_refs = atomicrmw sub ptr %refs_ptr, i64 1 seq_cst
+  %destroy = icmp eq i64 %old_refs, 1
+  br i1 %destroy, label %free_node, label %done
+free_node:
+  %node = getelementptr i8, ptr %value, i64 -16
+  call void @glitch_free(ptr %node)
+  br label %done
+done:
+  ret void
+}
+define i1 @glitch_string_equals(ptr %left, ptr %right) {
+entry:
+  %same = icmp eq ptr %left, %right
+  br i1 %same, label %true_case, label %check_null
+check_null:
+  %left_null = icmp eq ptr %left, null
+  %right_null = icmp eq ptr %right, null
+  %any_null = or i1 %left_null, %right_null
+  br i1 %any_null, label %false_case, label %compare
+compare:
+  %cmp = call i32 @strcmp(ptr %left, ptr %right)
+  %eq = icmp eq i32 %cmp, 0
+  ret i1 %eq
+true_case:
+  ret i1 true
+false_case:
+  ret i1 false
+}
+define void @glitch_delegate_retain(ptr %value) {
+entry:
+  %is_null = icmp eq ptr %value, null
+  br i1 %is_null, label %done, label %retain
+retain:
+  %refs_ptr = getelementptr inbounds %glitch.delegate, ptr %value, i32 0, i32 0
+  %refs = load i64, ptr %refs_ptr
+  %is_static = icmp uge i64 %refs, 1000000
+  br i1 %is_static, label %done, label %do_retain
+do_retain:
+  %old_refs = atomicrmw add ptr %refs_ptr, i64 1 seq_cst
+  br label %done
+done:
+  ret void
+}
+define void @glitch_delegate_release(ptr %value) {
+entry:
+  %is_null = icmp eq ptr %value, null
+  br i1 %is_null, label %done, label %release
+release:
+  %refs_ptr = getelementptr inbounds %glitch.delegate, ptr %value, i32 0, i32 0
+  %refs = load i64, ptr %refs_ptr
+  %is_static = icmp uge i64 %refs, 1000000
+  br i1 %is_static, label %done, label %do_release
+do_release:
+  %old_refs = atomicrmw sub ptr %refs_ptr, i64 1 seq_cst
+  %destroy = icmp eq i64 %old_refs, 1
+  br i1 %destroy, label %call_destroy, label %done
+call_destroy:
+  %destroy_ptr = getelementptr inbounds %glitch.delegate, ptr %value, i32 0, i32 3
+  %destroy_fn = load ptr, ptr %destroy_ptr
+  %has_destroy = icmp ne ptr %destroy_fn, null
+  br i1 %has_destroy, label %invoke_destroy, label %free_delegate
+invoke_destroy:
+  %env_ptr = getelementptr inbounds %glitch.delegate, ptr %value, i32 0, i32 2
+  %env = load ptr, ptr %env_ptr
+  call void %destroy_fn(ptr %env)
+  br label %free_delegate
+free_delegate:
+  call void @glitch_free(ptr %value)
+  br label %done
+done:
+  ret void
+}
+define void @glitch_destroy_boxed_scalar(ptr %object) {
+entry:
+  ret void
+}
+define void @glitch_box_retain(ptr %value) {
+entry:
+  %is_null = icmp eq ptr %value, null
+  br i1 %is_null, label %done, label %retain
+retain:
+  %refs_ptr = getelementptr inbounds { i64, ptr, i64 }, ptr %value, i32 0, i32 0
+  %refs = load i64, ptr %refs_ptr
+  %is_static = icmp uge i64 %refs, 1000000
+  br i1 %is_static, label %done, label %do_retain
+do_retain:
+  %old_refs = atomicrmw add ptr %refs_ptr, i64 1 seq_cst
+  br label %done
+done:
+  ret void
+}
+define void @glitch_box_release(ptr %value) {
+entry:
+  %is_null = icmp eq ptr %value, null
+  br i1 %is_null, label %done, label %release
+release:
+  %refs_ptr = getelementptr inbounds { i64, ptr, i64 }, ptr %value, i32 0, i32 0
+  %refs = load i64, ptr %refs_ptr
+  %is_static = icmp uge i64 %refs, 1000000
+  br i1 %is_static, label %done, label %do_release
+do_release:
+  %old_refs = atomicrmw sub ptr %refs_ptr, i64 1 seq_cst
+  %destroy = icmp eq i64 %old_refs, 1
+  br i1 %destroy, label %call_destroy, label %done
+call_destroy:
+  %destroy_ptr = getelementptr inbounds { i64, ptr, i64 }, ptr %value, i32 0, i32 1
+  %destroy_fn = load ptr, ptr %destroy_ptr
+  %has_destroy = icmp ne ptr %destroy_fn, null
+  br i1 %has_destroy, label %invoke_destroy, label %free_box
+invoke_destroy:
+  call void %destroy_fn(ptr %value)
+  br label %free_box
+free_box:
+  call void @glitch_free(ptr %value)
+  br label %done
+done:
+  ret void
+}
+define i1 @glitch_object_equals(ptr %left, ptr %right) {
+entry:
+  %same = icmp eq ptr %left, %right
+  br i1 %same, label %true_case, label %check_null
+check_null:
+  %left_null = icmp eq ptr %left, null
+  %right_null = icmp eq ptr %right, null
+  %any_null = or i1 %left_null, %right_null
+  br i1 %any_null, label %false_case, label %load_drop
+load_drop:
+  %left_drop_ptr_ptr = getelementptr inbounds { i64, ptr }, ptr %left, i32 0, i32 1
+  %right_drop_ptr_ptr = getelementptr inbounds { i64, ptr }, ptr %right, i32 0, i32 1
+  %left_drop_ptr = load ptr, ptr %left_drop_ptr_ptr
+  %right_drop_ptr = load ptr, ptr %right_drop_ptr_ptr
+  %same_drop = icmp eq ptr %left_drop_ptr, %right_drop_ptr
+  br i1 %same_drop, label %check_boxed_scalar, label %false_case
+check_boxed_scalar:
+  %is_boxed_scalar = icmp eq ptr %left_drop_ptr, @glitch_destroy_boxed_scalar
+  br i1 %is_boxed_scalar, label %load_tag, label %false_case
+load_tag:
+  %left_tag_ptr = getelementptr inbounds { i64, ptr, i32 }, ptr %left, i32 0, i32 2
+  %right_tag_ptr = getelementptr inbounds { i64, ptr, i32 }, ptr %right, i32 0, i32 2
+  %left_tag = load i32, ptr %left_tag_ptr
+  %right_tag = load i32, ptr %right_tag_ptr
+  %same_tag = icmp eq i32 %left_tag, %right_tag
+  br i1 %same_tag, label %dispatch, label %false_case
+dispatch:
+  switch i32 %left_tag, label %false_case [
+    i32 1, label %compare_bool
+    i32 2, label %compare_byte
+    i32 3, label %compare_short
+    i32 4, label %compare_int
+    i32 5, label %compare_uint
+    i32 6, label %compare_long
+    i32 7, label %compare_double
+    i32 8, label %compare_decimal
+  ]
+compare_bool:
+  %left_bool_ptr = getelementptr inbounds { i64, ptr, i32, i1 }, ptr %left, i32 0, i32 3
+  %right_bool_ptr = getelementptr inbounds { i64, ptr, i32, i1 }, ptr %right, i32 0, i32 3
+  %left_bool = load i1, ptr %left_bool_ptr
+  %right_bool = load i1, ptr %right_bool_ptr
+  %bool_eq = icmp eq i1 %left_bool, %right_bool
+  ret i1 %bool_eq
+compare_byte:
+  %left_byte_ptr = getelementptr inbounds { i64, ptr, i32, i8 }, ptr %left, i32 0, i32 3
+  %right_byte_ptr = getelementptr inbounds { i64, ptr, i32, i8 }, ptr %right, i32 0, i32 3
+  %left_byte = load i8, ptr %left_byte_ptr
+  %right_byte = load i8, ptr %right_byte_ptr
+  %byte_eq = icmp eq i8 %left_byte, %right_byte
+  ret i1 %byte_eq
+compare_short:
+  %left_short_ptr = getelementptr inbounds { i64, ptr, i32, i16 }, ptr %left, i32 0, i32 3
+  %right_short_ptr = getelementptr inbounds { i64, ptr, i32, i16 }, ptr %right, i32 0, i32 3
+  %left_short = load i16, ptr %left_short_ptr
+  %right_short = load i16, ptr %right_short_ptr
+  %short_eq = icmp eq i16 %left_short, %right_short
+  ret i1 %short_eq
+compare_int:
+  %left_int_ptr = getelementptr inbounds { i64, ptr, i32, i32 }, ptr %left, i32 0, i32 3
+  %right_int_ptr = getelementptr inbounds { i64, ptr, i32, i32 }, ptr %right, i32 0, i32 3
+  %left_int = load i32, ptr %left_int_ptr
+  %right_int = load i32, ptr %right_int_ptr
+  %int_eq = icmp eq i32 %left_int, %right_int
+  ret i1 %int_eq
+compare_uint:
+  %left_uint_ptr = getelementptr inbounds { i64, ptr, i32, i32 }, ptr %left, i32 0, i32 3
+  %right_uint_ptr = getelementptr inbounds { i64, ptr, i32, i32 }, ptr %right, i32 0, i32 3
+  %left_uint = load i32, ptr %left_uint_ptr
+  %right_uint = load i32, ptr %right_uint_ptr
+  %uint_eq = icmp eq i32 %left_uint, %right_uint
+  ret i1 %uint_eq
+compare_long:
+  %left_long_ptr = getelementptr inbounds { i64, ptr, i32, i64 }, ptr %left, i32 0, i32 3
+  %right_long_ptr = getelementptr inbounds { i64, ptr, i32, i64 }, ptr %right, i32 0, i32 3
+  %left_long = load i64, ptr %left_long_ptr
+  %right_long = load i64, ptr %right_long_ptr
+  %long_eq = icmp eq i64 %left_long, %right_long
+  ret i1 %long_eq
+compare_double:
+  %left_double_ptr = getelementptr inbounds { i64, ptr, i32, double }, ptr %left, i32 0, i32 3
+  %right_double_ptr = getelementptr inbounds { i64, ptr, i32, double }, ptr %right, i32 0, i32 3
+  %left_double = load double, ptr %left_double_ptr
+  %right_double = load double, ptr %right_double_ptr
+  %double_eq = fcmp oeq double %left_double, %right_double
+  ret i1 %double_eq
+compare_decimal:
+  %left_decimal_ptr = getelementptr inbounds { i64, ptr, i32, double }, ptr %left, i32 0, i32 3
+  %right_decimal_ptr = getelementptr inbounds { i64, ptr, i32, double }, ptr %right, i32 0, i32 3
+  %left_decimal = load double, ptr %left_decimal_ptr
+  %right_decimal = load double, ptr %right_decimal_ptr
+  %decimal_eq = fcmp oeq double %left_decimal, %right_decimal
+  ret i1 %decimal_eq
+true_case:
+  ret i1 true
+false_case:
+  ret i1 false
+}
+@.fmt_i64 = private unnamed_addr constant [6 x i8] c"%lld\0A\00"
+@.fmt_i32 = private unnamed_addr constant [4 x i8] c"%d\0A\00"
+@.fmt_double = private unnamed_addr constant [4 x i8] c"%f\0A\00"
+@.fmt_str = private unnamed_addr constant [4 x i8] c"%s\0A\00"
+@.fmt_json_i64 = private unnamed_addr constant [5 x i8] c"%lld\00"
+@.fmt_json_double = private unnamed_addr constant [6 x i8] c"%.17g\00"
+@.json_true = private unnamed_addr constant [5 x i8] c"true\00"
+@.json_false = private unnamed_addr constant [6 x i8] c"false\00"
+@.env_report_leaks = private unnamed_addr constant [20 x i8] c"GLITCH_REPORT_LEAKS\00"
+@.str.0 = private unnamed_addr constant { i64, i64, [4 x i8] } { i64 1000000000, i64 3, [4 x i8] c"abc\00" }
+@.str.1 = private unnamed_addr constant { i64, i64, [4 x i8] } { i64 1000000000, i64 3, [4 x i8] c"abc\00" }
+@.str.2 = private unnamed_addr constant { i64, i64, [4 x i8] } { i64 1000000000, i64 3, [4 x i8] c"abc\00" }
+@.str.3 = private unnamed_addr constant { i64, i64, [4 x i8] } { i64 1000000000, i64 3, [4 x i8] c"abd\00" }
+@.str.4 = private unnamed_addr constant { i64, i64, [4 x i8] } { i64 1000000000, i64 3, [4 x i8] c"404\00" }
+
+define i32 @main() {
+entry:
+  %t0 = getelementptr %glitch.Box_long, ptr null, i32 1
+  %t1 = ptrtoint ptr %t0 to i64
+  %t2 = call ptr @glitch_calloc(i64 1, i64 %t1)
+  %t3 = getelementptr inbounds %glitch.Box_long, ptr %t2, i32 0, i32 0
+  store i64 1, ptr %t3
+  %t4 = getelementptr inbounds %glitch.Box_long, ptr %t2, i32 0, i32 1
+  store ptr @glitch_destroy_boxed_scalar, ptr %t4
+  %t5 = getelementptr inbounds %glitch.Box_long, ptr %t2, i32 0, i32 2
+  store i32 6, ptr %t5
+  %t6 = getelementptr inbounds %glitch.Box_long, ptr %t2, i32 0, i32 3
+  store i64 7, ptr %t6
+  %t7 = getelementptr %glitch.Box_long, ptr null, i32 1
+  %t8 = ptrtoint ptr %t7 to i64
+  %t9 = call ptr @glitch_calloc(i64 1, i64 %t8)
+  %t10 = getelementptr inbounds %glitch.Box_long, ptr %t9, i32 0, i32 0
+  store i64 1, ptr %t10
+  %t11 = getelementptr inbounds %glitch.Box_long, ptr %t9, i32 0, i32 1
+  store ptr @glitch_destroy_boxed_scalar, ptr %t11
+  %t12 = getelementptr inbounds %glitch.Box_long, ptr %t9, i32 0, i32 2
+  store i32 6, ptr %t12
+  %t13 = getelementptr inbounds %glitch.Box_long, ptr %t9, i32 0, i32 3
+  store i64 7, ptr %t13
+  %t14 = call i1 @glitch_object_equals(ptr %t2, ptr %t9)
+  call void @glitch_box_release(ptr %t2)
+  call void @glitch_box_release(ptr %t9)
+  %t15 = zext i1 %t14 to i32
+  call i32 (ptr, ...) @printf(ptr getelementptr inbounds ([4 x i8], ptr @.fmt_i32, i64 0, i64 0), i32 %t15)
+  %t16 = getelementptr %glitch.Box_long, ptr null, i32 1
+  %t17 = ptrtoint ptr %t16 to i64
+  %t18 = call ptr @glitch_calloc(i64 1, i64 %t17)
+  %t19 = getelementptr inbounds %glitch.Box_long, ptr %t18, i32 0, i32 0
+  store i64 1, ptr %t19
+  %t20 = getelementptr inbounds %glitch.Box_long, ptr %t18, i32 0, i32 1
+  store ptr @glitch_destroy_boxed_scalar, ptr %t20
+  %t21 = getelementptr inbounds %glitch.Box_long, ptr %t18, i32 0, i32 2
+  store i32 6, ptr %t21
+  %t22 = getelementptr inbounds %glitch.Box_long, ptr %t18, i32 0, i32 3
+  store i64 7, ptr %t22
+  %t23 = getelementptr %glitch.Box_long, ptr null, i32 1
+  %t24 = ptrtoint ptr %t23 to i64
+  %t25 = call ptr @glitch_calloc(i64 1, i64 %t24)
+  %t26 = getelementptr inbounds %glitch.Box_long, ptr %t25, i32 0, i32 0
+  store i64 1, ptr %t26
+  %t27 = getelementptr inbounds %glitch.Box_long, ptr %t25, i32 0, i32 1
+  store ptr @glitch_destroy_boxed_scalar, ptr %t27
+  %t28 = getelementptr inbounds %glitch.Box_long, ptr %t25, i32 0, i32 2
+  store i32 6, ptr %t28
+  %t29 = getelementptr inbounds %glitch.Box_long, ptr %t25, i32 0, i32 3
+  store i64 8, ptr %t29
+  %t30 = call i1 @glitch_object_equals(ptr %t18, ptr %t25)
+  call void @glitch_box_release(ptr %t18)
+  call void @glitch_box_release(ptr %t25)
+  %t31 = zext i1 %t30 to i32
+  call i32 (ptr, ...) @printf(ptr getelementptr inbounds ([4 x i8], ptr @.fmt_i32, i64 0, i64 0), i32 %t31)
+  %t32 = call i1 @glitch_string_equals(ptr getelementptr inbounds ({ i64, i64, [4 x i8] }, ptr @.str.0, i32 0, i32 2, i64 0), ptr getelementptr inbounds ({ i64, i64, [4 x i8] }, ptr @.str.1, i32 0, i32 2, i64 0))
+  %t33 = zext i1 %t32 to i32
+  call i32 (ptr, ...) @printf(ptr getelementptr inbounds ([4 x i8], ptr @.fmt_i32, i64 0, i64 0), i32 %t33)
+  %t34 = call i1 @glitch_string_equals(ptr getelementptr inbounds ({ i64, i64, [4 x i8] }, ptr @.str.2, i32 0, i32 2, i64 0), ptr getelementptr inbounds ({ i64, i64, [4 x i8] }, ptr @.str.3, i32 0, i32 2, i64 0))
+  %t35 = zext i1 %t34 to i32
+  call i32 (ptr, ...) @printf(ptr getelementptr inbounds ([4 x i8], ptr @.fmt_i32, i64 0, i64 0), i32 %t35)
+  %t36 = call i64 @GlitchLiveAllocations_Load()
+  %t37 = icmp ne i64 %t36, 0
+  %t38 = load ptr, ptr @glitch_exception_pending
+  %t39 = icmp ne ptr %t38, null
+  %t40 = or i1 %t37, %t39
+  %t41 = zext i1 %t40 to i32
+  %t42 = call ptr @getenv(ptr @.env_report_leaks)
+  %t43 = icmp ne ptr %t42, null
+  br i1 %t43, label %report_leaks_0, label %main_return_1
+report_leaks_0:
+  call i32 (ptr, ...) @printf(ptr getelementptr inbounds ([6 x i8], ptr @.fmt_i64, i64 0, i64 0), i64 %t36)
+  br label %main_return_1
+main_return_1:
+  ret i32 %t41
+exception_unwind:
+  %t44 = call i64 @GlitchLiveAllocations_Load()
+  %t45 = icmp ne i64 %t44, 0
+  %t46 = load ptr, ptr @glitch_exception_pending
+  %t47 = icmp ne ptr %t46, null
+  %t48 = or i1 %t45, %t47
+  %t49 = zext i1 %t48 to i32
+  %t50 = call ptr @getenv(ptr @.env_report_leaks)
+  %t51 = icmp ne ptr %t50, null
+  br i1 %t51, label %report_leaks_2, label %main_return_3
+report_leaks_2:
+  call i32 (ptr, ...) @printf(ptr getelementptr inbounds ([6 x i8], ptr @.fmt_i64, i64 0, i64 0), i64 %t44)
+  br label %main_return_3
+main_return_3:
+  ret i32 %t49
+}
+
+define i1 @glitch_endpoint_handlers_contains(ptr %app, ptr %method, ptr %path) {
+entry:
+  ret i1 false
+}
+
+define ptr @glitch_endpoint_handlers_invoke(ptr %app, ptr %method, ptr %path, ptr %body) {
+entry:
+  ret ptr getelementptr inbounds ({ i64, i64, [4 x i8] }, ptr @.str.4, i32 0, i32 2, i64 0)
+}
+

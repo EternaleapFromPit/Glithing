@@ -97,6 +97,26 @@ extern bool System_String_Contains_Native(string value, string needle);
 extern string System_String_TrimStart_Native(string value, string chars);
 extern T[] System_Array_Empty_Native<T>();
 
+class object {
+    static bool Equals(object left, object right) {
+        return false;
+    }
+
+    bool Equals(object other) {
+        return false;
+    }
+}
+
+class Object {
+    static bool Equals(object left, object right) {
+        return false;
+    }
+
+    bool Equals(object other) {
+        return false;
+    }
+}
+
 class Exception {
     public string Message;
     public Exception(string message) {

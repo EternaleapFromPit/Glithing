@@ -58,47 +58,47 @@ public static class Assert {
     public static void Equal(long expected, long actual, string message) {
         if (expected != actual) throw new AssertionFailedException(message);
     }
-    public static void Equal<T>(T expected, T actual) {
-        if (expected != actual) throw new AssertionFailedException("");
-    }
-    public static void Equal<T>(T expected, T actual, string message) {
-        if (expected != actual) throw new AssertionFailedException(message);
-    }
     public static void NotEqual(long notExpected, long actual) {
         if (notExpected == actual) throw new AssertionFailedException("");
     }
     public static void NotEqual(long notExpected, long actual, string message) {
         if (notExpected == actual) throw new AssertionFailedException(message);
     }
-    public static void NotEqual<T>(T notExpected, T actual) {
-        if (notExpected == actual) throw new AssertionFailedException("");
-    }
-    public static void NotEqual<T>(T notExpected, T actual, string message) {
-        if (notExpected == actual) throw new AssertionFailedException(message);
-    }
-    public static void NotNull(object value) {
-        if (object.Equals(value, null)) throw new AssertionFailedException("");
-    }
-    public static void NotNull(object value, string message) {
-        if (object.Equals(value, null)) throw new AssertionFailedException(message);
-    }
-    public static void Null(object value) {
-        if (!object.Equals(value, null)) throw new AssertionFailedException("");
-    }
-    public static void Null(object value, string message) {
-        if (!object.Equals(value, null)) throw new AssertionFailedException(message);
-    }
-    public static void Same(object expected, object actual) {
+    public static void Equal<T>(T expected, T actual) {
         if (!object.Equals(expected, actual)) throw new AssertionFailedException("");
     }
-    public static void Same(object expected, object actual, string message) {
+    public static void Equal<T>(T expected, T actual, string message) {
         if (!object.Equals(expected, actual)) throw new AssertionFailedException(message);
     }
+    public static void NotEqual<T>(T notExpected, T actual) {
+        if (object.Equals(notExpected, actual)) throw new AssertionFailedException("");
+    }
+    public static void NotEqual<T>(T notExpected, T actual, string message) {
+        if (object.Equals(notExpected, actual)) throw new AssertionFailedException(message);
+    }
+    public static void NotNull(object value) {
+        if (value == null) throw new AssertionFailedException("");
+    }
+    public static void NotNull(object value, string message) {
+        if (value == null) throw new AssertionFailedException(message);
+    }
+    public static void Null(object value) {
+        if (value != null) throw new AssertionFailedException("");
+    }
+    public static void Null(object value, string message) {
+        if (value != null) throw new AssertionFailedException(message);
+    }
+    public static void Same(object expected, object actual) {
+        if (expected != actual) throw new AssertionFailedException("");
+    }
+    public static void Same(object expected, object actual, string message) {
+        if (expected != actual) throw new AssertionFailedException(message);
+    }
     public static void NotSame(object expected, object actual) {
-        if (object.Equals(expected, actual)) throw new AssertionFailedException("");
+        if (expected == actual) throw new AssertionFailedException("");
     }
     public static void NotSame(object expected, object actual, string message) {
-        if (object.Equals(expected, actual)) throw new AssertionFailedException(message);
+        if (expected == actual) throw new AssertionFailedException(message);
     }
     public static void Contains<T>(T expected, IEnumerable<T> values) {
         foreach (var value in values) {

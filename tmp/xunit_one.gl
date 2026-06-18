@@ -1,0 +1,26 @@
+using System.Collections.Generic;
+using Xunit;
+
+public static class NumberAlgorithms {
+    public static List<int> BuildSample() {
+        List<int> values = new List<int>();
+        values.Add(5);
+        values.Add(1);
+        values.Add(4);
+        values.Add(2);
+        values.Add(3);
+        return values;
+    }
+}
+
+public class NumberAlgorithmsTests {
+    [Fact]
+    public void BubbleSort_OrdersValues() {
+        List<int> values = NumberAlgorithms.BuildSample();
+        Assert.Equal(5, values[0]);
+    }
+}
+
+public static void main() {
+    RunAllTests();
+}

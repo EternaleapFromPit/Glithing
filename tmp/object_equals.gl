@@ -1,0 +1,6 @@
+fn main() {
+    print(object.Equals(7, 7));
+    print(object.Equals(7, 8));
+    print(object.Equals("abc", "abc"));
+    print(object.Equals("abc", "abd"));
+}

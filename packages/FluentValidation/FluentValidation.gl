@@ -2,11 +2,11 @@ package FluentValidation;
 
 using System.Collections.Generic;
 
-class ValidationFailure {
+public class ValidationFailure {
     public string ErrorMessage;
 }
 
-class ValidationResult {
+public class ValidationResult {
     public List<ValidationFailure> Errors;
 
     public ValidationResult() {
@@ -18,15 +18,26 @@ class ValidationResult {
     }
 }
 
-class ValidationException : Exception {
+public class ValidationException : Exception {
     public List<ValidationFailure> Errors;
 
     public ValidationException(List<ValidationFailure> errors) {
         this.Errors = errors;
     }
+
+    public ValidationException(IEnumerable<ValidationFailure> errors) {
+        this.Errors = new List<ValidationFailure>();
+        foreach (var error in errors) {
+            this.Errors.Add(error);
+        }
+    }
+
+    public ValidationException(object errors) {
+        this.Errors = new List<ValidationFailure>();
+    }
 }
 
-class ValidationContext<T> {
+public class ValidationContext<T> {
     public T InstanceToValidate;
 
     public ValidationContext(T instanceToValidate) {
@@ -34,11 +45,11 @@ class ValidationContext<T> {
     }
 }
 
-interface IValidator<T> {
+public interface IValidator<T> {
     ValidationResult Validate(ValidationContext<T> context);
 }
 
-class RuleBuilder<T, TProperty> {
+public class RuleBuilder<T, TProperty> {
     RuleBuilder<T, TProperty> NotNull() { return new RuleBuilder<T, TProperty>(); }
     RuleBuilder<T, TProperty> NotEmpty() { return new RuleBuilder<T, TProperty>(); }
     RuleBuilder<T, TProperty> SetValidator(object validator) { return new RuleBuilder<T, TProperty>(); }
@@ -53,7 +64,7 @@ class RuleBuilder<T, TProperty> {
     RuleBuilder<T, TProperty> WithMessage(string message) { return new RuleBuilder<T, TProperty>(); }
 }
 
-class AbstractValidator<T> : IValidator<T> {
+public class AbstractValidator<T> : IValidator<T> {
     RuleBuilder<T, object> RuleFor(object expression) {
         return new RuleBuilder<T, object>();
     }

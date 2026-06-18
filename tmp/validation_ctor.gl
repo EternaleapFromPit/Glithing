@@ -1,0 +1,7 @@
+using System.Collections.Generic;
+using FluentValidation;
+
+fn main() {
+    List<ValidationFailure> errors = new List<ValidationFailure>();
+    ValidationException ex = new ValidationException(errors);
+}
