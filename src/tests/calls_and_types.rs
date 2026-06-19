@@ -461,13 +461,13 @@ fn resolves_instance_methods_before_extension_methods() {
             }
         "#;
 
-    let llvm_ir = compile_llvm_ir(source)
-        .expect("instance methods should still lower alongside imported extensions");
+    let output_exe =
+        emit_native_executable_from_source("instance-methods-before-extensions", source);
+    let output = run_native_executable(&output_exe);
+    let stdout = String::from_utf8_lossy(&output.stdout);
 
-    let instance_count = llvm_ir.matches("CountPlusOne__g0__overload(").count();
-    let extension_count = llvm_ir.matches("CountPlusOne__g0__ext__overload(").count();
-
-    assert!(instance_count > extension_count);
+    assert!(output.status.success());
+    assert!(stdout.contains("100"));
 }
 
 #[test]

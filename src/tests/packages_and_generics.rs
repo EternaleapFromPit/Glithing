@@ -184,6 +184,62 @@ fn compiles_system_collections_generic_surface() {
 }
 
 #[test]
+fn package_scoped_members_default_to_public_for_cross_package_access() {
+    let source = r#"
+            package Demo.Package;
+
+            class Helper {
+                int GetValue() {
+                    return 41;
+                }
+            }
+
+            __FILE_BOUNDARY__;
+
+            using Demo.Package;
+
+            fn main() {
+                var helper = new Helper();
+                print(helper.GetValue() + 1);
+            }
+        "#;
+
+    let llvm_ir =
+        compile_llvm_ir(source).expect("package declarations should default members to public");
+
+    assert!(llvm_ir.contains("Helper"));
+    assert!(llvm_ir.contains("GetValue"));
+}
+
+#[test]
+fn explicit_internal_package_members_stay_hidden_across_packages() {
+    let source = r#"
+            package Demo.Package;
+
+            internal class HiddenHelper {
+                public int GetValue() {
+                    return 1;
+                }
+            }
+
+            __FILE_BOUNDARY__;
+
+            using Demo.Package;
+
+            fn main() {
+                var helper = new HiddenHelper();
+                print(helper.GetValue());
+            }
+        "#;
+
+    let error = compile_source_with_options(source, true, false)
+        .expect_err("internal package types should stay inaccessible from other packages");
+
+    assert!(error.contains("HiddenHelper"));
+    assert!(error.contains("Demo.Package"));
+}
+
+#[test]
 fn compiles_dictionary_try_get_value_surface() {
     let source = r#"
             using System.Collections.Generic;

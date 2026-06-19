@@ -812,13 +812,6 @@ fn placeholder_member_diagnostic(
             ),
             "bind concrete startup settings explicitly or add a real `.gl` package implementation for the requested configuration source".to_string(),
         )),
-        ("ServiceProvider", "GetRequiredService")
-        | ("ServiceProvider", "GetService")
-        | ("IServiceProvider", "GetRequiredService")
-        | ("IServiceProvider", "GetService") if !matches!(return_type, tir::IrType::String) => Some((
-            "dependency-injection lookup is still only partially implemented; named string lookups can resolve a stored singleton, but scoped generic service graphs are not built yet".to_string(),
-            "construct the dependency explicitly, or add a real service-registration/runtime implementation before relying on generic/scoped container resolution".to_string(),
-        )),
         ("IServiceCollection", "AddDbContext")
         | ("ServiceCollection", "AddDbContext")
         | ("IServiceCollection", "AddDbContextPool")
@@ -832,9 +825,60 @@ fn placeholder_member_diagnostic(
         | ("ServiceCollection", "AddCors")
         | ("IServiceCollection", "AddMvc")
         | ("ServiceCollection", "AddMvc")
+        | ("IServiceCollection", "AddEndpointsApiExplorer")
+        | ("ServiceCollection", "AddEndpointsApiExplorer")
+        | ("IServiceCollection", "AddMemoryCache")
+        | ("ServiceCollection", "AddMemoryCache")
+        | ("IServiceCollection", "AddHttpContextAccessor")
+        | ("ServiceCollection", "AddHttpContextAccessor")
+        | ("IServiceCollection", "AddOptions")
+        | ("ServiceCollection", "AddOptions")
+        | ("IServiceCollection", "AddLogging")
+        | ("ServiceCollection", "AddLogging")
+        | ("IServiceCollection", "AddApiVersioning")
+        | ("ServiceCollection", "AddApiVersioning")
+        | ("IServiceCollection", "AddVersionedApiExplorer")
+        | ("ServiceCollection", "AddVersionedApiExplorer")
+        | ("IServiceCollection", "AddSwaggerGen")
+        | ("ServiceCollection", "AddSwaggerGen")
+        | ("IServiceCollection", "AddAutoMapper")
+        | ("ServiceCollection", "AddAutoMapper")
+        | ("IServiceCollection", "AddMediatR")
+        | ("ServiceCollection", "AddMediatR")
+        | ("IServiceCollection", "AddValidatorsFromAssemblyContaining")
+        | ("ServiceCollection", "AddValidatorsFromAssemblyContaining")
+        | ("IServiceCollection", "AddAuthentication")
+        | ("ServiceCollection", "AddAuthentication")
+        | ("IServiceCollection", "AddRepositories")
+        | ("ServiceCollection", "AddRepositories")
+        | ("IServiceCollection", "AddDataServices")
+        | ("ServiceCollection", "AddDataServices")
         | ("MvcBuilder", "AddJsonOptions") => Some((
             "this service-registration/configuration call is still a compatibility surface; it compiles, but the underlying host/runtime behavior is not fully implemented".to_string(),
             "keep the call only as a marker, or add the corresponding DI/host/runtime implementation before depending on its behavior at runtime".to_string(),
+        )),
+        ("AuthenticationBuilder", "AddJwtBearer")
+        | ("MvcBuilder", "AddJwtBearer")
+        | ("MvcBuilder", "AddAuthentication") => Some((
+            "this authentication configuration call is still a compatibility surface; it compiles, but the current runtime does not build or enforce a real authentication pipeline".to_string(),
+            "keep the call only as a marker, or add a real authentication/runtime implementation before depending on bearer-token or authentication behavior".to_string(),
+        )),
+        ("SwaggerGenOptions", "AddSecurityDefinition")
+        | ("SwaggerGenOptions", "SupportNonNullableReferenceTypes")
+        | ("SwaggerGenOptions", "AddSecurityRequirement")
+        | ("SwaggerGenOptions", "SwaggerDoc")
+        | ("SwaggerGenOptions", "CustomSchemaIds")
+        | ("SwaggerGenOptions", "DocInclusionPredicate")
+        | ("SwaggerGenOptions", "TagActionsBy")
+        | ("SwaggerUiOptions", "SwaggerEndpoint") => Some((
+            "this Swagger/OpenAPI configuration call is still a compatibility surface; it compiles, but the current runtime does not build a real OpenAPI document or UI pipeline from these options".to_string(),
+            "keep the call only as a marker, or add a real Swagger/OpenAPI implementation before depending on generated documents or UI behavior".to_string(),
+        )),
+        ("LoggingBuilder", "ClearProviders")
+        | ("LoggingBuilder", "AddSerilog")
+        | ("WebApplicationBuilder", "ConfigureSerilog") => Some((
+            "this logging configuration call is still a compatibility surface; it compiles, but the current runtime does not build a real provider pipeline from these logging markers".to_string(),
+            "construct the logger explicitly for now, or add a real logging/runtime integration before depending on provider configuration behavior".to_string(),
         )),
         ("Mapper", "Map") | ("IMapper", "Map") => Some((
             "AutoMapper `Map(...)` is still a compatibility stub; the current package returns a typed default instead of projecting fields".to_string(),
@@ -847,17 +891,40 @@ fn placeholder_member_diagnostic(
         ("WebApplication", "UseSwagger")
         | ("WebApplication", "UseSwaggerUI")
         | ("WebApplication", "UseStaticFiles")
+        | ("WebApplication", "UseMiddleware")
+        | ("WebApplication", "UseCors")
+        | ("WebApplication", "UseAuthentication")
+        | ("WebApplication", "UseMvc")
+        | ("WebApplication", "UseHttpsRedirection")
+        | ("WebApplication", "UseRouting")
+        | ("WebApplication", "UseEndpoints")
+        | ("WebApplication", "MapControllers")
+        | ("WebApplication", "Run")
         | ("IApplicationBuilder", "UseSwagger")
         | ("IApplicationBuilder", "UseSwaggerUI")
-        | ("IApplicationBuilder", "UseStaticFiles") => Some((
+        | ("IApplicationBuilder", "UseStaticFiles")
+        | ("IApplicationBuilder", "UseMiddleware")
+        | ("IApplicationBuilder", "UseCors")
+        | ("IApplicationBuilder", "UseAuthentication")
+        | ("IApplicationBuilder", "UseMvc")
+        | ("IApplicationBuilder", "UseHttpsRedirection")
+        | ("IApplicationBuilder", "UseRouting")
+        | ("IApplicationBuilder", "UseEndpoints")
+        | ("IApplicationBuilder", "MapControllers")
+        | ("IApplicationBuilder", "Run") => Some((
             "this ASP.NET-style host configuration member is still a no-op compatibility surface; the current runtime does not expose the corresponding middleware behavior".to_string(),
             "keep the call only as a compile-time marker, or add a real middleware/runtime implementation before depending on the configured behavior".to_string(),
         )),
-        ("Dictionary", "GetEnumerator")
-        | ("IDictionary", "GetEnumerator")
-        | ("IReadOnlyDictionary", "GetEnumerator") => Some((
-            "dictionary enumeration is not lowered yet; the current package surface returns an inert placeholder enumerator".to_string(),
-            "iterate a supported concrete view instead, or add a real dictionary enumerator/runtime helper before using `foreach` over dictionaries".to_string(),
+        ("DatabaseFacade", "EnsureCreated")
+        | ("DatabaseFacade", "EnsureDeleted")
+        | ("DatabaseFacade", "Migrate")
+        | ("DatabaseFacade", "ExecuteSqlRaw")
+        | ("DatabaseFacade", "BeginTransaction")
+        | ("DatabaseTransaction", "Commit")
+        | ("DatabaseTransaction", "Rollback")
+        | ("DatabaseTransaction", "Dispose") => Some((
+            "this Entity Framework database/transaction member is still a compatibility surface; it compiles, but the current runtime does not execute real provider-backed DDL, SQL, or transaction behavior".to_string(),
+            "keep the call only as a marker, or add a real provider/runtime implementation before depending on database mutation or transaction semantics".to_string(),
         )),
         _ => None,
     }

@@ -10,8 +10,16 @@ pub(crate) struct Program {
     pub(crate) functions: Vec<Function>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Visibility {
+    Public,
+    Internal,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct EnumDef {
+    pub(crate) package_id: Option<String>,
+    pub(crate) visibility: Visibility,
     pub(crate) namespace: Vec<String>,
     pub(crate) attributes: Vec<Attribute>,
     pub(crate) name: String,
@@ -26,6 +34,8 @@ pub(crate) struct EnumVariant {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TypeDef {
+    pub(crate) package_id: Option<String>,
+    pub(crate) visibility: Visibility,
     pub(crate) kind: TypeKind,
     pub(crate) is_extension: bool,
     pub(crate) namespace: Vec<String>,
@@ -40,6 +50,8 @@ pub(crate) struct TypeDef {
 
 #[derive(Debug, Clone)]
 pub(crate) struct DelegateDef {
+    pub(crate) package_id: Option<String>,
+    pub(crate) visibility: Visibility,
     pub(crate) namespace: Vec<String>,
     pub(crate) attributes: Vec<Attribute>,
     pub(crate) name: String,
@@ -59,6 +71,7 @@ pub(crate) enum TypeKind {
 
 #[derive(Debug, Clone)]
 pub(crate) struct FieldDef {
+    pub(crate) visibility: Visibility,
     pub(crate) name: String,
     pub(crate) ty: TypeSyntax,
     pub(crate) is_static: bool,
@@ -67,6 +80,7 @@ pub(crate) struct FieldDef {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Constructor {
+    pub(crate) visibility: Visibility,
     pub(crate) namespace: Vec<String>,
     pub(crate) attributes: Vec<Attribute>,
     pub(crate) params: Vec<Param>,
@@ -75,6 +89,8 @@ pub(crate) struct Constructor {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Function {
+    pub(crate) package_id: Option<String>,
+    pub(crate) visibility: Visibility,
     pub(crate) namespace: Vec<String>,
     pub(crate) attributes: Vec<Attribute>,
     pub(crate) is_async: bool,

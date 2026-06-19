@@ -261,7 +261,7 @@ static void GlitchRestHost_Run(struct WebApplication *app, int port, int max_req
 }
 ";
 
-class ConfigurationManager {
+public class ConfigurationManager {
     string GetConnectionString(string name) {
         return "";
     }
@@ -283,13 +283,13 @@ class ConfigurationManager {
     }
 }
 
-class HostEnvironment {
+public class HostEnvironment {
     bool IsDevelopment() {
         return false;
     }
 }
 
-class LoggingBuilder {
+public class LoggingBuilder {
     void ClearProviders() {
     }
 
@@ -297,7 +297,7 @@ class LoggingBuilder {
     }
 }
 
-class WebApplicationBuilder {
+public class WebApplicationBuilder {
     public ServiceCollection Services;
     public ConfigurationManager Configuration;
     public HostEnvironment Environment;
@@ -311,7 +311,8 @@ class WebApplicationBuilder {
     }
 
     WebApplication Build() {
-        return new WebApplication();
+        ServiceProvider provider = this.Services.BuildServiceProvider();
+        return new WebApplication(move provider);
     }
 
     void ConfigureSerilog() {}
@@ -321,7 +322,7 @@ WebApplicationBuilder CreateBuilder(string[] args) {
     return new WebApplicationBuilder();
 }
 
-class HttpRequest {
+public class HttpRequest {
     public string Method;
     public string Path;
     public Dictionary<string, string> Headers;
@@ -335,7 +336,7 @@ class HttpRequest {
     }
 }
 
-class HttpResponse {
+public class HttpResponse {
     public int StatusCode;
     public Dictionary<string, string> Headers;
     public string Body;
@@ -347,7 +348,7 @@ class HttpResponse {
     }
 }
 
-class IPAddress {
+public class IPAddress {
     public string Address;
 
     public IPAddress() {
@@ -359,7 +360,7 @@ class IPAddress {
     }
 }
 
-class ConnectionInfo {
+public class ConnectionInfo {
     public IPAddress RemoteIpAddress;
 
     public ConnectionInfo() {
@@ -367,7 +368,7 @@ class ConnectionInfo {
     }
 }
 
-class HttpContext {
+public class HttpContext {
     public HttpRequest Request;
     public HttpResponse Response;
     public ConnectionInfo Connection;
@@ -386,15 +387,15 @@ class HttpContext {
     }
 }
 
-interface IHttpContextAccessor {
+public interface IHttpContextAccessor {
     public HttpContext HttpContext;
 }
 
-class HttpContextAccessor : IHttpContextAccessor {
+public class HttpContextAccessor : IHttpContextAccessor {
     public HttpContext HttpContext;
 }
 
-class CorsPolicyBuilder {
+public class CorsPolicyBuilder {
     CorsPolicyBuilder AllowAnyOrigin() {
         return new CorsPolicyBuilder();
     }
@@ -408,22 +409,22 @@ class CorsPolicyBuilder {
     }
 }
 
-delegate void CorsConfigure(CorsPolicyBuilder options);
-delegate void SwaggerOptionsConfigure(SwaggerOptions options);
-delegate void SwaggerUiOptionsConfigure(SwaggerUiOptions options);
+public delegate void CorsConfigure(CorsPolicyBuilder options);
+public delegate void SwaggerOptionsConfigure(SwaggerOptions options);
+public delegate void SwaggerUiOptionsConfigure(SwaggerUiOptions options);
 
-class SwaggerOptions {
+public class SwaggerOptions {
     public string RouteTemplate;
 }
 
-class SwaggerUiOptions {
+public class SwaggerUiOptions {
     void SwaggerEndpoint(string url, string name) {}
 }
 
-class CorsMiddlewareOptions {
+public class CorsMiddlewareOptions {
 }
 
-class Endpoint {
+public class Endpoint {
     public string Method;
     public string Path;
     public string Text;
@@ -435,7 +436,7 @@ class Endpoint {
     }
 }
 
-class WebApplication {
+public class WebApplication {
     public List<string> Routes;
     public Dictionary<string, string> Responses;
     public List<string> Middleware;
@@ -450,6 +451,16 @@ class WebApplication {
         this.Middleware = new List<string>();
         this.Configuration = new ConfigurationManager();
         this.Services = new ServiceProvider();
+        this.Environment = new HostEnvironment();
+        glitch_register_attribute_routes(this);
+    }
+
+    public WebApplication(ServiceProvider services) {
+        this.Routes = new List<string>();
+        this.Responses = new Dictionary<string, string>();
+        this.Middleware = new List<string>();
+        this.Configuration = new ConfigurationManager();
+        this.Services = move services;
         this.Environment = new HostEnvironment();
         glitch_register_attribute_routes(this);
     }
@@ -579,20 +590,20 @@ class WebApplication {
     }
 }
 
-class StaticFileOptions {
+public class StaticFileOptions {
     public object FileProvider;
     public string RequestPath;
 }
 
-class PhysicalFileProvider {
+public class PhysicalFileProvider {
     public PhysicalFileProvider(string path) {}
 }
 
-class ApiVersion {
+public class ApiVersion {
     public ApiVersion(int major, int minor, string status) {}
 }
 
-class ProblemDetails {
+public class ProblemDetails {
     public string Detail;
     public int Status;
     public string Title;
@@ -604,43 +615,43 @@ class ProblemDetails {
     }
 }
 
-class ObjectResult {
+public class ObjectResult {
     public int StatusCode;
     public ObjectResult(object value) {}
 }
 
-class JwtBearerDefaults {
+public class JwtBearerDefaults {
     public string AuthenticationScheme;
     public JwtBearerDefaults() {
         this.AuthenticationScheme = "Bearer";
     }
 }
 
-interface IFormFile {
+public interface IFormFile {
     string FileName { get; }
     long Length { get; }
     void CopyToAsync(object stream);
 }
 
-class ActionExecutingContext {
+public class ActionExecutingContext {
     public Dictionary<string, object> ActionArguments;
     public ModelStateDictionary ModelState;
     public HttpContext HttpContext;
     public object Result;
 }
 
-class ExceptionContext {
+public class ExceptionContext {
     public object Exception;
     public HttpContext HttpContext;
     public object Result;
     public bool ExceptionHandled;
 }
 
-class ModelError {
+public class ModelError {
     public string ErrorMessage;
 }
 
-class ModelStateEntry {
+public class ModelStateEntry {
     public List<ModelError> Errors;
 
     public ModelStateEntry() {
@@ -648,7 +659,7 @@ class ModelStateEntry {
     }
 }
 
-class ModelStateDictionary {
+public class ModelStateDictionary {
     public bool IsValid;
     public Dictionary<string, ModelStateEntry> Entries;
 
@@ -671,7 +682,7 @@ class ModelStateDictionary {
     }
 }
 
-class ControllerBase {
+public class ControllerBase {
     public ModelStateDictionary ModelState;
     public HttpContext HttpContext;
 

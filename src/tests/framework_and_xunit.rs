@@ -232,6 +232,36 @@ fn compiles_conduit_fixture_di_ef_and_mediatr_surface() {
 }
 
 #[test]
+fn compiles_service_provider_scope_factory_and_concrete_service_resolution() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+
+            class Service {
+                public string Name;
+            }
+
+            fn main() {
+                ServiceCollection services = new ServiceCollection();
+                ServiceProvider provider = services.BuildServiceProvider();
+                IServiceScopeFactory scopeFactory = provider.GetRequiredService<IServiceScopeFactory>();
+                Service concrete = provider.GetRequiredService<Service>();
+                concrete.Name = "demo";
+                print(scopeFactory != null);
+                print(concrete != null);
+                print(concrete.Name);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("scope-factory and concrete-service resolution should lower");
+    let diagnostics = output.diagnostics.join("\n");
+    let llvm_ir = output.llvm_ir().expect("LLVM IR should be present");
+
+    assert!(!diagnostics.contains("GL3013"));
+    assert!(llvm_ir.contains("service_lookup"));
+}
+
+#[test]
 fn compiles_mediatr_send_infers_response_from_request_contract() {
     let source = r#"
             using MediatR;

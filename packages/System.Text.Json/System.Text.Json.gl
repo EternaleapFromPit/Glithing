@@ -2,14 +2,14 @@ package System.Text.Json;
 
 using System.Text.Json.Serialization;
 
-class JsonSerializerOptions {
+public class JsonSerializerOptions {
     public JsonIgnoreCondition DefaultIgnoreCondition;
 }
 
 extern string JsonSerializer_Serialize_Native(string value);
 extern string JsonSerializer_Deserialize_Native(string json);
 
-class JsonSerializer {
+public class JsonSerializer {
     static string Serialize(string value) {
         return JsonSerializer_Serialize_Native(value);
     }

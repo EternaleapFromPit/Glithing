@@ -178,6 +178,8 @@ pub(super) fn substitute_field_signature(
     subst: &HashMap<String, IrType>,
 ) -> FieldSignature {
     FieldSignature {
+        package_id: field.package_id.clone(),
+        visibility: field.visibility,
         ty: substitute_ir_type_with_map(&field.ty, subst),
         ownership: field.ownership.clone(),
     }
@@ -188,6 +190,8 @@ pub(super) fn substitute_function_signature(
     subst: &HashMap<String, IrType>,
 ) -> FunctionSignature {
     FunctionSignature {
+        package_id: signature.package_id.clone(),
+        visibility: signature.visibility,
         generic_params: signature.generic_params.clone(),
         params: signature
             .params

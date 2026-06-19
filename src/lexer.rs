@@ -21,6 +21,7 @@ pub(crate) enum TokenKind {
     Delegate,
     Enum,
     Public,
+    Internal,
     Borrow,
     Move,
     Print,
@@ -362,9 +363,8 @@ impl<'a> Lexer<'a> {
             "static" => TokenKind::Static,
             "const" => TokenKind::Const,
             "readonly" => TokenKind::Readonly,
-            "virtual" | "override" | "abstract" | "private" | "protected" | "internal" => {
-                TokenKind::Public
-            }
+            "virtual" | "override" | "abstract" => TokenKind::Public,
+            "private" | "protected" | "internal" => TokenKind::Internal,
             "mut" => TokenKind::Mut,
             "new" => TokenKind::New,
             "ref" => TokenKind::Ref,

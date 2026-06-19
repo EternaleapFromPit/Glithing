@@ -2,11 +2,11 @@ package System.Reflection;
 
 using System.Collections.Generic;
 
-class AssemblyName {
+public class AssemblyName {
     public string Name;
 }
 
-class Assembly {
+public class Assembly {
     static Assembly GetExecutingAssembly() {
         return new Assembly();
     }
@@ -35,12 +35,12 @@ class Assembly {
     }
 }
 
-class MemberInfo {
+public class MemberInfo {
     public string Name;
     public System.Type DeclaringType;
 }
 
-class MethodBase : MemberInfo {
+public class MethodBase : MemberInfo {
     public ParameterInfo[] Parameters;
     public bool IsStatic;
 
@@ -49,7 +49,7 @@ class MethodBase : MemberInfo {
     }
 }
 
-class MethodInfo : MethodBase {
+public class MethodInfo : MethodBase {
     public System.Type ReturnType;
     public System.Type[] ParameterTypes;
     public bool IsGenericMethod;
@@ -60,11 +60,11 @@ class MethodInfo : MethodBase {
     }
 }
 
-class ConstructorInfo : MethodBase {
+public class ConstructorInfo : MethodBase {
     public System.Type[] ParameterTypes;
 }
 
-class ParameterInfo : MemberInfo {
+public class ParameterInfo : MemberInfo {
     public System.Type ParameterType;
     public int Position;
     public bool IsOut;
@@ -72,12 +72,12 @@ class ParameterInfo : MemberInfo {
     public bool IsOptional;
 }
 
-class FieldInfo : MemberInfo {
+public class FieldInfo : MemberInfo {
     public System.Type FieldType;
     public bool IsInitOnly;
 }
 
-class PropertyInfo : MemberInfo {
+public class PropertyInfo : MemberInfo {
     public System.Type PropertyType;
     public bool CanRead;
     public bool CanWrite;
@@ -85,6 +85,6 @@ class PropertyInfo : MemberInfo {
     public MethodInfo SetMethod;
 }
 
-class EventInfo : MemberInfo {
+public class EventInfo : MemberInfo {
     public System.Type EventHandlerType;
 }

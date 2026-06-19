@@ -755,6 +755,21 @@ impl LlvmEmitter {
     }
 
     pub(super) fn resolve_interface_implementation(&self, interface_name: &str) -> Option<String> {
+        let mut exact = self
+            .object_types
+            .values()
+            .filter(|object| {
+                matches!(object.kind, TypeKind::Class)
+                    && object.bases.iter().any(|base| base == interface_name)
+            })
+            .map(|object| object.name.clone())
+            .collect::<Vec<_>>();
+        exact.sort();
+        exact.dedup();
+        if exact.len() == 1 {
+            return exact.pop();
+        }
+
         let mut candidates = self
             .object_types
             .values()

@@ -5,7 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore.Storage;
 
-class DbContextOptions {
+public class DbContextOptions {
     public string ConnectionString;
 
     public DbContextOptions() {
@@ -13,7 +13,7 @@ class DbContextOptions {
     }
 }
 
-class SqlProvider {
+public class SqlProvider {
     public string Name;
     public string ConnectionString;
 
@@ -28,7 +28,7 @@ class SqlProvider {
     }
 }
 
-struct DbSet<T> {
+public struct DbSet<T> {
     public List<T> Items;
 
     DbQuery<T> AsQueryable() {
@@ -168,7 +168,7 @@ struct DbSet<T> {
     }
 }
 
-struct DbQuery<T> {
+public struct DbQuery<T> {
     public List<T> Rows;
     public Func<T, bool> Predicate;
 
@@ -296,11 +296,11 @@ struct DbQuery<T> {
     }
 }
 
-class DbContextOptionsBuilder_ApplicationDbContext {
+public class DbContextOptionsBuilder_ApplicationDbContext {
     void UseSqlServer(string connectionString, object configure) {}
 }
 
-class ChangeTracker {
+public class ChangeTracker {
     public DebugView DebugView;
     public ChangeTracker() {
         this.DebugView = new DebugView();
@@ -309,11 +309,11 @@ class ChangeTracker {
     void Clear() {}
 }
 
-class DebugView {
+public class DebugView {
     public string LongView;
 }
 
-class DatabaseFacade {
+public class DatabaseFacade {
     public string ConnectionString;
 
     public DatabaseFacade() {
@@ -334,13 +334,13 @@ class DatabaseFacade {
     int ExecuteSqlRaw(string sql, object parameters) { return 0; }
 }
 
-class DatabaseTransaction : IDbContextTransaction {
+public class DatabaseTransaction : IDbContextTransaction {
     void Commit() {}
     void Rollback() {}
     void Dispose() {}
 }
 
-enum EntityState {
+public enum EntityState {
     Detached,
     Unchanged,
     Deleted,
@@ -348,14 +348,14 @@ enum EntityState {
     Added
 }
 
-class EntityEntry {
+public class EntityEntry {
     public EntityState State;
 }
 
-class DbUpdateConcurrencyException : Exception {
+public class DbUpdateConcurrencyException : Exception {
 }
 
-class DbContext {
+public class DbContext {
     public string ConnectionString;
     public bool IsDisposed;
     public List<string> TrackedEntities;
@@ -443,7 +443,7 @@ class DbContext {
     }
 }
 
-class IQueryableString {
+public class IQueryableString {
     public string ConnectionString;
     public string Table;
     public bool Tracking;
@@ -476,7 +476,7 @@ class IQueryableString {
     }
 }
 
-class DbSetString {
+public class DbSetString {
     public string ConnectionString;
     public string Table;
 
@@ -498,12 +498,12 @@ class DbSetString {
     }
 }
 
-DbSetString SetString(DbContext context, string table) {
+public DbSetString SetString(DbContext context, string table) {
     context.EnsureNotDisposed();
     return new DbSetString(context.ConnectionString, table);
 }
 
-class ModelBuilder {
+public class ModelBuilder {
     EntityTypeBuilder<T> Entity<T>() {
         return new EntityTypeBuilder<T>();
     }
@@ -514,19 +514,19 @@ class ModelBuilder {
         return new EntityTypeBuilder<object>();
     }
 }
-class MigrationBuilder {}
-class EntityTypeBuilder<T> {}
-class PropertyBuilder {}
-class IndexBuilder {}
+public class MigrationBuilder {}
+public class EntityTypeBuilder<T> {}
+public class PropertyBuilder {}
+public class IndexBuilder {}
 
-enum DeleteBehavior {
+public enum DeleteBehavior {
     Cascade = 0,
     Restrict = 1,
     SetNull = 2,
     NoAction = 3
 }
 
-enum ReferentialAction {
+public enum ReferentialAction {
     NoAction = 0,
     Cascade = 1,
     Restrict = 2,
@@ -534,12 +534,12 @@ enum ReferentialAction {
 }
 
 // Package-level helper functions for method chaining on Unknown types
-object EnableRetryOnFailure(object target) { return target; }
-object CommandTimeout(object target, int timeout) { return target; }
-object HasDefaultSchema(object target, string schema) { return target; }
-object Entity(object target, string name) { return target; }
-object Entity(object target, string name, object configure) { return target; }
-object HasAnnotation(object target, string name, object value) { return target; }
+public object EnableRetryOnFailure(object target) { return target; }
+public object CommandTimeout(object target, int timeout) { return target; }
+public object HasDefaultSchema(object target, string schema) { return target; }
+public object Entity(object target, string name) { return target; }
+public object Entity(object target, string name, object configure) { return target; }
+public object HasAnnotation(object target, string name, object value) { return target; }
 object UseIdentityColumns(object target) { return target; }
 object EnsureSchema(object target, string schema) { return target; }
 object CreateTable(object target, string name, object columns) { return target; }

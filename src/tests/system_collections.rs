@@ -346,6 +346,52 @@ fn compiles_list_enumerator_package_surface() {
 }
 
 #[test]
+fn compiles_dictionary_foreach_surface() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            fn main() {
+                Dictionary<string, int> values = new Dictionary<string, int>();
+                values.Add("a", 1);
+                values.Add("b", 2);
+                foreach (KeyValuePair<string, int> pair in values) {
+                    print(pair.Key);
+                    print(pair.Value);
+                }
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("dictionary foreach should lower to LLVM");
+
+    assert!(llvm_ir.contains("dict_foreach_condition"));
+}
+
+#[test]
+fn compiles_dictionary_enumerator_runtime_shape() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            fn main() {
+                Dictionary<string, int> values = new Dictionary<string, int>();
+                values.Add("a", 1);
+                values.Add("b", 2);
+
+                IEnumerator<KeyValuePair<string, int>> enumerator = values.GetEnumerator();
+                while (enumerator.MoveNext()) {
+                    KeyValuePair<string, int> pair = enumerator.Current;
+                    print(pair.Key);
+                    print(pair.Value);
+                }
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("dictionary enumerator runtime shape should lower");
+
+    assert!(llvm_ir.contains("dict_enum_keys_loop"));
+    assert!(llvm_ir.contains("DictionaryEnumerator"));
+}
+
+#[test]
 fn compiles_hashset_package_surface() {
     let source = r#"
             using System.Collections.Generic;

@@ -32,6 +32,7 @@ struct Modifiers {
     is_async: bool,
     is_extern: bool,
     is_static: bool,
+    visibility: Option<Visibility>,
 }
 
 impl Parser {
@@ -69,6 +70,8 @@ impl Parser {
                 main_fn.body = new_body;
             } else {
                 program.functions.push(Function {
+                    package_id: None,
+                    visibility: Visibility::Internal,
                     namespace: Vec::new(),
                     attributes: Vec::new(),
                     is_async: false,
@@ -109,6 +112,7 @@ impl Parser {
         delegates: &mut Vec<DelegateDef>,
     ) -> Result<(), String> {
         let mut current_namespace = base_namespace.clone();
+        let mut current_package = program.package_id.clone();
         let mut top_level_stmts = Vec::new();
         while !self.at(&TokenKind::Eof) && !(stop_at_rbrace && self.at(&TokenKind::RBrace)) {
             if let TokenKind::Ident(ref name) = self.current().kind {
@@ -149,6 +153,7 @@ impl Parser {
                 self.advance();
                 self.expect(TokenKind::Semi)?;
                 current_namespace = base_namespace.clone();
+                current_package = None;
                 self.using_aliases.clear();
                 continue;
             }
@@ -160,7 +165,8 @@ impl Parser {
                 continue;
             }
             if self.match_kind(&TokenKind::Package) {
-                program.package_id = Some(self.parse_qualified_name()?.join("."));
+                current_package = Some(self.parse_qualified_name()?.join("."));
+                program.package_id = current_package.clone();
                 self.expect(TokenKind::Semi)?;
             } else if self.match_kind(&TokenKind::Native) {
                 let TokenKind::String(source) = self.current().kind.clone() else {
@@ -197,6 +203,7 @@ impl Parser {
                 self.parse_type_alias()?; 
             } else if self.current_ident_is("extension") {
                 program.types.push(self.parse_extension_def(
+                    current_package.clone(),
                     current_namespace.clone(),
                     attributes,
                 )?);
@@ -208,6 +215,10 @@ impl Parser {
             {
                 let mut nested = Vec::new();
                 let type_def = self.parse_type_def(
+                    current_package.clone(),
+                    modifiers
+                        .visibility
+                        .unwrap_or_else(|| default_visibility_for_package(current_package.as_ref())),
                     current_namespace.clone(),
                     attributes,
                     &mut nested,
@@ -219,12 +230,30 @@ impl Parser {
             } else if self.at(&TokenKind::Enum) {
                 program
                     .enums
-                    .push(self.parse_enum_def(current_namespace.clone(), attributes)?);
+                    .push(self.parse_enum_def(
+                        current_package.clone(),
+                        modifiers
+                            .visibility
+                            .unwrap_or_else(|| default_visibility_for_package(current_package.as_ref())),
+                        current_namespace.clone(),
+                        attributes,
+                    )?);
             } else if self.match_kind(&TokenKind::Delegate) {
-                delegates.push(self.parse_delegate_decl(current_namespace.clone(), attributes)?);
+                delegates.push(self.parse_delegate_decl(
+                    current_package.clone(),
+                    modifiers
+                        .visibility
+                        .unwrap_or_else(|| default_visibility_for_package(current_package.as_ref())),
+                    current_namespace.clone(),
+                    attributes,
+                )?);
             } else {
                 let checkpoint = self.pos;
                 match self.parse_function(
+                    current_package.clone(),
+                    modifiers
+                        .visibility
+                        .unwrap_or_else(|| default_visibility_for_package(current_package.as_ref())),
                     current_namespace.clone(),
                     attributes.clone(),
                     modifiers.is_async,
@@ -241,6 +270,8 @@ impl Parser {
         }
         if !top_level_stmts.is_empty() {
             program.functions.push(Function {
+                package_id: None,
+                visibility: Visibility::Internal,
                 namespace: base_namespace,
                 attributes: Vec::new(),
                 is_async: false,
@@ -336,7 +367,13 @@ impl Parser {
         loop {
             if self.match_kind(&TokenKind::Async) {
                 modifiers.is_async = true;
+            } else if self.match_kind(&TokenKind::Internal) {
+                modifiers.visibility = Some(Visibility::Internal);
             } else if self.match_kind(&TokenKind::Public)
+                && {
+                    modifiers.visibility = Some(Visibility::Public);
+                    true
+                }
                 || {
                     if self.match_kind(&TokenKind::Static) {
                         modifiers.is_static = true;
@@ -353,6 +390,7 @@ impl Parser {
                     break;
                 };
                 if matches!(name.as_str(), "private" | "protected" | "internal" | "protected internal" | "private protected") {
+                    modifiers.visibility = Some(Visibility::Internal);
                     self.advance();
                 } else if name == "extern" {
                     modifiers.is_extern = true;
@@ -375,6 +413,8 @@ impl Parser {
 
     fn parse_enum_def(
         &mut self,
+        package_id: Option<String>,
+        visibility: Visibility,
         namespace: Vec<String>,
         attributes: Vec<Attribute>,
     ) -> Result<EnumDef, String> {
@@ -403,6 +443,8 @@ impl Parser {
         }
         self.expect(TokenKind::RBrace)?;
         Ok(EnumDef {
+            package_id,
+            visibility,
             namespace,
             attributes,
             name,
@@ -433,6 +475,8 @@ impl Parser {
 
     fn parse_type_def(
         &mut self,
+        package_id: Option<String>,
+        visibility: Visibility,
         namespace: Vec<String>,
         attributes: Vec<Attribute>,
         nested_types: &mut Vec<TypeDef>,
@@ -488,6 +532,7 @@ impl Parser {
         if let Some(params) = &primary_params {
             for param in params {
                 fields.push(FieldDef {
+                    visibility,
                     name: param.name.clone(),
                     ty: param.ty.clone(),
                     is_static: false,
@@ -495,6 +540,7 @@ impl Parser {
                 });
             }
             constructors.push(Constructor {
+                visibility,
                 namespace: namespace.clone(),
                 attributes: attributes.clone(),
                 params: params.clone(),
@@ -512,6 +558,8 @@ impl Parser {
         }
         if is_record && self.match_kind(&TokenKind::Semi) {
             return Ok(TypeDef {
+                package_id,
+                visibility,
                 kind,
                 is_extension: false,
                 namespace,
@@ -581,6 +629,10 @@ impl Parser {
                 || self.at(&TokenKind::Interface)
             {
                 let nested = self.parse_type_def(
+                    package_id.clone(),
+                    member_modifiers.visibility.unwrap_or_else(|| {
+                        default_visibility_for_package(package_id.as_ref())
+                    }),
                     namespace.clone(),
                     member_attributes,
                     nested_types,
@@ -591,11 +643,25 @@ impl Parser {
                 continue;
             }
             if self.at(&TokenKind::Enum) {
-                let _nested = self.parse_enum_def(namespace.clone(), member_attributes)?;
+                let _nested = self.parse_enum_def(
+                    package_id.clone(),
+                    member_modifiers.visibility.unwrap_or_else(|| {
+                        default_visibility_for_package(package_id.as_ref())
+                    }),
+                    namespace.clone(),
+                    member_attributes,
+                )?;
                 continue;
             }
             if self.match_kind(&TokenKind::Delegate) {
-                delegates.push(self.parse_delegate_decl(namespace.clone(), member_attributes)?);
+                delegates.push(self.parse_delegate_decl(
+                    package_id.clone(),
+                    member_modifiers.visibility.unwrap_or_else(|| {
+                        default_visibility_for_package(package_id.as_ref())
+                    }),
+                    namespace.clone(),
+                    member_attributes,
+                )?);
                 continue;
             }
             if self.current_ident_is(&name) && self.peek_is(1, &TokenKind::LParen) {
@@ -619,6 +685,9 @@ impl Parser {
                     self.parse_stmt_body()?
                 };
                 constructors.push(Constructor {
+                    visibility: member_modifiers.visibility.unwrap_or_else(|| {
+                        default_visibility_for_package(package_id.as_ref())
+                    }),
                     namespace: namespace.clone(),
                     attributes: member_attributes,
                     params,
@@ -628,6 +697,10 @@ impl Parser {
             }
             if self.at(&TokenKind::Fn) {
                 methods.push(self.parse_function(
+                    package_id.clone(),
+                    member_modifiers.visibility.unwrap_or_else(|| {
+                        default_visibility_for_package(package_id.as_ref())
+                    }),
                     namespace.clone(),
                     member_attributes,
                     member_modifiers.is_async,
@@ -655,6 +728,10 @@ impl Parser {
                     self.parse_stmt_body()?
                 };
                 methods.push(Function {
+                    package_id: package_id.clone(),
+                    visibility: member_modifiers.visibility.unwrap_or_else(|| {
+                        default_visibility_for_package(package_id.as_ref())
+                    }),
                     namespace: namespace.clone(),
                     attributes: member_attributes,
                     is_async: member_modifiers.is_async,
@@ -671,6 +748,10 @@ impl Parser {
                 let expr = self.parse_expr()?;
                 self.expect(TokenKind::Semi)?;
                 methods.push(Function {
+                    package_id: package_id.clone(),
+                    visibility: member_modifiers.visibility.unwrap_or_else(|| {
+                        default_visibility_for_package(package_id.as_ref())
+                    }),
                     namespace: namespace.clone(),
                     attributes: member_attributes,
                     is_async: false,
@@ -691,6 +772,9 @@ impl Parser {
                     self.expect(TokenKind::Semi)?;
                 }
                 fields.push(FieldDef {
+                    visibility: member_modifiers.visibility.unwrap_or_else(|| {
+                        default_visibility_for_package(package_id.as_ref())
+                    }),
                     name,
                     ty,
                     is_static: member_modifiers.is_static,
@@ -703,6 +787,9 @@ impl Parser {
                 }
                 self.expect(TokenKind::Semi)?;
                 fields.push(FieldDef {
+                    visibility: member_modifiers.visibility.unwrap_or_else(|| {
+                        default_visibility_for_package(package_id.as_ref())
+                    }),
                     name,
                     ty,
                     is_static: member_modifiers.is_static,
@@ -712,6 +799,8 @@ impl Parser {
         }
         self.expect(TokenKind::RBrace)?;
         Ok(TypeDef {
+            package_id,
+            visibility,
             kind,
             is_extension: false,
             namespace,
@@ -727,6 +816,7 @@ impl Parser {
 
     fn parse_extension_def(
         &mut self,
+        package_id: Option<String>,
         current_namespace: Vec<String>,
         attributes: Vec<Attribute>,
     ) -> Result<TypeDef, String> {
@@ -761,6 +851,10 @@ impl Parser {
             let member_attributes = self.parse_attributes()?;
             let member_modifiers = self.parse_modifiers();
             let mut method = self.parse_function(
+                package_id.clone(),
+                member_modifiers.visibility.unwrap_or_else(|| {
+                    default_visibility_for_package(package_id.as_ref())
+                }),
                 namespace.clone(),
                 member_attributes,
                 member_modifiers.is_async,
@@ -788,7 +882,10 @@ impl Parser {
             methods.push(method);
         }
         self.expect(TokenKind::RBrace)?;
+        let extension_visibility = default_visibility_for_package(package_id.as_ref());
         Ok(TypeDef {
+            package_id,
+            visibility: extension_visibility,
             kind: TypeKind::Class,
             is_extension: true,
             namespace,
@@ -828,6 +925,8 @@ impl Parser {
 
     fn parse_function(
         &mut self,
+        package_id: Option<String>,
+        visibility: Visibility,
         namespace: Vec<String>,
         attributes: Vec<Attribute>,
         is_async: bool,
@@ -874,6 +973,8 @@ impl Parser {
             self.parse_stmt_body()?
         };
         Ok(Function {
+            package_id,
+            visibility,
             namespace,
             attributes,
             is_async,
@@ -890,6 +991,8 @@ impl Parser {
 
     fn parse_delegate_decl(
         &mut self,
+        package_id: Option<String>,
+        visibility: Visibility,
         namespace: Vec<String>,
         attributes: Vec<Attribute>,
     ) -> Result<DelegateDef, String> {
@@ -904,6 +1007,8 @@ impl Parser {
         self.expect(TokenKind::RParen)?;
         self.expect(TokenKind::Semi)?;
         Ok(DelegateDef {
+            package_id,
+            visibility,
             namespace,
             attributes,
             name,
@@ -3047,6 +3152,14 @@ impl Parser {
         while !self.at(&TokenKind::Eof) && self.current().line == line {
             self.advance();
         }
+    }
+}
+
+fn default_visibility_for_package(package_id: Option<&String>) -> Visibility {
+    if package_id.is_some() {
+        Visibility::Public
+    } else {
+        Visibility::Internal
     }
 }
 

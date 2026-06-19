@@ -510,6 +510,31 @@ fn compiles_await_inside_while_in_current_async_gate() {
 }
 
 #[test]
+fn compiles_await_inside_switch_in_current_async_gate() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int One() {
+                return 1;
+            }
+
+            async Task<int> ComputeAsync(int choice) {
+                switch (choice) {
+                    case 0:
+                        return await Task.Run(One);
+                    default:
+                        return await Task.Run(One) + 1;
+                }
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("await in switch should compile in the blocking gate");
+
+    assert!(llvm_ir.contains("glitch_async_resume_ComputeAsync"));
+    assert!(llvm_ir.contains("glitch_task_get_result_i32"));
+}
+
+#[test]
 fn runs_async_task_sample_natively() {
     let source = r#"
             using System.Threading.Tasks;
@@ -741,6 +766,48 @@ fn runs_async_controller_route_with_di_via_app_handle_natively() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("hello from di"));
+}
+
+#[test]
+fn builder_build_preserves_service_provider_for_controller_routes() {
+    let source = r#"
+            using System.Threading.Tasks;
+            using Glitching.AspNetCore;
+            using Microsoft.Extensions.DependencyInjection;
+
+            [ApiController]
+            [Route("/hello")]
+            class HelloController {
+                public ServiceProvider Provider;
+
+                [HttpGet("/")]
+                async Task<string> Get() {
+                    return this.Provider.GetRequiredService("message");
+                }
+            }
+
+            fn main() {
+                WebApplicationBuilder builder = CreateBuilder(System.Array.Empty<string>());
+                builder.Services.AddSingleton("message", "hello from builder");
+                WebApplication app = builder.Build();
+                string response = app.Handle("GET", "/hello", "");
+                print(response);
+            }
+        "#;
+
+    let output_exe =
+        emit_native_executable_from_source("builder-controller-route-di", source);
+    let output = run_native_executable(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("hello from builder"));
 }
 
 

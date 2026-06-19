@@ -81,6 +81,8 @@ pub(crate) struct TypedProgram {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TypedType {
+    pub(crate) package_id: Option<String>,
+    pub(crate) visibility: Visibility,
     pub(crate) name: String,
     pub(crate) namespace: Vec<String>,
     pub(crate) generic_params: Vec<String>,
@@ -95,6 +97,8 @@ pub(crate) struct TypedType {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TypedFunction {
+    pub(crate) package_id: Option<String>,
+    pub(crate) visibility: Visibility,
     pub(crate) name: String,
     pub(crate) symbol: String,
     pub(crate) is_async: bool,
@@ -348,6 +352,8 @@ pub(crate) struct EndpointParameterBinding {
 
 #[derive(Debug, Clone)]
 struct FunctionSignature {
+    package_id: Option<String>,
+    visibility: Visibility,
     generic_params: Vec<String>,
     params: Vec<IrType>,
     param_ownerships: Vec<Ownership>,
@@ -361,6 +367,8 @@ struct FunctionSignature {
 
 #[derive(Debug, Clone)]
 struct FieldSignature {
+    package_id: Option<String>,
+    visibility: Visibility,
     ty: IrType,
     ownership: Ownership,
 }
@@ -376,6 +384,8 @@ struct DelegateSignature {
 #[derive(Default)]
 struct TypeEnv {
     kinds: HashMap<String, TypeKind>,
+    type_packages: HashMap<String, Option<String>>,
+    type_visibilities: HashMap<String, Visibility>,
     bases: HashMap<String, Vec<String>>,
     type_generic_params: HashMap<String, Vec<String>>,
     static_fields: HashMap<(String, String), Expr>,
@@ -394,6 +404,10 @@ impl TypedProgram {
         let mut env = TypeEnv::default();
         for enum_def in &program.enums {
             env.kinds.insert(enum_def.name.clone(), TypeKind::Enum);
+            env.type_packages
+                .insert(enum_def.name.clone(), enum_def.package_id.clone());
+            env.type_visibilities
+                .insert(enum_def.name.clone(), enum_def.visibility);
             for (index, variant) in enum_def.variants.iter().enumerate() {
                 env.enum_values.insert(
                     (enum_def.name.clone(), variant.name.clone()),
@@ -403,6 +417,10 @@ impl TypedProgram {
         }
         for ty in &program.types {
             env.kinds.insert(ty.name.clone(), ty.kind);
+            env.type_packages
+                .insert(ty.name.clone(), ty.package_id.clone());
+            env.type_visibilities
+                .insert(ty.name.clone(), ty.visibility);
             env.bases.insert(ty.name.clone(), ty.bases.clone());
             env.type_generic_params.insert(
                 ty.name.clone(),
@@ -427,6 +445,8 @@ impl TypedProgram {
                 }
                 let field_type = type_syntax_to_ir(&field.ty, &env);
                 let field_signature = FieldSignature {
+                    package_id: ty.package_id.clone(),
+                    visibility: field.visibility,
                     ty: field_type.clone(),
                     ownership: ownership_for_declared_type_syntax(&field.ty, &env),
                 };
@@ -487,6 +507,7 @@ impl TypedProgram {
             generic_instantiations,
             endpoint_handlers,
         };
+        typed.validate_visibility(&env)?;
         typed.validate_async_lowering()?;
         Ok(typed)
     }
@@ -613,6 +634,47 @@ impl TypedProgram {
         out
     }
 
+    fn validate_visibility(&self, env: &TypeEnv) -> Result<(), String> {
+        for function in &self.functions {
+            validate_typed_function_visibility(function, env)?;
+        }
+        for ty in &self.types {
+            for field in &ty.fields {
+                ensure_type_accessible(
+                    env,
+                    &field.ty,
+                    ty.package_id.as_deref(),
+                    &format!("type '{}.{}'", ty.name, field.name),
+                )?;
+            }
+            for base in &ty.bases {
+                if let Some((package_id, visibility)) =
+                    env.lookup_type_visibility(base, ty.package_id.as_deref())
+                {
+                    if !visibility_allows_access(
+                        visibility,
+                        package_id.as_deref(),
+                        ty.package_id.as_deref(),
+                    ) {
+                        return Err(format!(
+                            "type '{}' is not public in package '{}' and cannot be used from '{}'",
+                            base,
+                            package_id.as_deref().unwrap_or("<root>"),
+                            ty.package_id.as_deref().unwrap_or("<root>")
+                        ));
+                    }
+                }
+            }
+            for constructor in &ty.constructors {
+                validate_typed_function_visibility(constructor, env)?;
+            }
+            for method in &ty.methods {
+                validate_typed_function_visibility(method, env)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_async_lowering(&self) -> Result<(), String> {
         for function in &self.functions {
             validate_async_function(function)?;
@@ -626,6 +688,362 @@ impl TypedProgram {
             }
         }
         Ok(())
+    }
+}
+
+fn validate_typed_function_visibility(
+    function: &TypedFunction,
+    env: &TypeEnv,
+) -> Result<(), String> {
+    let caller_package = function.package_id.as_deref();
+    if caller_package.is_some() {
+        return Ok(());
+    }
+    ensure_type_accessible(
+        env,
+        &function.return_type,
+        caller_package,
+        &format!("return type of '{}'", function.name),
+    )?;
+    for param in &function.params {
+        ensure_type_accessible(
+            env,
+            &param.ty,
+            caller_package,
+            &format!("parameter '{}' of '{}'", param.name, function.name),
+        )?;
+    }
+    for local in &function.locals {
+        ensure_type_accessible(
+            env,
+            &local.ty,
+            caller_package,
+            &format!("local '{}' of '{}'", local.name, function.name),
+        )?;
+    }
+    for stmt in &function.body {
+        validate_typed_stmt_visibility(stmt, env, caller_package, &function.name)?;
+    }
+    Ok(())
+}
+
+fn validate_typed_stmt_visibility(
+    stmt: &TypedStmt,
+    env: &TypeEnv,
+    caller_package: Option<&str>,
+    function_name: &str,
+) -> Result<(), String> {
+    match &stmt.kind {
+        TypedStmtKind::Let { binding, expr } => {
+            ensure_type_accessible(
+                env,
+                &binding.ty,
+                caller_package,
+                &format!("binding '{}' in '{}'", binding.name, function_name),
+            )?;
+            validate_typed_expr_visibility(expr, env, caller_package, function_name)?;
+        }
+        TypedStmtKind::Assign { expr, .. }
+        | TypedStmtKind::Print(expr)
+        | TypedStmtKind::Expr(expr)
+        | TypedStmtKind::Throw(expr) => {
+            validate_typed_expr_visibility(expr, env, caller_package, function_name)?;
+        }
+        TypedStmtKind::AssignTarget { target, expr } => {
+            validate_typed_expr_visibility(target, env, caller_package, function_name)?;
+            validate_typed_expr_visibility(expr, env, caller_package, function_name)?;
+        }
+        TypedStmtKind::Block(body) => {
+            for stmt in body {
+                validate_typed_stmt_visibility(stmt, env, caller_package, function_name)?;
+            }
+        }
+        TypedStmtKind::If { condition, then_body, else_body } => {
+            validate_typed_expr_visibility(condition, env, caller_package, function_name)?;
+            for stmt in then_body {
+                validate_typed_stmt_visibility(stmt, env, caller_package, function_name)?;
+            }
+            for stmt in else_body {
+                validate_typed_stmt_visibility(stmt, env, caller_package, function_name)?;
+            }
+        }
+        TypedStmtKind::Try { try_body, catch_body, finally_body, .. } => {
+            for stmt in try_body {
+                validate_typed_stmt_visibility(stmt, env, caller_package, function_name)?;
+            }
+            for stmt in catch_body {
+                validate_typed_stmt_visibility(stmt, env, caller_package, function_name)?;
+            }
+            for stmt in finally_body {
+                validate_typed_stmt_visibility(stmt, env, caller_package, function_name)?;
+            }
+        }
+        TypedStmtKind::Switch { expr, cases, default } => {
+            validate_typed_expr_visibility(expr, env, caller_package, function_name)?;
+            for case in cases {
+                validate_typed_expr_visibility(&case.value, env, caller_package, function_name)?;
+                for stmt in &case.body {
+                    validate_typed_stmt_visibility(stmt, env, caller_package, function_name)?;
+                }
+            }
+            for stmt in default {
+                validate_typed_stmt_visibility(stmt, env, caller_package, function_name)?;
+            }
+        }
+        TypedStmtKind::While { condition, body } => {
+            validate_typed_expr_visibility(condition, env, caller_package, function_name)?;
+            for stmt in body {
+                validate_typed_stmt_visibility(stmt, env, caller_package, function_name)?;
+            }
+        }
+        TypedStmtKind::For { init, condition, increment, body } => {
+            if let Some(init) = init {
+                validate_typed_stmt_visibility(init, env, caller_package, function_name)?;
+            }
+            if let Some(condition) = condition {
+                validate_typed_expr_visibility(condition, env, caller_package, function_name)?;
+            }
+            if let Some(increment) = increment {
+                validate_typed_stmt_visibility(increment, env, caller_package, function_name)?;
+            }
+            for stmt in body {
+                validate_typed_stmt_visibility(stmt, env, caller_package, function_name)?;
+            }
+        }
+        TypedStmtKind::ForEach { item, collection, body } => {
+            ensure_type_accessible(
+                env,
+                &item.ty,
+                caller_package,
+                &format!("foreach item '{}' in '{}'", item.name, function_name),
+            )?;
+            validate_typed_expr_visibility(collection, env, caller_package, function_name)?;
+            for stmt in body {
+                validate_typed_stmt_visibility(stmt, env, caller_package, function_name)?;
+            }
+        }
+        TypedStmtKind::Return(Some(expr)) => {
+            validate_typed_expr_visibility(expr, env, caller_package, function_name)?;
+        }
+        TypedStmtKind::Return(None) | TypedStmtKind::Break | TypedStmtKind::Continue => {}
+    }
+    Ok(())
+}
+
+fn validate_typed_expr_visibility(
+    expr: &TypedExpr,
+    env: &TypeEnv,
+    caller_package: Option<&str>,
+    function_name: &str,
+) -> Result<(), String> {
+    ensure_type_accessible(env, &expr.ty, caller_package, &format!("expression in '{}'", function_name))?;
+    match &expr.kind {
+        TypedExprKind::Field { target, name } => {
+            validate_typed_expr_visibility(target, env, caller_package, function_name)?;
+            if let Some(type_name) = object_type_name(&target.ty) {
+                if let Some(field) = env.resolve_field(type_name, name) {
+                    if !visibility_allows_access(field.visibility, field.package_id.as_deref(), caller_package) {
+                        return Err(format!(
+                            "field '{}.{}' is not public in package '{}' and cannot be accessed from '{}'",
+                            type_name,
+                            name,
+                            field.package_id.as_deref().unwrap_or("<root>"),
+                            caller_package.unwrap_or("<root>")
+                        ));
+                    }
+                }
+            }
+        }
+        TypedExprKind::Call(call) => {
+            if let TypedCallKind::Method { target, symbol, .. } = &call.kind {
+                validate_typed_expr_visibility(target, env, caller_package, function_name)?;
+                if let Some(signature) = env.lookup_signature_by_symbol(symbol) {
+                    if !visibility_allows_access(signature.visibility, signature.package_id.as_deref(), caller_package) {
+                        return Err(format!(
+                            "method '{}' is not public in package '{}' and cannot be called from '{}'",
+                            symbol,
+                            signature.package_id.as_deref().unwrap_or("<root>"),
+                            caller_package.unwrap_or("<root>")
+                        ));
+                    }
+                }
+            } else if let TypedCallKind::Function { symbol, .. } = &call.kind {
+                if let Some(signature) = env.lookup_signature_by_symbol(symbol) {
+                    if !visibility_allows_access(signature.visibility, signature.package_id.as_deref(), caller_package) {
+                        return Err(format!(
+                            "function '{}' is not public in package '{}' and cannot be called from '{}'",
+                            symbol,
+                            signature.package_id.as_deref().unwrap_or("<root>"),
+                            caller_package.unwrap_or("<root>")
+                        ));
+                    }
+                }
+            }
+            for arg in &call.args {
+                validate_typed_expr_visibility(arg, env, caller_package, function_name)?;
+            }
+        }
+        TypedExprKind::NewObject { type_name, constructor, args, fields } => {
+            if let Some((package_id, visibility)) =
+                env.lookup_type_visibility(type_name, caller_package)
+            {
+                if !visibility_allows_access(visibility, package_id.as_deref(), caller_package) {
+                    return Err(format!(
+                        "type '{}' is not public in package '{}' and cannot be constructed from '{}'",
+                        type_name,
+                        package_id.as_deref().unwrap_or("<root>"),
+                        caller_package.unwrap_or("<root>")
+                    ));
+                }
+            }
+            if let Some(symbol) = constructor {
+                if let Some(signature) = env.lookup_signature_by_symbol(symbol) {
+                    if !visibility_allows_access(signature.visibility, signature.package_id.as_deref(), caller_package) {
+                        return Err(format!(
+                            "constructor '{}' is not public in package '{}' and cannot be called from '{}'",
+                            symbol,
+                            signature.package_id.as_deref().unwrap_or("<root>"),
+                            caller_package.unwrap_or("<root>")
+                        ));
+                    }
+                }
+            }
+            for arg in args {
+                validate_typed_expr_visibility(arg, env, caller_package, function_name)?;
+            }
+            for field in fields {
+                validate_typed_expr_visibility(&field.expr, env, caller_package, function_name)?;
+            }
+        }
+        TypedExprKind::ArrayLiteral(values) => {
+            for value in values {
+                validate_typed_expr_visibility(value, env, caller_package, function_name)?;
+            }
+        }
+        TypedExprKind::NewArray { length, values, .. } => {
+            if let Some(length) = length {
+                validate_typed_expr_visibility(length, env, caller_package, function_name)?;
+            }
+            for value in values {
+                validate_typed_expr_visibility(value, env, caller_package, function_name)?;
+            }
+        }
+        TypedExprKind::Index { target, index } => {
+            validate_typed_expr_visibility(target, env, caller_package, function_name)?;
+            validate_typed_expr_visibility(index, env, caller_package, function_name)?;
+        }
+        TypedExprKind::IsPattern { expr, binding } => {
+            validate_typed_expr_visibility(expr, env, caller_package, function_name)?;
+            if let Some(binding) = binding {
+                ensure_type_accessible(env, &binding.ty, caller_package, &format!("pattern binding '{}' in '{}'", binding.name, function_name))?;
+            }
+        }
+        TypedExprKind::Throw(expr)
+        | TypedExprKind::Await(expr)
+        | TypedExprKind::NullableSome(expr)
+        | TypedExprKind::Unary { expr, .. } => {
+            validate_typed_expr_visibility(expr, env, caller_package, function_name)?;
+        }
+        TypedExprKind::Assign { target, value } => {
+            validate_typed_expr_visibility(target, env, caller_package, function_name)?;
+            validate_typed_expr_visibility(value, env, caller_package, function_name)?;
+        }
+        TypedExprKind::Conditional { condition, when_true, when_false } => {
+            validate_typed_expr_visibility(condition, env, caller_package, function_name)?;
+            validate_typed_expr_visibility(when_true, env, caller_package, function_name)?;
+            validate_typed_expr_visibility(when_false, env, caller_package, function_name)?;
+        }
+        TypedExprKind::IncDec { target, .. } => {
+            validate_typed_expr_visibility(target, env, caller_package, function_name)?;
+        }
+        TypedExprKind::Binary { left, right, .. } => {
+            validate_typed_expr_visibility(left, env, caller_package, function_name)?;
+            validate_typed_expr_visibility(right, env, caller_package, function_name)?;
+        }
+        TypedExprKind::Lambda { body, .. } => {
+            validate_typed_expr_visibility(body, env, caller_package, function_name)?;
+        }
+        TypedExprKind::FunctionSymbol(symbol) => {
+            if let Some(signature) = env.lookup_signature_by_symbol(symbol) {
+                if !visibility_allows_access(signature.visibility, signature.package_id.as_deref(), caller_package) {
+                    return Err(format!(
+                        "function '{}' is not public in package '{}' and cannot be referenced from '{}'",
+                        symbol,
+                        signature.package_id.as_deref().unwrap_or("<root>"),
+                        caller_package.unwrap_or("<root>")
+                    ));
+                }
+            }
+        }
+        TypedExprKind::Int(_)
+        | TypedExprKind::Float(_)
+        | TypedExprKind::Bool(_)
+        | TypedExprKind::Null
+        | TypedExprKind::String(_)
+        | TypedExprKind::Var(_)
+        | TypedExprKind::Move(_)
+        | TypedExprKind::Borrow { .. }
+        | TypedExprKind::NewCollection(_)
+        | TypedExprKind::NewThread(_) => {}
+    }
+    Ok(())
+}
+
+fn ensure_type_accessible(
+    env: &TypeEnv,
+    ty: &IrType,
+    caller_package: Option<&str>,
+    context: &str,
+) -> Result<(), String> {
+    match ty {
+        IrType::Array(inner)
+        | IrType::Ref(inner)
+        | IrType::Nullable(inner)
+        | IrType::Weak(inner)
+        | IrType::Task(inner)
+        | IrType::Enumerable(inner)
+        | IrType::List(inner) => ensure_type_accessible(env, inner, caller_package, context),
+        IrType::Dictionary(key, value) => {
+            ensure_type_accessible(env, key, caller_package, context)?;
+            ensure_type_accessible(env, value, caller_package, context)
+        }
+        IrType::Function { params, return_type } => {
+            for param in params {
+                ensure_type_accessible(env, param, caller_package, context)?;
+            }
+            ensure_type_accessible(env, return_type, caller_package, context)
+        }
+        IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) | IrType::Unknown(name) => {
+            if let Some((package_id, visibility)) =
+                env.lookup_type_visibility(name, caller_package)
+            {
+                if !visibility_allows_access(visibility, package_id.as_deref(), caller_package) {
+                    return Err(format!(
+                        "{context} uses non-public type '{}' from package '{}'",
+                        name,
+                        package_id.as_deref().unwrap_or("<root>")
+                    ));
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn visibility_allows_access(
+    visibility: Visibility,
+    declaration_package: Option<&str>,
+    caller_package: Option<&str>,
+) -> bool {
+    visibility == Visibility::Public || declaration_package == caller_package
+}
+
+fn object_type_name(ty: &IrType) -> Option<&str> {
+    match ty {
+        IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => Some(name),
+        IrType::Ref(inner) | IrType::Nullable(inner) => object_type_name(inner),
+        _ => None,
     }
 }
 
@@ -766,15 +1184,23 @@ fn validate_async_stmt(
             let mut finally_scope = scope.clone();
             validate_async_stmts(function_name, finally_body, after_uses, &mut finally_scope)
         }
-        TypedStmtKind::Switch { .. } => {
-            if stmt_contains_await(stmt) {
-                Err(format!(
-                    "async lowering: function '{}' does not support await inside switch yet; rewrite the suspension into if/else or split the method",
-                    function_name
-                ))
-            } else {
-                Ok(())
+        TypedStmtKind::Switch { expr, cases, default } => {
+            let mut expr_after = after_uses.clone();
+            for case in cases {
+                collect_used_bindings_expr(&case.value, &mut expr_after);
+                collect_used_bindings_stmts(&case.body, &mut expr_after);
             }
+            collect_used_bindings_stmts(default, &mut expr_after);
+            validate_async_expr(function_name, expr, &expr_after, scope)?;
+            for case in cases {
+                let mut case_after = after_uses.clone();
+                collect_used_bindings_stmts(default, &mut case_after);
+                validate_async_expr(function_name, &case.value, &case_after, scope)?;
+                let mut case_scope = scope.clone();
+                validate_async_stmts(function_name, &case.body, after_uses, &mut case_scope)?;
+            }
+            let mut default_scope = scope.clone();
+            validate_async_stmts(function_name, default, after_uses, &mut default_scope)
         }
         TypedStmtKind::While { condition, body } => {
             let mut loop_after = after_uses.clone();
@@ -1311,6 +1737,8 @@ fn populate_method_signatures(program: &Program, env: &mut TypeEnv) {
             let required_params = method.params.iter().take_while(|param| param.default.is_none()).count();
             let key = (ty.name.clone(), method.name.clone());
             let signature = FunctionSignature {
+                package_id: method.package_id.clone().or_else(|| ty.package_id.clone()),
+                visibility: method.visibility,
                 generic_params: method
                     .generic_params
                     .iter()
@@ -1377,6 +1805,8 @@ fn populate_constructor_signatures(program: &Program, env: &mut TypeEnv) {
                 .entry(ty.name.clone())
                 .or_default()
                 .push(FunctionSignature {
+                    package_id: ty.package_id.clone(),
+                    visibility: constructor.visibility,
                     generic_params: ty
                         .generic_params
                         .iter()
@@ -1400,9 +1830,29 @@ impl TypeEnv {
         let mut env = TypeEnv::default();
         for enum_def in &program.enums {
             env.kinds.insert(enum_def.name.clone(), TypeKind::Enum);
+            env.type_packages
+                .insert(enum_def.name.clone(), enum_def.package_id.clone());
+            env.type_visibilities
+                .insert(enum_def.name.clone(), enum_def.visibility);
+            if let Some(package_id) = &enum_def.package_id {
+                let key = package_type_key(package_id, &enum_def.name);
+                env.kinds.insert(key.clone(), TypeKind::Enum);
+                env.type_packages.insert(key.clone(), enum_def.package_id.clone());
+                env.type_visibilities.insert(key, enum_def.visibility);
+            }
         }
         for ty in &program.types {
             env.kinds.insert(ty.name.clone(), ty.kind);
+            env.type_packages
+                .insert(ty.name.clone(), ty.package_id.clone());
+            env.type_visibilities
+                .insert(ty.name.clone(), ty.visibility);
+            if let Some(package_id) = &ty.package_id {
+                let key = package_type_key(package_id, &ty.name);
+                env.kinds.insert(key.clone(), ty.kind);
+                env.type_packages.insert(key.clone(), ty.package_id.clone());
+                env.type_visibilities.insert(key, ty.visibility);
+            }
             env.bases.insert(ty.name.clone(), ty.bases.clone());
         }
         populate_delegate_signatures(program, &mut env);
@@ -1413,6 +1863,8 @@ impl TypeEnv {
             for field in &ty.fields {
                 let field_type = type_syntax_to_ir(&field.ty, &env);
                 let field_signature = FieldSignature {
+                    package_id: ty.package_id.clone(),
+                    visibility: field.visibility,
                     ty: field_type.clone(),
                     ownership: ownership_for_declared_type_syntax(&field.ty, &env),
                 };
@@ -1434,6 +1886,51 @@ impl TypeEnv {
         } else {
             None
         }
+    }
+
+    fn lookup_type_visibility(
+        &self,
+        type_name: &str,
+        caller_package: Option<&str>,
+    ) -> Option<(Option<String>, Visibility)> {
+        let package_candidate = |candidate: &str| {
+            caller_package.map(|package_id| package_type_key(package_id, candidate))
+        };
+        for candidate in [
+            type_name.to_string(),
+            base_type_name(type_name).to_string(),
+            type_name.rsplit('.').next().unwrap_or(type_name).to_string(),
+        ] {
+            if let Some(package_key) = package_candidate(&candidate) {
+                if let Some(visibility) = self.type_visibilities.get(&package_key) {
+                    let package_id = self
+                        .type_packages
+                        .get(&package_key)
+                        .cloned()
+                        .unwrap_or(None);
+                    return Some((package_id, *visibility));
+                }
+            }
+            if let Some(visibility) = self.type_visibilities.get(&candidate) {
+                let package_id = self
+                    .type_packages
+                    .get(&candidate)
+                    .cloned()
+                    .unwrap_or(None);
+                return Some((package_id, *visibility));
+            }
+        }
+        None
+    }
+
+    fn lookup_signature_by_symbol(&self, symbol: &str) -> Option<&FunctionSignature> {
+        self.functions
+            .values()
+            .chain(self.methods.values())
+            .chain(self.extension_methods.values())
+            .chain(self.constructors.values())
+            .flat_map(|signatures| signatures.iter())
+            .find(|signature| signature.symbol == symbol)
     }
 
     fn resolve_function(&self, name: &str, arg_types: &[IrType]) -> Option<&FunctionSignature> {
@@ -1999,6 +2496,10 @@ struct OwnershipSnapshot {
     vars: HashMap<String, CheckedVar>,
     exits_function: bool,
     exits_loop: bool,
+}
+
+fn package_type_key(package_id: &str, type_name: &str) -> String {
+    format!("{package_id}::{type_name}")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2796,18 +3297,26 @@ impl OwnershipChecker {
                     (IrType::List(_), "Count")
                     | (IrType::Dictionary(_, _), "Count")
                     | (IrType::Array(_), "Length" | "Count") => Some(FieldSignature {
+                        package_id: None,
+                        visibility: Visibility::Public,
                         ty: IrType::Int,
                         ownership: Ownership::Copy,
                     }),
                     (IrType::Task(inner), "Result") => Some(FieldSignature {
+                        package_id: None,
+                        visibility: Visibility::Public,
                         ty: inner.as_ref().clone(),
                         ownership: ownership_for_type(inner),
                     }),
                     (IrType::Task(_), "IsCompleted") | (IrType::Task(_), "IsCompletedSuccessfully") => Some(FieldSignature {
+                        package_id: None,
+                        visibility: Visibility::Public,
                         ty: IrType::Bool,
                         ownership: Ownership::Copy,
                     }),
                     (IrType::Exception, "Message") => Some(FieldSignature {
+                        package_id: None,
+                        visibility: Visibility::Public,
                         ty: IrType::String,
                         ownership: Ownership::Borrowed,
                     }),
@@ -2960,6 +3469,8 @@ impl OwnershipChecker {
                     let target_info = env
                         .resolve_field(type_name, &field.name)
                         .unwrap_or_else(|| FieldSignature {
+                            package_id: None,
+                            visibility: Visibility::Public,
                             ty: expr.ty.clone(),
                             ownership: ownership_for_type(&expr.ty),
                         });
@@ -3261,6 +3772,8 @@ fn function_signature(function: &Function, env: &TypeEnv, overloaded: bool) -> F
         )
     };
     FunctionSignature {
+        package_id: function.package_id.clone(),
+        visibility: function.visibility,
         generic_params: function
             .generic_params
             .iter()
@@ -4048,6 +4561,8 @@ fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Result<TypedType
         .iter()
         .map(|constructor| {
             let function = Function {
+                package_id: ty.package_id.clone(),
+                visibility: constructor.visibility,
                 namespace: constructor.namespace.clone(),
                 attributes: constructor.attributes.clone(),
                 is_async: false,
@@ -4088,6 +4603,8 @@ fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Result<TypedType
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(TypedType {
+        package_id: ty.package_id.clone(),
+        visibility: ty.visibility,
         name: ty.name.clone(),
         namespace: ty.namespace.clone(),
         generic_params: ty
@@ -4172,6 +4689,8 @@ fn lower_function(
     }
     let body = lower_typed_stmts(&function.body, env, &mut typed_scopes)?;
     Ok(TypedFunction {
+        package_id: function.package_id.clone(),
+        visibility: function.visibility,
         name: function.name.clone(),
         symbol: symbol_override.unwrap_or_else(|| {
             env.resolve_function(
@@ -5197,26 +5716,38 @@ fn lower_typed_expr_with_expected(
                 (IrType::List(_), "Count")
                 | (IrType::Dictionary(_, _), "Count")
                 | (IrType::Array(_), "Length" | "Count") => Some(FieldSignature {
+                    package_id: None,
+                    visibility: Visibility::Public,
                     ty: IrType::Int,
                     ownership: Ownership::Copy,
                 }),
                 (IrType::String, "Length") => Some(FieldSignature {
+                    package_id: None,
+                    visibility: Visibility::Public,
                     ty: IrType::Int,
                     ownership: Ownership::Copy,
                 }),
                 (IrType::Task(inner), "Result") => Some(FieldSignature {
+                    package_id: None,
+                    visibility: Visibility::Public,
                     ty: inner.as_ref().clone(),
                     ownership: ownership_for_type(inner),
                 }),
                 (IrType::Task(_), "IsCompleted") => Some(FieldSignature {
+                    package_id: None,
+                    visibility: Visibility::Public,
                     ty: IrType::Bool,
                     ownership: Ownership::Copy,
                 }),
                 (IrType::Exception, "Message") => Some(FieldSignature {
+                    package_id: None,
+                    visibility: Visibility::Public,
                     ty: IrType::String,
                     ownership: Ownership::Borrowed,
                 }),
                 (IrType::Weak(inner), "Target") => Some(FieldSignature {
+                    package_id: None,
+                    visibility: Visibility::Public,
                     ty: inner.as_ref().clone(),
                     ownership: Ownership::Borrowed,
                 }),
@@ -5865,26 +6396,38 @@ fn lower_expr(
                 (IrType::List(_), "Count")
                 | (IrType::Dictionary(_, _), "Count")
                 | (IrType::Array(_), "Length" | "Count") => Some(FieldSignature {
+                    package_id: None,
+                    visibility: Visibility::Public,
                     ty: IrType::Int,
                     ownership: Ownership::Copy,
                 }),
                 (IrType::String, "Length") => Some(FieldSignature {
+                    package_id: None,
+                    visibility: Visibility::Public,
                     ty: IrType::Int,
                     ownership: Ownership::Copy,
                 }),
                 (IrType::Task(inner), "Result") => Some(FieldSignature {
+                    package_id: None,
+                    visibility: Visibility::Public,
                     ty: inner.as_ref().clone(),
                     ownership: ownership_for_type(inner),
                 }),
                 (IrType::Task(_), "IsCompleted") => Some(FieldSignature {
+                    package_id: None,
+                    visibility: Visibility::Public,
                     ty: IrType::Bool,
                     ownership: Ownership::Copy,
                 }),
                 (IrType::Exception, "Message") => Some(FieldSignature {
+                    package_id: None,
+                    visibility: Visibility::Public,
                     ty: IrType::String,
                     ownership: Ownership::Borrowed,
                 }),
                 (IrType::Weak(inner), "Target") => Some(FieldSignature {
+                    package_id: None,
+                    visibility: Visibility::Public,
                     ty: inner.as_ref().clone(),
                     ownership: Ownership::Borrowed,
                 }),
@@ -7279,12 +7822,61 @@ fn resolve_method_call(
                 CallResolution::CollectionMethod,
             ))
         }
-        (IrType::Dictionary(_, _), "Add" | "Clear") => Ok((
-            IrType::Void,
-            Ownership::Copy,
-            name.to_string(),
-            CallResolution::CollectionMethod,
-        )),
+        (IrType::Dictionary(_, _), method_name) => {
+            let collection_resolution = match method_name {
+                "Add" | "Clear" => Some((
+                    IrType::Void,
+                    Ownership::Copy,
+                    name.to_string(),
+                    CallResolution::CollectionMethod,
+                )),
+                "GetEnumerator" => Some(
+                    env.resolve_method_call("Dictionary", method_name, args)?
+                        .map(|signature| {
+                            (
+                                signature.return_type.clone(),
+                                signature.return_ownership.clone(),
+                                name.to_string(),
+                                CallResolution::CollectionMethod,
+                            )
+                        })
+                        .unwrap_or((
+                            IrType::Unknown(method_name.to_string()),
+                            Ownership::Owned,
+                            name.to_string(),
+                            CallResolution::CollectionMethod,
+                        )),
+                ),
+                _ => None,
+            };
+            if let Some(result) = collection_resolution {
+                return Ok(result);
+            }
+            if let Some(signature) = env.resolve_method_call("Dictionary", method_name, args)? {
+                return Ok((
+                    signature.return_type.clone(),
+                    signature.return_ownership.clone(),
+                    signature.symbol.clone(),
+                    CallResolution::InstanceMethod,
+                ));
+            }
+            if let Some(signature) =
+                env.resolve_extension_method_call("Dictionary", method_name, target, args)?
+            {
+                return Ok((
+                    signature.return_type.clone(),
+                    signature.return_ownership.clone(),
+                    signature.symbol.clone(),
+                    CallResolution::InstanceMethod,
+                ));
+            }
+            Ok((
+                IrType::Unknown(method_name.to_string()),
+                Ownership::Shared,
+                method_name.to_string(),
+                CallResolution::Unknown,
+            ))
+        }
         (_, "Wait") => Ok((IrType::Void, Ownership::Copy, name.to_string(), CallResolution::TaskMethod)),
         _ => Ok((
             IrType::Unknown(name.to_string()),

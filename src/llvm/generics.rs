@@ -970,6 +970,8 @@ pub(super) fn specialize_typed_type_owner(
         .collect::<Vec<_>>()
         .join("_");
     TypedType {
+        package_id: ty.package_id.clone(),
+        visibility: ty.visibility,
         name: concrete_name.to_string(),
         namespace: ty.namespace.clone(),
         generic_params: Vec::new(),

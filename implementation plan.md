@@ -54,6 +54,7 @@ The following items from the analysis are now implemented or superseded by later
 - the current README has been updated to describe the implemented subset, the LLVM path, and the remaining safety boundaries
 - the stale `fixing_plan.md` has been removed
 - linked package and workspace sources now carry file markers that let diagnostics report the originating file path for warnings and compatibility messages instead of only the concatenated buffer location
+- package declarations now default to public visibility unless explicitly marked otherwise, and cross-package access is checked explicitly in TIR instead of relying on the old “everything is reachable” behavior
 
 ## Current implementation boundary
 
@@ -66,7 +67,7 @@ The current boundary is:
 - `Rc<T>` and `sizeof(T)` are supported in the LLVM path where the current tests need them
 - async methods now lower to compiler-generated worker-thread state-machine entrypoints with hidden resume symbols and blocking `await` semantics over the native task runtime
 - the current async gate supports local declarations, assignments, `if` / `else`, `return`, multiple sequential awaits, `try` / `catch` / `finally`, and the currently exercised loop shapes on the blocking worker-thread runtime
-- the current async gate still rejects suspension inside `switch`, and it rejects borrowed/view values that stay live across `await`
+- the current async gate now includes `switch` in addition to the previously supported control-flow shapes, and it still rejects borrowed/view values that stay live across `await`
 - the runtime and standard library still need further work before broader ASP.NET Core or EF Core compatibility is realistic
 - the current regression suite is green, including the Conduit integration-tests project compile gate through LLVM
 
@@ -118,7 +119,7 @@ The current boundary is:
 - Native `bool` printing on the LLVM executable path now emits `true` / `false` text through LLVM-side formatting instead of numeric `1` / `0`, while preserving output order with the existing `printf`-based runtime.
 - The Rust socket-host runtime now joins spawned request-worker threads before returning from the host loop, and a direct runtime unit test covers multi-request handling on the current host path.
 - Borrow/ownership loop-flow handling now distinguishes `break` from `continue` for `for` loops, so unreachable increment paths after `break` no longer poison state while `continue` still flows through the increment step.
-- Known package stubs now surface explicit `GL3013` diagnostics for the current `ConfigurationManager.Get*`, AutoMapper `Map(...)`, and dictionary-enumerator placeholder surfaces instead of silently looking implemented just because a package method body exists.
+- Known package stubs now surface explicit `GL3013` diagnostics for the current `ConfigurationManager.Get*` and AutoMapper `Map(...)` placeholder surfaces instead of silently looking implemented just because a package method body exists.
 - The LLVM task/runtime slice now lowers `Task.WhenAll(...)`, `Task.Wait()`, and task completion-status checks through explicit runtime helpers instead of package no-ops, and there is native execution coverage for the `WhenAll + Wait + IsCompletedSuccessfully` path with leak reporting enabled.
 - `Task.FromResult(...)` now retains pointer-backed lvalue payloads on the LLVM path before storing them into task results, which closes the obvious double-release/use-after-free edge for shared string/class-style sources in the current synchronous task model.
 - `Task.Run(...)` now uses a Rust worker-thread runtime for the supported zero-argument delegate slice instead of invoking delegates inline in the LLVM backend, and `await` / `GetResult()` / `Wait()` now join that task handle before reading the result slot.
@@ -127,10 +128,19 @@ The current boundary is:
 - The `Glitching.AspNetCore` package surface now accepts delegate-style `MapGet<T>` / `MapPost<T>` registrations for the current zero-argument handler slice, which lets async route handlers reach typed endpoint lowering.
 - There is direct LLVM regression coverage for async route handlers, including `app.MapGet("/health", HealthAsync)` lowering through `glitch_task_get_result_ptr(...)`.
 - The native smoke for compiler-generated `WebApplication_Handle` on that async route path now runs cleanly: the Rust host converts incoming request parts into real Glitch strings, the response path exits without host-side faults, and the temporary `ServiceProvider(\"\")` object-slot placeholder has been removed from the ASP.NET package surfaces.
+- Attribute-routed async controller actions that read DI state through `this` now survive the native `app.Handle(...)` path: endpoint thunks keep controller instances alive through task-result extraction and response shaping before releasing them, and there is direct native regression coverage for the `async controller + ServiceProvider + app.Handle` crash shape.
+- `WebApplicationBuilder.Build()` now constructs the returned app with the built `ServiceProvider` instead of patching it in after allocation, which keeps builder-style controller routes on the leak-free native path and removes the need for a manual `app.Services = ...` assignment in the current DI slice.
+- Additional ASP.NET/DI placeholder surfaces now stop pretending to work silently: generic `UseMiddleware<T>()` and service-registration markers like `AddEndpointsApiExplorer()` / `AddMemoryCache()` emit explicit `GL3013` compatibility warnings with regression coverage instead of compiling as opaque no-ops.
+- Authentication, Swagger option, and logging configuration marker chains now also emit explicit `GL3013` diagnostics instead of silently looking executable, including `AddAuthentication()` / `AddJwtBearer(...)`, `SwaggerDoc(...)` / `SwaggerEndpoint(...)`, and `ClearProviders()` / `AddSerilog(...)` / `ConfigureSerilog()`.
 - Host-side native allocation helpers now participate in the same live-allocation accounting as LLVM-emitted allocations, which keeps request-owned Glitch strings from driving the leak counter negative on clean shutdown.
 - `try` / `catch` / `finally` ownership flow now propagates `finally` effects into recorded loop-exit snapshots, so `break` / `continue` paths no longer skip cleanup or moves performed in `finally`.
-- Additional package placeholders now produce explicit `GL3013` diagnostics for DI lookup stubs (`GetRequiredService` / `GetService`) and ASP.NET-style no-op host configuration markers such as `UseSwagger` / `UseSwaggerUI` / `UseStaticFiles`.
+- Additional package placeholders now produce explicit `GL3013` diagnostics for ASP.NET-style no-op host configuration markers such as `UseSwagger` / `UseSwaggerUI` / `UseStaticFiles`.
+- Additional compatibility-only framework surfaces now also emit explicit `GL3013` diagnostics instead of looking runtime-ready: more ASP.NET host markers (`UseCors`, `UseAuthentication`, `UseMvc`, `UseHttpsRedirection`, `UseRouting`, `UseEndpoints`, `MapControllers`, `Run`) and EF database/transaction markers (`EnsureCreated`, `EnsureDeleted`, `Migrate`, `ExecuteSqlRaw`, `BeginTransaction`, `Commit`, `Rollback`, `Dispose`).
+- Package type merging now keys on package id as well as name/namespace, which prevents package extension carrier types from accidentally merging with root types that only share the same short name.
 - The native test harness now recovers cleanly from a transient runtime-library build failure by retrying the Rust runtime build and ignoring a poisoned in-process native-build mutex.
+- `Dictionary<K,V>.GetEnumerator()` now lowers through a real LLVM snapshot-enumerator path instead of the old null placeholder, and there is regression coverage for both direct enumerator lowering and dictionary `foreach` lowering on the LLVM path.
+- Generic `ServiceProvider.GetRequiredService<T>()` / `GetService<T>()` calls now have a real lowering slice for the currently supported cases (service-provider/self surfaces, scope-factory-style surfaces, and concrete-class activation), and the previous blanket compatibility warning for every generic lookup has been removed.
+- The blocking async gate now accepts `await` inside `switch` bodies and keeps the existing borrowed/view-across-suspension rejection in place.
 
 ## Next work items
 

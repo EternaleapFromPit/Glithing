@@ -3,19 +3,19 @@ package System;
 using System.Collections.Generic;
 using System.Reflection;
 
-class AppContext {
+public class AppContext {
     public static string BaseDirectory = ".";
 }
 
-class Uri {
+public class Uri {
     public Uri(string uri) {}
 }
 
-class GC {
+public class GC {
     static void SuppressFinalize(object obj) {}
 }
 
-class Buffer {
+public class Buffer {
     static void BlockCopy(byte[] src, int srcOffset, byte[] dst, int dstOffset, int count) {
         int i = 0;
         while (i < count) {
@@ -97,7 +97,7 @@ extern bool System_String_Contains_Native(string value, string needle);
 extern string System_String_TrimStart_Native(string value, string chars);
 extern T[] System_Array_Empty_Native<T>();
 
-class object {
+public class object {
     static bool Equals(object left, object right) {
         return false;
     }
@@ -107,7 +107,7 @@ class object {
     }
 }
 
-class Object {
+public class Object {
     static bool Equals(object left, object right) {
         return false;
     }
@@ -117,20 +117,20 @@ class Object {
     }
 }
 
-class Exception {
+public class Exception {
     public string Message;
     public Exception(string message) {
         this.Message = message;
     }
 }
 
-class ArgumentException : Exception {
+public class ArgumentException : Exception {
     public ArgumentException(string message) {
         this.Message = message;
     }
 }
 
-class InvalidOperationException : Exception {
+public class InvalidOperationException : Exception {
     public InvalidOperationException() {
         this.Message = "";
     }
@@ -140,13 +140,13 @@ class InvalidOperationException : Exception {
     }
 }
 
-class FormatException : Exception {
+public class FormatException : Exception {
     public FormatException(string message) {
         this.Message = message;
     }
 }
 
-class DateTime {
+public class DateTime {
     public double TotalMinutes;
     static DateTime UtcNow {
         get {
@@ -159,12 +159,12 @@ class DateTime {
     }
 }
 
-class DateTimeOffset {
+public class DateTimeOffset {
     public DateTimeOffset(DateTime value) {}
     long ToUnixTimeSeconds() { return 0; }
 }
 
-class TimeSpan {
+public class TimeSpan {
     public double TotalMinutes;
     static TimeSpan Zero {
         get {
@@ -177,18 +177,18 @@ class TimeSpan {
     public TimeSpan(int h, int m, int s, int ms) {}
 }
 
-class Enum {
+public class Enum {
     static bool TryParse<T>(string value, out T result) {
         return false;
     }
 }
 
-enum StringComparison {
+public enum StringComparison {
     Ordinal = 0,
     OrdinalIgnoreCase = 1
 }
 
-class Type {
+public class Type {
     public static view<Type>[] EmptyTypes;
     public string Name;
     public string Namespace;
@@ -325,13 +325,13 @@ class Type {
     }
 }
 
-class Array {
+public class Array {
     static T[] Empty<T>() {
         return System_Array_Empty_Native<T>();
     }
 }
 
-class string {
+public class string {
     static bool IsNullOrEmpty(string value) {
         return value == null || value.Length == 0;
     }
@@ -400,7 +400,7 @@ class string {
     }
 }
 
-class String {
+public class String {
     static bool IsNullOrEmpty(string value) {
         return value == null || value.Length == 0;
     }
@@ -469,7 +469,7 @@ class String {
     }
 }
 
-class bool {
+public class bool {
     static bool Parse(string value) {
         if (value == "true") {
             return true;
@@ -481,7 +481,7 @@ class bool {
     }
 }
 
-class int {
+public class int {
     static int Parse(string value) {
         return System_Int32_Parse_Native(value);
     }
@@ -490,7 +490,7 @@ class int {
     }
 }
 
-enum BindingFlags {
+public enum BindingFlags {
     IgnoreCase = 1,
     Public = 2,
     Instance = 4

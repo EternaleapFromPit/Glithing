@@ -85,7 +85,7 @@ public struct KeyValuePair<K, V> {
     }
 }
 
-class List<T> : IList<T>, IReadOnlyList<T> {
+public class List<T> : IList<T>, IReadOnlyList<T> {
     List() {}
 
     T[] ToArray() {
@@ -239,7 +239,7 @@ class List<T> : IList<T>, IReadOnlyList<T> {
     }
 }
 
-class Dictionary<K, V> : IDictionary<K, V> {
+public class Dictionary<K, V> : IDictionary<K, V> {
     Dictionary() {}
 
     void Add(K key, V value) {}
@@ -262,11 +262,35 @@ class Dictionary<K, V> : IDictionary<K, V> {
     int Count { get { return 0; } }
 
     IEnumerator<KeyValuePair<K, V>> GetEnumerator() {
-        return null;
+        return new DictionaryEnumerator<K, V> { Index = -1 };
     }
 }
 
-class ListEnumerator<T> : IEnumerator<T> {
+public class DictionaryEnumerator<K, V> : IEnumerator<KeyValuePair<K, V>> {
+    public K[] Keys;
+    public V[] Values;
+    public int Count;
+    public int Index;
+
+    KeyValuePair<K, V> Current {
+        get {
+            return new KeyValuePair<K, V>(this.Keys[this.Index], this.Values[this.Index]);
+        }
+    }
+
+    bool MoveNext() {
+        this.Index = this.Index + 1;
+        return this.Index < this.Count;
+    }
+
+    void Reset() {
+        this.Index = -1;
+    }
+
+    void Dispose() {}
+}
+
+public class ListEnumerator<T> : IEnumerator<T> {
     public view<List<T>> Source;
     public int Index;
 
@@ -288,7 +312,7 @@ class ListEnumerator<T> : IEnumerator<T> {
     void Dispose() {}
 }
 
-class HashSet<T> : IEnumerable<T>, IReadOnlyCollection<T> {
+public class HashSet<T> : IEnumerable<T>, IReadOnlyCollection<T> {
     public List<T> Values;
 
     HashSet() {

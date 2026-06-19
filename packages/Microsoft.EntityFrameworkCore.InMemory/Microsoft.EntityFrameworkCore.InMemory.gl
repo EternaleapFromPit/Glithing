@@ -3,11 +3,11 @@ package Microsoft.EntityFrameworkCore.InMemory;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
-class InMemoryDatabaseRoot {
+public class InMemoryDatabaseRoot {
     public string Name;
 }
 
-class InMemoryOptionsExtension {
+public class InMemoryOptionsExtension {
     public string DatabaseName;
     public InMemoryDatabaseRoot DatabaseRoot;
 
@@ -16,7 +16,7 @@ class InMemoryOptionsExtension {
     }
 }
 
-class InMemoryDbContextOptionsBuilderExtensions {
+public class InMemoryDbContextOptionsBuilderExtensions {
     DbContextOptionsBuilder UseInMemoryDatabase(string databaseName) {
         var builder = new DbContextOptionsBuilder();
         if (builder.Options != null) {
@@ -34,7 +34,7 @@ class InMemoryDbContextOptionsBuilderExtensions {
     }
 }
 
-class InMemoryServiceCollectionExtensions {
+public class InMemoryServiceCollectionExtensions {
     IServiceCollection AddEntityFrameworkInMemoryDatabase() {
         return new ServiceCollection();
     }
@@ -43,3 +43,4 @@ class InMemoryServiceCollectionExtensions {
 native "/*
 Microsoft.EntityFrameworkCore.InMemory package for Glitching.
 */";
+

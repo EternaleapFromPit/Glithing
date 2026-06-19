@@ -15,23 +15,23 @@ using System;
 
 extern bool glitch_string_equals(string left, string right);
 
-interface IServiceProvider {
+public interface IServiceProvider {
     T GetRequiredService<T>();
     string GetRequiredService(string name);
     T GetService<T>();
     IServiceScope CreateScope();
 }
 
-delegate void DbContextOptionsConfigure(DbContextOptionsBuilder options);
-delegate void LocalizationConfigure(LocalizationOptions options);
-delegate void CorsConfigure(CorsPolicyBuilder options);
-delegate void AutoMapperConfigure(MapperConfigurationExpression options);
-delegate void MediatRConfigure(MediatRServiceConfiguration options);
-delegate void JsonOptionsConfigure(MvcJsonOptions options);
-delegate void JwtBearerConfigure(JwtBearerOptions options);
-delegate void MvcOptionsConfigure(MvcOptions options);
+public delegate void DbContextOptionsConfigure(DbContextOptionsBuilder options);
+public delegate void LocalizationConfigure(LocalizationOptions options);
+public delegate void CorsConfigure(CorsPolicyBuilder options);
+public delegate void AutoMapperConfigure(MapperConfigurationExpression options);
+public delegate void MediatRConfigure(MediatRServiceConfiguration options);
+public delegate void JsonOptionsConfigure(MvcJsonOptions options);
+public delegate void JwtBearerConfigure(JwtBearerOptions options);
+public delegate void MvcOptionsConfigure(MvcOptions options);
 
-class DbContextOptionsBuilder {
+public class DbContextOptionsBuilder {
     public DbContextOptions Options;
 
     public DbContextOptionsBuilder() {
@@ -57,25 +57,25 @@ class DbContextOptionsBuilder {
     }
 }
 
-class LocalizationOptions {
+public class LocalizationOptions {
     public string ResourcesPath;
 }
 
-class CorsPolicyBuilder {
+public class CorsPolicyBuilder {
     CorsPolicyBuilder AllowAnyOrigin() { return new CorsPolicyBuilder(); }
     CorsPolicyBuilder AllowAnyHeader() { return new CorsPolicyBuilder(); }
     CorsPolicyBuilder AllowAnyMethod() { return new CorsPolicyBuilder(); }
 }
 
-class MvcConventions {
+public class MvcConventions {
     void Add(object convention) {}
 }
 
-class MvcFilterCollection {
+public class MvcFilterCollection {
     void Add<T>() {}
 }
 
-class MvcJsonOptions {
+public class MvcJsonOptions {
     public JsonSerializerOptions JsonSerializerOptions;
 
     public MvcJsonOptions() {
@@ -83,7 +83,7 @@ class MvcJsonOptions {
     }
 }
 
-class MvcOptions {
+public class MvcOptions {
     public MvcConventions Conventions;
     public MvcFilterCollection Filters;
     public bool EnableEndpointRouting;
@@ -95,26 +95,26 @@ class MvcOptions {
     }
 }
 
-class AuthenticationBuilder {
+public class AuthenticationBuilder {
     AuthenticationBuilder AddJwtBearer(JwtBearerConfigure configure) {
         return new AuthenticationBuilder();
     }
 }
 
-class MediatRServiceConfiguration {
+public class MediatRServiceConfiguration {
     void RegisterServicesFromAssembly(object assembly) {}
 }
 
-delegate void SwaggerGenConfigure(SwaggerGenOptions options);
-delegate string SwaggerSchemaIdSelector(System.Type type);
-delegate bool SwaggerDocInclusionPredicate(string documentName, SwaggerActionDescriptor action);
-delegate List<string> SwaggerTagActionsBySelector(SwaggerActionDescriptor action);
+public delegate void SwaggerGenConfigure(SwaggerGenOptions options);
+public delegate string SwaggerSchemaIdSelector(System.Type type);
+public delegate bool SwaggerDocInclusionPredicate(string documentName, SwaggerActionDescriptor action);
+public delegate List<string> SwaggerTagActionsBySelector(SwaggerActionDescriptor action);
 
-class SwaggerActionDescriptor {
+public class SwaggerActionDescriptor {
     public string GroupName;
 }
 
-class SwaggerGenOptions {
+public class SwaggerGenOptions {
     void AddSecurityDefinition(string name, OpenApiSecurityScheme scheme) {}
     void SupportNonNullableReferenceTypes() {}
     void AddSecurityRequirement(OpenApiSecurityRequirement requirement) {}
@@ -124,7 +124,7 @@ class SwaggerGenOptions {
     void TagActionsBy(SwaggerTagActionsBySelector selector) {}
 }
 
-class ServiceProvider : IServiceProvider, IServiceScopeFactory {
+public class ServiceProvider : IServiceProvider, IServiceScopeFactory {
     public string NamedKey;
     public string NamedValue;
 
@@ -158,15 +158,15 @@ class ServiceProvider : IServiceProvider, IServiceScopeFactory {
     }
 }
 
-interface IServiceScope {
+public interface IServiceScope {
     IServiceProvider ServiceProvider { get; }
 }
 
-interface IServiceScopeFactory {
+public interface IServiceScopeFactory {
     IServiceScope CreateScope();
 }
 
-class ServiceScope : IServiceScope {
+public class ServiceScope : IServiceScope {
     public IServiceProvider ServiceProvider;
 
     public ServiceScope(IServiceProvider provider) {
@@ -174,7 +174,7 @@ class ServiceScope : IServiceScope {
     }
 }
 
-class MvcBuilder {
+public class MvcBuilder {
     MvcBuilder AddJsonOptions(JsonOptionsConfigure configure) {
         return new MvcBuilder();
     }
@@ -196,7 +196,7 @@ class MvcBuilder {
     }
 }
 
-class IServiceCollection {
+public class IServiceCollection {
     public string NamedKey;
     public string NamedValue;
 
@@ -259,7 +259,7 @@ class IServiceCollection {
     }
 }
 
-class ServiceCollection : IServiceCollection {
+public class ServiceCollection : IServiceCollection {
     public ServiceCollection() {
         this.NamedKey = "";
         this.NamedValue = "";

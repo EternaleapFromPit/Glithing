@@ -476,7 +476,7 @@ fn warns_for_configuration_manager_stub_members() {
 }
 
 #[test]
-fn warns_for_service_provider_lookup_stubs() {
+fn compiles_service_provider_generic_lookup_lowering() {
     let source = r#"
             using Microsoft.Extensions.DependencyInjection;
 
@@ -493,11 +493,12 @@ fn warns_for_service_provider_lookup_stubs() {
         "#;
 
     let output = compile_source_with_options(source, true, false)
-        .expect("service-provider stub access should still compile with a warning");
+        .expect("service-provider generic lookup should compile");
     let diagnostics = output.diagnostics.join("\n");
+    let llvm_ir = output.llvm_ir().expect("LLVM IR should be present");
 
-    assert!(diagnostics.contains("warning GL3013"));
-    assert!(diagnostics.contains("dependency-injection lookup is still only partially implemented"));
+    assert!(!diagnostics.contains("GL3013"));
+    assert!(llvm_ir.contains("service_lookup"));
 }
 
 #[test]
@@ -550,7 +551,123 @@ fn warns_for_noop_swagger_host_configuration_members() {
 }
 
 #[test]
-fn warns_for_dictionary_enumerator_stub_members() {
+fn warns_for_noop_generic_middleware_activation_members() {
+    let source = r#"
+            using Glitching.AspNetCore;
+
+            class TraceMiddleware {
+            }
+
+            fn main() {
+                WebApplication app = new WebApplication();
+                app.UseMiddleware<TraceMiddleware>();
+                print(app != null);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("generic middleware activation markers should still compile with a warning");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3013"));
+    assert!(diagnostics.contains("no-op compatibility surface"));
+}
+
+#[test]
+fn warns_for_noop_service_registration_markers() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+
+            fn main() {
+                ServiceCollection services = new ServiceCollection();
+                services.AddEndpointsApiExplorer();
+                services.AddMemoryCache();
+                print(services != null);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("service-registration markers should still compile with a warning");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3013"));
+    assert!(diagnostics.contains("service-registration/configuration call is still a compatibility surface"));
+}
+
+#[test]
+fn warns_for_authentication_configuration_markers() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+            using Microsoft.AspNetCore.Authentication.JwtBearer;
+
+            fn main() {
+                ServiceCollection services = new ServiceCollection();
+                AuthenticationBuilder auth = services.AddAuthentication();
+                auth.AddJwtBearer(options => {});
+                print(auth != null);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("authentication configuration markers should still compile with a warning");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3013"));
+    assert!(diagnostics.contains("authentication configuration call is still a compatibility surface"));
+}
+
+#[test]
+fn warns_for_swagger_option_configuration_markers() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+            using Microsoft.OpenApi.Models;
+            using Glitching.AspNetCore;
+
+            fn main() {
+                SwaggerGenOptions gen = new SwaggerGenOptions();
+                gen.SwaggerDoc("v1", new OpenApiInfo());
+                gen.SupportNonNullableReferenceTypes();
+
+                SwaggerUiOptions ui = new SwaggerUiOptions();
+                ui.SwaggerEndpoint("/swagger/v1/swagger.json", "v1");
+
+                print(gen != null);
+                print(ui != null);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("Swagger option markers should still compile with a warning");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3013"));
+    assert!(diagnostics.contains("Swagger/OpenAPI configuration call is still a compatibility surface"));
+}
+
+#[test]
+fn warns_for_logging_configuration_markers() {
+    let source = r#"
+            using Glitching.AspNetCore;
+
+            fn main() {
+                WebApplicationBuilder builder = CreateBuilder(System.Array.Empty<string>());
+                builder.Logging.ClearProviders();
+                builder.Logging.AddSerilog("logger", true);
+                builder.ConfigureSerilog();
+                print(builder != null);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("logging configuration markers should still compile with a warning");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3013"));
+    assert!(diagnostics.contains("logging configuration call is still a compatibility surface"));
+}
+
+#[test]
+fn compiles_dictionary_enumerator_lowering_without_stub_warning() {
     let source = r#"
             using System.Collections.Generic;
 
@@ -562,11 +679,64 @@ fn warns_for_dictionary_enumerator_stub_members() {
         "#;
 
     let output = compile_source_with_options(source, true, false)
-        .expect("dictionary enumerator stub access should still compile with a warning");
+        .expect("dictionary enumerator should compile through LLVM lowering");
+    let diagnostics = output.diagnostics.join("\n");
+    let llvm_ir = output.llvm_ir().expect("LLVM IR should be present");
+
+    assert!(!diagnostics.contains("GL3013"));
+    assert!(llvm_ir.contains("DictionaryEnumerator"));
+}
+
+#[test]
+fn warns_for_database_facade_compatibility_surfaces() {
+    let source = r#"
+            using Microsoft.EntityFrameworkCore;
+            using System.Data;
+
+            fn main() {
+                DatabaseFacade database = new DatabaseFacade("demo");
+                database.EnsureCreated();
+                database.Migrate();
+                database.ExecuteSqlRaw("delete from Books", null);
+                DatabaseTransaction tx = database.BeginTransaction(IsolationLevel.ReadCommitted);
+                tx.Commit();
+                tx.Rollback();
+                tx.Dispose();
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("database facade compatibility markers should still compile with a warning");
     let diagnostics = output.diagnostics.join("\n");
 
     assert!(diagnostics.contains("warning GL3013"));
-    assert!(diagnostics.contains("dictionary enumeration is not lowered yet"));
+    assert!(diagnostics.contains("Entity Framework database/transaction member is still a compatibility surface"));
+}
+
+#[test]
+fn warns_for_additional_noop_host_configuration_members() {
+    let source = r#"
+            using Glitching.AspNetCore;
+
+            fn main() {
+                WebApplication app = new WebApplication();
+                app.UseCors();
+                app.UseAuthentication();
+                app.UseHttpsRedirection();
+                app.UseRouting();
+                app.UseEndpoints();
+                app.MapControllers();
+                app.Run();
+                print(app != null);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("host configuration markers should still compile with a warning");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3013"));
+    assert!(diagnostics.contains("ASP.NET-style host configuration member is still a no-op compatibility surface"));
 }
 
 #[test]

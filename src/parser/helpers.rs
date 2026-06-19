@@ -23,6 +23,7 @@ pub(super) fn token_to_string(tok: &Token) -> String {
         TokenKind::Delegate => "delegate".to_string(),
         TokenKind::Enum => "enum".to_string(),
         TokenKind::Public => "public".to_string(),
+        TokenKind::Internal => "internal".to_string(),
         TokenKind::Borrow => "borrow".to_string(),
         TokenKind::Move => "move".to_string(),
         TokenKind::Print => "print".to_string(),
@@ -206,9 +207,13 @@ pub(super) fn generic_type_name_for_parser(name: &str, args: &[TypeSyntax]) -> S
 
 pub(super) fn merge_type_declarations(types: Vec<TypeDef>) -> Vec<TypeDef> {
     let mut merged = Vec::<TypeDef>::new();
-    let mut indices = HashMap::<(Vec<String>, String), usize>::new();
+    let mut indices = HashMap::<(Option<String>, Vec<String>, String), usize>::new();
     for mut ty in types {
-        let key = (ty.namespace.clone(), ty.name.clone());
+        let key = (
+            ty.package_id.clone(),
+            ty.namespace.clone(),
+            ty.name.clone(),
+        );
         if let Some(index) = indices.get(&key).copied() {
             let existing = &mut merged[index];
             let can_merge = existing.kind == ty.kind || existing.is_extension || ty.is_extension;
