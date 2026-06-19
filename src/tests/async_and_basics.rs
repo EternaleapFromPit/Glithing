@@ -699,4 +699,48 @@ fn runs_async_aspnet_route_natively() {
     assert!(response.contains("{\"status\":\"ok\"}"));
 }
 
+#[test]
+fn runs_async_controller_route_with_di_via_app_handle_natively() {
+    let source = r#"
+            using System.Threading.Tasks;
+            using Glitching.AspNetCore;
+            using Microsoft.Extensions.DependencyInjection;
+
+            [ApiController]
+            [Route("/hello")]
+            class HelloController {
+                public ServiceProvider Provider;
+
+                [HttpGet("/")]
+                async Task<string> Get() {
+                    return this.Provider.GetRequiredService("message");
+                }
+            }
+
+            fn main() {
+                ServiceCollection services = new ServiceCollection();
+                services.AddSingleton("message", "hello from di");
+                WebApplication app = new WebApplication();
+                ServiceProvider routeProvider = services.BuildServiceProvider();
+                app.Services = move routeProvider;
+                string response = app.Handle("GET", "/hello", "");
+                print(response);
+            }
+        "#;
+
+    let output_exe =
+        emit_native_executable_from_source("async-controller-route-di", source);
+    let output = run_native_executable(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("hello from di"));
+}
+
 

@@ -280,17 +280,16 @@ impl LlvmEmitter {
                     drop_name
                 ));
             }
+            let response_value = self.emit_endpoint_handler_result_value(handler, "%result")?;
+            let response = self.emit_endpoint_result(&handler.response_type, &response_value)?;
             self.body.push_str(&format!(
-                "  call void @{}(ptr %controller)\n",
+                "  call void @{}(ptr %controller)\n  ret ptr {response}\n}}\n\n",
                 self
                     .object_types
                     .get(controller_name)
                     .map(|object| drop_symbol(&object.name))
                     .unwrap_or_else(|| drop_symbol(controller_name))
             ));
-            let response_value = self.emit_endpoint_handler_result_value(handler, "%result")?;
-            let response = self.emit_endpoint_result(&handler.response_type, &response_value)?;
-            self.body.push_str(&format!("  ret ptr {response}\n}}\n\n"));
             return Ok(());
         }
 
