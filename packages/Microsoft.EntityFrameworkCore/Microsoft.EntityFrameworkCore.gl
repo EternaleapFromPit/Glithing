@@ -184,24 +184,24 @@ struct DbQuery<T> {
     }
 
     DbQuery<T> AsQueryable() {
-        return new DbQuery<T> { Rows = new List<T>(), Predicate = this.Predicate };
+        return new DbQuery<T> { Rows = this.Rows, Predicate = this.Predicate };
     }
 
     DbQuery<T> AsNoTracking() {
-        return new DbQuery<T> { Rows = new List<T>(), Predicate = this.Predicate };
+        return new DbQuery<T> { Rows = this.Rows, Predicate = this.Predicate };
     }
 
     DbQuery<T> Include(object navigation) {
-        return new DbQuery<T> { Rows = new List<T>(), Predicate = this.Predicate };
+        return new DbQuery<T> { Rows = this.Rows, Predicate = this.Predicate };
     }
 
     DbQuery<T> ThenInclude(object navigation) {
-        return new DbQuery<T> { Rows = new List<T>(), Predicate = this.Predicate };
+        return new DbQuery<T> { Rows = this.Rows, Predicate = this.Predicate };
     }
 
     DbQuery<T> Where(Func<T, bool> predicate) {
         return new DbQuery<T> {
-            Rows = new List<T>(),
+            Rows = this.Rows,
             Predicate = predicate,
         };
     }

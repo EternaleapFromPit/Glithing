@@ -2,7 +2,63 @@
 use super::helpers::*;
 use super::support::*;
 
+fn is_service_provider_surface_type(ty: &IrType) -> bool {
+    match ty {
+        IrType::Class(name)
+        | IrType::Struct(name)
+        | IrType::Interface(name)
+        | IrType::Unknown(name) => {
+            matches!(
+                base_type_name(name),
+                "ServiceProvider"
+                    | "IServiceProvider"
+                    | "Microsoft.Extensions.DependencyInjection.ServiceProvider"
+                    | "Microsoft.Extensions.DependencyInjection.IServiceProvider"
+            )
+        }
+        _ => false,
+    }
+}
+
 impl LlvmEmitter {
+    pub(super) fn emit_endpoint_handler_result_value(
+        &mut self,
+        handler: &EndpointHandlerBinding,
+        value: &str,
+    ) -> Result<String, String> {
+        match &handler.return_type {
+            IrType::Task(inner) => {
+                let inner = inner.as_ref();
+                if !matches!(handler.response_type, IrType::String | IrType::Class(_)) {
+                    return Err(format!(
+                        "LLVM TIR backend: async endpoint result type {:?} is not supported yet",
+                        handler.response_type
+                    ));
+                }
+                let result = self.tmp();
+                self.body.push_str(&format!(
+                    "  {result} = call ptr @glitch_task_get_result_ptr(ptr {value})\n"
+                ));
+                match inner {
+                    IrType::String => {
+                        self.body.push_str(&format!(
+                            "  call void @glitch_string_retain(ptr {result})\n"
+                        ));
+                    }
+                    IrType::Class(type_name) => {
+                        if self.object_types.contains_key(type_name) {
+                            self.emit_retain(type_name, &result);
+                        }
+                    }
+                    _ => {}
+                }
+                self.emit_task_drop_value(value, inner);
+                Ok(result)
+            }
+            _ => Ok(value.to_string()),
+        }
+    }
+
     pub(super) fn emit_endpoint_dispatch(&mut self) -> Result<(), String> {
         let handlers = self.endpoint_handlers.clone();
         let mut thunk_names = Vec::with_capacity(handlers.len());
@@ -63,7 +119,7 @@ impl LlvmEmitter {
                     format!("invoke_next_{index}")
                 };
                 self.body.push_str(&format!(
-                    "  %invoke_method_cmp_{index} = call i32 @strcmp(ptr %method, ptr {method})\n  %invoke_method_match_{index} = icmp eq i32 %invoke_method_cmp_{index}, 0\n  br i1 %invoke_method_match_{index}, label %invoke_path_{index}, label %{next}\ninvoke_path_{index}:\n  %invoke_path_match_{index} = call i1 @glitch_route_match(ptr {path}, ptr %path)\n  br i1 %invoke_path_match_{index}, label %invoke_handler_{index}, label %{next}\ninvoke_handler_{index}:\n  %invoke_result_{index} = call ptr @{thunk}(ptr %path, ptr %body)\n  ret ptr %invoke_result_{index}\n"
+                    "  %invoke_method_cmp_{index} = call i32 @strcmp(ptr %method, ptr {method})\n  %invoke_method_match_{index} = icmp eq i32 %invoke_method_cmp_{index}, 0\n  br i1 %invoke_method_match_{index}, label %invoke_path_{index}, label %{next}\ninvoke_path_{index}:\n  %invoke_path_match_{index} = call i1 @glitch_route_match(ptr {path}, ptr %path)\n  br i1 %invoke_path_match_{index}, label %invoke_handler_{index}, label %{next}\ninvoke_handler_{index}:\n  %invoke_result_{index} = call ptr @{thunk}(ptr %app, ptr %path, ptr %body)\n  ret ptr %invoke_result_{index}\n"
                 ));
                 if index + 1 != routes.len() {
                     self.body.push_str(&format!("{next}:\n"));
@@ -83,7 +139,7 @@ impl LlvmEmitter {
         let supported_return = self.endpoint_return_supported(&handler.response_type);
         let not_implemented = self.string_global("501 Not Implemented");
         self.body.push_str(&format!(
-            "define ptr @{thunk}(ptr %path, ptr %body) {{\nentry:\n"
+            "define ptr @{thunk}(ptr %app, ptr %path, ptr %body) {{\nentry:\n"
         ));
 
         if !supported_return
@@ -126,14 +182,14 @@ impl LlvmEmitter {
                 return Ok(());
             }
 
-            let llvm_name = llvm_object_name(controller_name);
+            let llvm_name = llvm_object_name(&object.name);
             self.body.push_str(&format!(
                 "  %size_ptr = getelementptr %{llvm_name}, ptr null, i32 1\n  %size = ptrtoint ptr %size_ptr to i64\n  %controller = call ptr @glitch_calloc(i64 1, i64 %size)\n"
             ));
             if matches!(object.kind, TypeKind::Class) {
                 self.body.push_str(&format!(
                     "  %rc_ptr = getelementptr inbounds %{llvm_name}, ptr %controller, i32 0, i32 0\n  store i64 1, ptr %rc_ptr\n  %controller_drop_ptr = getelementptr inbounds %{llvm_name}, ptr %controller, i32 0, i32 1\n  store ptr @{}, ptr %controller_drop_ptr\n",
-                    destroy_symbol(controller_name)
+                    destroy_symbol(&object.name)
                 ));
             }
             let mut dependencies = Vec::new();
@@ -145,9 +201,39 @@ impl LlvmEmitter {
                         "LLVM TIR backend: controller dependency has no object type: {dependency_type:?}"
                     )
                 })?;
-                let value = self
-                    .emit_endpoint_object_allocation(&type_name, &format!("dependency_{index}"))?;
+                let value = if is_service_provider_surface_type(dependency_type) {
+                    self.emit_endpoint_app_service_provider("%app")?
+                } else {
+                    self.emit_endpoint_object_allocation(&type_name, &format!("dependency_{index}"))?
+                };
                 dependencies.push((type_name, value));
+            }
+            let controller_fields = object
+                .fields
+                .iter()
+                .map(|(name, field)| (name.clone(), field.index, field.ty.clone()))
+                .collect::<Vec<_>>();
+            for (_field_name, field_index, field_ty) in controller_fields {
+                if !is_service_provider_surface_type(&field_ty) {
+                    continue;
+                }
+                let service_provider = self.emit_endpoint_app_service_provider("%app")?;
+                let field_ptr = self.tmp();
+                self.body.push_str(&format!(
+                    "  {field_ptr} = getelementptr inbounds %{llvm_name}, ptr %controller, i32 0, i32 {field_index}\n  store ptr {service_provider}, ptr {field_ptr}\n",
+                    llvm_name = llvm_name
+                ));
+                if let Some(service_object) = self
+                    .object_types
+                    .values()
+                    .find(|object| base_type_name(&object.name) == "ServiceProvider")
+                    .cloned()
+                {
+                    self.body.push_str(&format!(
+                        "  call void @{}(ptr {service_provider})\n",
+                        retain_symbol(&service_object.name)
+                    ));
+                }
             }
             if let Some(constructor) = &handler.constructor {
                 let mut args = vec!["ptr %controller".to_string()];
@@ -202,7 +288,8 @@ impl LlvmEmitter {
                     .map(|object| drop_symbol(&object.name))
                     .unwrap_or_else(|| drop_symbol(controller_name))
             ));
-            let response = self.emit_endpoint_result(&handler.response_type, "%result")?;
+            let response_value = self.emit_endpoint_handler_result_value(handler, "%result")?;
+            let response = self.emit_endpoint_result(&handler.response_type, &response_value)?;
             self.body.push_str(&format!("  ret ptr {response}\n}}\n\n"));
             return Ok(());
         }
@@ -213,10 +300,10 @@ impl LlvmEmitter {
             return Ok(());
         };
         if function.return_type == LlType::Ptr && function.params.is_empty() {
-            self.body.push_str(&format!(
-                "  %result = call ptr @{}()\n  ret ptr %result\n}}\n\n",
-                sanitize(&handler.function)
-            ));
+            self.body.push_str(&format!("  %result = call ptr @{}()\n", sanitize(&handler.function)));
+            let response_value = self.emit_endpoint_handler_result_value(handler, "%result")?;
+            let response = self.emit_endpoint_result(&handler.response_type, &response_value)?;
+            self.body.push_str(&format!("  ret ptr {response}\n}}\n\n"));
         } else {
             self.body
                 .push_str(&format!("  ret ptr {not_implemented}\n}}\n\n"));
@@ -786,6 +873,49 @@ impl LlvmEmitter {
         }
         visiting.remove(type_name);
         Ok(value)
+    }
+
+    fn emit_endpoint_app_service_provider(&mut self, app_value: &str) -> Result<String, String> {
+        let app = self
+            .object_layout("WebApplication")
+            .cloned()
+            .ok_or_else(|| {
+                "LLVM TIR backend: WebApplication layout is not available for controller activation"
+                    .to_string()
+            })?;
+        let services_field = app.fields.get("Services").cloned().ok_or_else(|| {
+            format!(
+                "LLVM TIR backend: WebApplication layout '{}' has no Services field",
+                app.name
+            )
+        })?;
+        let service_provider = self.tmp();
+        let service_provider_ptr = self.tmp();
+        self.body.push_str(&format!(
+            "  {service_provider_ptr} = getelementptr inbounds %{llvm_name}, ptr {app_value}, i32 0, i32 {field_index}\n  {service_provider} = load ptr, ptr {service_provider_ptr}\n",
+            llvm_name = llvm_object_name(&app.name),
+            field_index = services_field.index
+        ));
+        let service_object = match &services_field.ty {
+            IrType::Class(name)
+            | IrType::Struct(name)
+            | IrType::Interface(name)
+            | IrType::Unknown(name) => self.object_layout(name).cloned(),
+            _ => None,
+        }
+        .or_else(|| {
+            self.object_types
+                .values()
+                .find(|object| base_type_name(&object.name) == "ServiceProvider")
+                .cloned()
+        });
+        if let Some(service_object) = service_object {
+            self.body.push_str(&format!(
+                "  call void @{}(ptr {service_provider})\n",
+                retain_symbol(&service_object.name)
+            ));
+        }
+        Ok(service_provider)
     }
 
     fn object_layout(&self, type_name: &str) -> Option<&LlObjectType> {

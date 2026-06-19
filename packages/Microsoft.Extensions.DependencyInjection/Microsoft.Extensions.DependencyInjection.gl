@@ -13,9 +13,11 @@ using Microsoft.OpenApi.Models;
 using System.Collections.Generic;
 using System;
 
+extern bool glitch_string_equals(string left, string right);
+
 interface IServiceProvider {
     T GetRequiredService<T>();
-    object GetRequiredService(string name);
+    string GetRequiredService(string name);
     T GetService<T>();
     IServiceScope CreateScope();
 }
@@ -123,22 +125,32 @@ class SwaggerGenOptions {
 }
 
 class ServiceProvider : IServiceProvider, IServiceScopeFactory {
-    public object Singleton;
+    public string NamedKey;
+    public string NamedValue;
 
-    public ServiceProvider(object singleton) {
-        this.Singleton = singleton;
+    public ServiceProvider() {
+        this.NamedKey = "";
+        this.NamedValue = "";
+    }
+
+    public ServiceProvider(string namedKey, string namedValue) {
+        this.NamedKey = namedKey;
+        this.NamedValue = namedValue;
     }
 
     T GetRequiredService<T>() {
-        return this.GetRequiredService(typeof(T));
+        return default(T);
     }
 
-    object GetRequiredService(string name) {
-        return this.Singleton;
+    string GetRequiredService(string name) {
+        if (name != null && this.NamedKey != null && glitch_string_equals(name, this.NamedKey)) {
+            return this.NamedValue;
+        }
+        return "";
     }
 
     T GetService<T>() {
-        return this.GetRequiredService(typeof(T));
+        return default(T);
     }
 
     IServiceScope CreateScope() {
@@ -185,19 +197,19 @@ class MvcBuilder {
 }
 
 class IServiceCollection {
-    public object Singleton;
-    public string Message;
+    public string NamedKey;
+    public string NamedValue;
 
     public IServiceCollection() {
-        this.Message = "";
-        this.Singleton = null;
+        this.NamedKey = "";
+        this.NamedValue = "";
     }
 
     void AddSingleton<T>(T value) {
-        this.Singleton = value;
     }
     void AddSingleton(string key, string value) {
-        this.Message = value;
+        this.NamedKey = key;
+        this.NamedValue = value;
     }
     void AddTransient<TService, TImplementation>() {}
     void AddTransient(object serviceType, object implementationType) {}
@@ -240,14 +252,17 @@ class IServiceCollection {
     }
 
     ServiceProvider BuildServiceProvider() {
-        return new ServiceProvider(this.Singleton);
+        return new ServiceProvider {
+            NamedKey = this.NamedKey,
+            NamedValue = this.NamedValue,
+        };
     }
 }
 
 class ServiceCollection : IServiceCollection {
     public ServiceCollection() {
-        this.Message = "";
-        this.Singleton = null;
+        this.NamedKey = "";
+        this.NamedValue = "";
     }
 
     void AddSwaggerGen(SwaggerGenConfigure configure) {}

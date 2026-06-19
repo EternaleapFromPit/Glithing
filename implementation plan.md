@@ -64,11 +64,18 @@ The current boundary is:
 - native LLVM-backed compilation is the primary executable path
 - the public C emission path has been removed
 - `Rc<T>` and `sizeof(T)` are supported in the LLVM path where the current tests need them
+- async methods now lower to compiler-generated worker-thread state-machine entrypoints with hidden resume symbols and blocking `await` semantics over the native task runtime
+- the current async gate supports local declarations, assignments, `if` / `else`, `return`, multiple sequential awaits, `try` / `catch` / `finally`, and the currently exercised loop shapes on the blocking worker-thread runtime
+- the current async gate still rejects suspension inside `switch`, and it rejects borrowed/view values that stay live across `await`
 - the runtime and standard library still need further work before broader ASP.NET Core or EF Core compatibility is realistic
 - the current regression suite is green, including the Conduit integration-tests project compile gate through LLVM
 
 ## Recently completed
 
+- Blocking async state-machine lowering now exists for `async Task`, `async Task<T>`, `async ValueTask`, and `async ValueTask<T>` on the native LLVM path.
+- The compiler emits explicit async state types plus hidden resume/destroy symbols and runs them on the existing worker-thread task runtime instead of treating async methods like ordinary synchronous functions.
+- `await` now cleans up temporary child task handles after result extraction instead of leaking them on the LLVM path.
+- New regression coverage checks emitted async state/resume symbols, nested async calls with sequential awaits, borrowed-local rejection across `await`, unsupported loop suspension diagnostics, and native async execution for `Task<int>` and `Task<string>`.
 - The LLVM allocation registry and leak counter are now thread-safe for concurrent workloads by using atomic RMW updates in the runtime prelude and atomic leak-count reads in the exit path.
 - A regression test now checks that the LLVM runtime emits atomic allocation-counter operations instead of plain load/store updates.
 - Nested collection drop recursion now has direct regression coverage for `List<List<string>>`, confirming that recursive LLVM drop glue is preserved for nested owned collections.
@@ -116,19 +123,25 @@ The current boundary is:
 - `Task.FromResult(...)` now retains pointer-backed lvalue payloads on the LLVM path before storing them into task results, which closes the obvious double-release/use-after-free edge for shared string/class-style sources in the current synchronous task model.
 - `Task.Run(...)` now uses a Rust worker-thread runtime for the supported zero-argument delegate slice instead of invoking delegates inline in the LLVM backend, and `await` / `GetResult()` / `Wait()` now join that task handle before reading the result slot.
 - The task runtime now owns delegate lifetimes across worker threads and destroys captured lambda environments after completion, with direct runtime coverage for background execution plus native compiler tests for delegate cleanup and leak reporting.
+- ASP.NET-style endpoint thunks now unwrap `Task<string>` and `Task<class>` handler results through the native task runtime instead of treating route handlers as synchronous pointer returns only.
+- The `Glitching.AspNetCore` package surface now accepts delegate-style `MapGet<T>` / `MapPost<T>` registrations for the current zero-argument handler slice, which lets async route handlers reach typed endpoint lowering.
+- There is direct LLVM regression coverage for async route handlers, including `app.MapGet("/health", HealthAsync)` lowering through `glitch_task_get_result_ptr(...)`.
+- The native smoke for compiler-generated `WebApplication_Handle` on that async route path now runs cleanly: the Rust host converts incoming request parts into real Glitch strings, the response path exits without host-side faults, and the temporary `ServiceProvider(\"\")` object-slot placeholder has been removed from the ASP.NET package surfaces.
+- Host-side native allocation helpers now participate in the same live-allocation accounting as LLVM-emitted allocations, which keeps request-owned Glitch strings from driving the leak counter negative on clean shutdown.
 - `try` / `catch` / `finally` ownership flow now propagates `finally` effects into recorded loop-exit snapshots, so `break` / `continue` paths no longer skip cleanup or moves performed in `finally`.
 - Additional package placeholders now produce explicit `GL3013` diagnostics for DI lookup stubs (`GetRequiredService` / `GetService`) and ASP.NET-style no-op host configuration markers such as `UseSwagger` / `UseSwaggerUI` / `UseStaticFiles`.
 - The native test harness now recovers cleanly from a transient runtime-library build failure by retrying the Rust runtime build and ignoring a poisoned in-process native-build mutex.
 
 ## Next work items
 
-1. Finish the remaining async/await and socket-host runtime slice needed for state-machine scheduling and non-blocking composition beyond `Task.Run` worker threads.
-2. Harden nested collection drop glue so recursive owned graphs release correctly in all supported collection shapes.
-3. Improve framework compatibility for collections, tasks, delegates, and async lowering beyond the current synchronous task surface.
-4. Add stronger borrow-check analysis across any remaining control-flow joins that still need explicit tracking beyond the current loop-exit, early-return, and `finally`-propagation handling.
-5. Replace any remaining compatibility stubs with real lowering or real diagnostics, especially in package surfaces that still return typed defaults or behave as no-op placeholders.
-6. Expand framework compatibility in small, test-driven slices where the runtime model already exists, and keep unsupported members on explicit diagnostics with rewrite guidance.
-7. Add additional sample/runtime acceptance work only where a concrete blocker remains after the current compile gates.
+1. Extend the async/runtime slice from blocking worker-thread state machines to non-blocking scheduling and host integration beyond `Task.Run` threads.
+2. Widen async lowering coverage to more control-flow shapes, starting with loops and exception regions once ownership/state restoration is explicit enough.
+3. Harden nested collection drop glue so recursive owned graphs release correctly in all supported collection shapes.
+4. Improve framework compatibility for collections, tasks, delegates, and async lowering beyond the current synchronous task surface.
+5. Add stronger borrow-check analysis across any remaining control-flow joins that still need explicit tracking beyond the current loop-exit, early-return, and `finally`-propagation handling.
+6. Replace any remaining compatibility stubs with real lowering or real diagnostics, especially in package surfaces that still return typed defaults or behave as no-op placeholders.
+7. Expand framework compatibility in small, test-driven slices where the runtime model already exists, and keep unsupported members on explicit diagnostics with rewrite guidance.
+8. Add additional sample/runtime acceptance work only where a concrete blocker remains after the current compile gates.
    - The next useful acceptance step is still a native ASP.NET-style host smoke path once the remaining async/runtime and package-helper gaps are closed.
 
 ## C# Standard v7 Gap Analysis

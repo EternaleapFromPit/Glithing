@@ -6,34 +6,8 @@ class JsonSerializerOptions {
     public JsonIgnoreCondition DefaultIgnoreCondition;
 }
 
-native "
-static char * JsonSerializer_Serialize_Native(const char *value) {
-    if (!value) { return NULL; }
-    size_t len = strlen(value);
-    char *res = malloc(len + 3);
-    if (!res) { abort(); }
-    res[0] = '\"';
-    memcpy(res + 1, value, len);
-    res[len + 1] = '\"';
-    res[len + 2] = '\0';
-    return res;
-}
-static char * JsonSerializer_Deserialize_Native(const char *json) {
-    if (!json) { return NULL; }
-    size_t len = strlen(json);
-    if (len >= 2 && json[0] == '\"' && json[len - 1] == '\"') {
-        char *res = malloc(len - 1);
-        if (!res) { abort(); }
-        memcpy(res, json + 1, len - 2);
-        res[len - 2] = '\0';
-        return res;
-    }
-    char *res = malloc(len + 1);
-    if (!res) { abort(); }
-    memcpy(res, json, len + 1);
-    return res;
-}
-";
+extern string JsonSerializer_Serialize_Native(string value);
+extern string JsonSerializer_Deserialize_Native(string json);
 
 class JsonSerializer {
     static string Serialize(string value) {

@@ -104,11 +104,15 @@ pub(super) fn emit_task_run_inline(
         })
     } else {
         let task_ptr = emitter.tmp();
-        let helper_name = match &result_ty {
+        let helper_name = if llvm_ir_type(&result_ty) == LlType::I1 || is_bool_like_type(&result_ty) {
+            "glitch_task_run_bool"
+        } else {
+            match &result_ty {
             IrType::Int | IrType::UInt => "glitch_task_run_i32",
             IrType::Long => "glitch_task_run_i64",
             IrType::Double | IrType::Decimal => "glitch_task_run_double",
             _ => "glitch_task_run_ptr",
+        }
         };
         emitter.body.push_str(&format!(
             "  {} = call ptr @{}(ptr {})\n",
@@ -150,19 +154,50 @@ pub(super) fn emit_task_from_result_inline(
     ) {
         retain_task_payload(emitter, &result_ty, &value_val);
     }
-    let helper_name = match &result_ty {
+    let helper_name = if llvm_ir_type(&result_ty) == LlType::I1 || is_bool_like_type(&result_ty) {
+        "glitch_task_from_result_bool"
+    } else {
+        match &result_ty {
         IrType::Int | IrType::UInt => "glitch_task_from_result_i32",
         IrType::Long => "glitch_task_from_result_i64",
         IrType::Double | IrType::Decimal => "glitch_task_from_result_double",
         _ => "glitch_task_from_result_ptr",
+    }
+    };
+
+    let helper_arg = if helper_name == "glitch_task_from_result_ptr" && value_val.ty != LlType::Ptr {
+        let casted = emitter.tmp();
+        match value_val.ty {
+            LlType::I1 => emitter.body.push_str(&format!(
+                "  {casted}_i64 = zext i1 {} to i64\n  {casted} = inttoptr i64 {casted}_i64 to ptr\n",
+                value_val.value
+            )),
+            LlType::I8 | LlType::I16 | LlType::I32 | LlType::I64 => emitter.body.push_str(&format!(
+                "  {casted} = inttoptr {} {} to ptr\n",
+                value_val.ty.as_ir(),
+                value_val.value
+            )),
+            LlType::Double => emitter.body.push_str(&format!(
+                "  {casted}_bits = bitcast double {} to i64\n  {casted} = inttoptr i64 {casted}_bits to ptr\n",
+                value_val.value
+            )),
+            LlType::Void | LlType::Ptr => {}
+        }
+        casted
+    } else {
+        value_val.value.clone()
     };
 
     emitter.body.push_str(&format!(
         "  {} = call ptr @{}({} {})\n",
         task_ptr,
         helper_name,
-        result_llvm_type.as_ir(),
-        value_val.value
+        if helper_name == "glitch_task_from_result_ptr" {
+            LlType::Ptr.as_ir()
+        } else {
+            result_llvm_type.as_ir()
+        },
+        helper_arg
     ));
 
     Ok(LlValue {

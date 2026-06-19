@@ -32,6 +32,9 @@ Current implemented subset:
 - `System.Threading.Tasks.Task<T>` for `int`, `long`, and owned `string` results with `Task.Run(worker)`, `task.Result`, `task.GetResult()`, and `task.GetAwaiter()`
 - `System.Threading.Tasks.Task.IsCompleted`, `Task.WhenAll(Task[])`, `ValueTask<T>.AsTask()`, and the matching `ValueTask` / `ValueTask<T>` awaiter helpers
 - `System.Threading.Tasks.Task.WhenAll(Task<T>[])` for the supported task-array subset
+- `async Task`, `async Task<T>`, `async ValueTask`, and `async ValueTask<T>` lowered to compiler-generated worker-thread state-machine entrypoints with hidden resume functions
+- blocking `await` inside the supported async gate for local declarations, assignments, `if` / `else`, `return`, `try` / `catch` / `finally`, and the currently exercised loop shapes
+- ASP.NET-style `MapGet` / `MapPost` delegate handlers in the current zero-argument slice, including LLVM lowering for `Task<string>` / `Task<class>` route handlers
 - `System.Linq.Enumerable` now has working `IEnumerable<T>` overloads for `Count`, `Any`, `First`, `FirstOrDefault`, `ToList`, and `ToArray`
 - `System.Array.Empty<T>()` lowers through a native helper on the current core-library surface, and `bool.Parse` / the `string` null helpers compile on the current path
 - `string.ToLower()`, `string.ToLowerInvariant()`, `string.Replace(...)`, `string.Trim()`, `string.Contains(...)`, `string.StartsWith(...)`, `string.EndsWith(...)`, `string.Substring(...)`, `string.TrimStart(...)`, and `string.TrimEnd(...)` now lower through native runtime helpers or direct LLVM lowering on the LLVM path
@@ -74,6 +77,15 @@ Current implemented subset:
 `var x = value;` is accepted as a conversion-friendly spelling for `let mut x = value;`.
 
 Nullable reference syntax is parsed, but nullable value types (`T?` on structs/scalars), lifted conversions, and value-type boxing/unboxing are not implemented yet. The compiler emits explicit diagnostics with rewrite guidance for those cases.
+
+Current async boundary:
+
+- supported awaitables in native lowering are `Task`, `Task<T>`, `ValueTask`, and `ValueTask<T>`
+- `await` is lowered through a blocking worker-thread runtime, not a non-blocking scheduler
+- owned/shared/copy values may cross `await`; borrowed/view values that stay live across suspension are rejected with rewrite guidance
+- suspension inside `switch` is still an explicit diagnostic boundary in the current gate
+- async route handlers now compile and run through typed endpoint thunks on the native host path for the current `Task<string>` / `Task<class>` slice
+- async socket/event-loop hosting, cancellation, `ConfigureAwait`, and `SynchronizationContext` semantics are not implemented yet
 
 Reference cycles over owned graphs are diagnosed with `GL3007` and rewrite guidance such as `Weak<T>`. The compiler can detect the cycle and point to the source field, but arbitrary cyclic ownership is not automatically leak-free in the current memory-safe model.
 

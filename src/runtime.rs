@@ -1,4 +1,4 @@
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_void, CStr};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -187,6 +187,18 @@ pub unsafe extern "C" fn GlitchTask_RunI32(task: *mut c_void, delegate: *mut c_v
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn GlitchTask_RunBool(task: *mut c_void, delegate: *mut c_void) {
+    let task = task as *mut GlitchTask;
+    let delegate = delegate as *mut GlitchDelegate;
+    task_spawn(task, delegate, |delegate| {
+        let invoke: unsafe extern "C" fn(*mut c_void) -> bool =
+            std::mem::transmute((*delegate).invoke);
+        let value = std::panic::catch_unwind(|| invoke((*delegate).env)).unwrap_or_default();
+        value as u64
+    });
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn GlitchTask_RunI64(task: *mut c_void, delegate: *mut c_void) {
     let task = task as *mut GlitchTask;
     let delegate = delegate as *mut GlitchDelegate;
@@ -221,6 +233,23 @@ pub unsafe extern "C" fn GlitchTask_RunPtr(task: *mut c_void, delegate: *mut c_v
             .unwrap_or(std::ptr::null_mut());
         value as usize as u64
     });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchRestHost_read_env_int(name: *const c_char, fallback: i32) -> i32 {
+    if name.is_null() {
+        return fallback;
+    }
+    let Ok(name) = CStr::from_ptr(name).to_str() else {
+        return fallback;
+    };
+    let Ok(value) = std::env::var(name) else {
+        return fallback;
+    };
+    let Ok(parsed) = value.trim().parse::<i32>() else {
+        return fallback;
+    };
+    if parsed > 0 { parsed } else { fallback }
 }
 
 #[no_mangle]
@@ -267,6 +296,10 @@ type RequestHandler =
     unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char) -> *mut c_char;
 type StringRelease = unsafe extern "C" fn(*mut c_char);
 
+fn host_debug_enabled() -> bool {
+    std::env::var_os("GLITCH_DEBUG_HOST").is_some()
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn GlitchRestHost_Run(
     app: *mut c_void,
@@ -276,6 +309,9 @@ pub unsafe extern "C" fn GlitchRestHost_Run(
     release: StringRelease,
 ) {
     let _ = std::panic::catch_unwind(|| run_host(app, port, max_requests, handler, release));
+    if host_debug_enabled() {
+        eprintln!("Glitching HTTP host returned from run_host");
+    }
 }
 
 fn run_host(
@@ -331,6 +367,9 @@ fn run_host(
 
     for worker in workers {
         let _ = worker.join();
+    }
+    if host_debug_enabled() {
+        eprintln!("Glitching HTTP host joined all workers");
     }
 }
 
@@ -420,19 +459,42 @@ fn handle_connection(
     let body_end = header_end.saturating_add(content_length).min(request.len());
     let body = &request[header_end..body_end];
 
-    let method_ffi = ffi_string(method.as_bytes());
-    let path_ffi = ffi_string(path_with_auth.as_bytes());
-    let body_ffi = ffi_string(body);
+    let method_ffi = allocate_glitch_string_from_bytes(method.as_bytes());
+    let path_ffi = allocate_glitch_string_from_bytes(path_with_auth.as_bytes());
+    let body_ffi = allocate_glitch_string_from_bytes(body);
+
+    if host_debug_enabled() {
+        eprintln!(
+            "Glitching HTTP host handling request method={} path={} body_len={}",
+            method,
+            path_with_auth,
+            body.len()
+        );
+    }
 
     // The handler returns a raw JSON string (or "404" / "401" sentinel).
     let response = unsafe {
         handler(
             app,
-            method_ffi.as_ptr(),
-            path_ffi.as_ptr(),
-            body_ffi.as_ptr(),
+            method_ffi,
+            path_ffi,
+            body_ffi,
         )
     };
+
+    if !method_ffi.is_null() {
+        unsafe { release(method_ffi) };
+    }
+    if !path_ffi.is_null() {
+        unsafe { release(path_ffi) };
+    }
+    if !body_ffi.is_null() {
+        unsafe { release(body_ffi) };
+    }
+
+    if host_debug_enabled() {
+        eprintln!("Glitching HTTP host handler returned ptr={:?}", response);
+    }
 
     let response_bytes = if response.is_null() {
         b"null".as_slice()
@@ -440,16 +502,33 @@ fn handle_connection(
         unsafe { CStr::from_ptr(response) }.to_bytes()
     };
 
+    if host_debug_enabled() {
+        eprintln!(
+            "Glitching HTTP host response bytes len={} preview={}",
+            response_bytes.len(),
+            String::from_utf8_lossy(&response_bytes[..response_bytes.len().min(120)])
+        );
+    }
+
     let (status, content_type) = classify_response(response_bytes);
     let header = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
         response_bytes.len()
     );
+    if host_debug_enabled() {
+        eprintln!("Glitching HTTP host writing status={status}");
+    }
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(response_bytes);
     let _ = stream.flush();
     if !response.is_null() {
+        if host_debug_enabled() {
+            eprintln!("Glitching HTTP host releasing response ptr={:?}", response);
+        }
         unsafe { release(response) };
+    }
+    if host_debug_enabled() {
+        eprintln!("Glitching HTTP host finished request");
     }
 }
 
@@ -513,19 +592,6 @@ fn extract_status_code(body: &[u8]) -> Option<u16> {
     rest[..end].parse().ok()
 }
 
-fn ffi_string(bytes: &[u8]) -> CString {
-    CString::new(bytes).unwrap_or_else(|_| {
-        CString::new(
-            bytes
-                .iter()
-                .copied()
-                .filter(|byte| *byte != 0)
-                .collect::<Vec<_>>(),
-        )
-        .unwrap()
-    })
-}
-
 extern "C" {
     fn malloc(size: usize) -> *mut std::ffi::c_void;
 }
@@ -548,6 +614,7 @@ fn allocate_glitch_string_from_bytes(bytes: &[u8]) -> *mut c_char {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), data, len);
         }
         *data.add(len) = 0;
+        GlitchLiveAllocations_Add(1);
         data as *mut c_char
     }
 }
@@ -573,6 +640,7 @@ fn allocate_glitch_string_array(values: &[*mut c_char]) -> *mut std::ffi::c_void
         for (index, value) in values.iter().copied().enumerate() {
             *data.add(index) = value;
         }
+        GlitchLiveAllocations_Add(2);
         node as *mut std::ffi::c_void
     }
 }
@@ -585,6 +653,7 @@ fn allocate_glitch_empty_array() -> *mut std::ffi::c_void {
     unsafe {
         *(node as *mut i64) = 0;
         *((node.add(8)) as *mut *mut std::ffi::c_void) = std::ptr::null_mut();
+        GlitchLiveAllocations_Add(1);
         node as *mut std::ffi::c_void
     }
 }
@@ -948,8 +1017,15 @@ mod tests {
             );
         }
 
-        std::thread::sleep(Duration::from_millis(10));
-        assert!(TASK_STARTED.load(AtomicOrdering::SeqCst));
+        let started = (0..20).any(|_| {
+            if TASK_STARTED.load(AtomicOrdering::SeqCst) {
+                true
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
+                false
+            }
+        });
+        assert!(started);
         assert!(!unsafe { GlitchTask_IsCompleted((&mut task as *mut GlitchTask).cast::<c_void>()) });
 
         unsafe {

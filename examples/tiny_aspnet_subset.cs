@@ -31,6 +31,8 @@ fn main() {
     string json = JsonSerializer_SerializeString(controllerText);
 
     WebApplication app = new WebApplication();
+    ServiceProvider routeProvider = services.BuildServiceProvider();
+    app.Services = move routeProvider;
     app.Use("logging");
     app.MapGet("/hello", json);
     app.MapGet("/health", HealthEndpoint);

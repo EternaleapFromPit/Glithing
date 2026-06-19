@@ -59,7 +59,7 @@ class WebApplication {
     public ServiceProvider Services;
 
     public WebApplication() {
-        this.Services = new ServiceProvider("");
+        this.Services = new ServiceProvider();
     }
 
     static WebApplicationBuilder CreateBuilder(string[] args) {

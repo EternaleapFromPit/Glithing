@@ -282,10 +282,11 @@ impl<'a> EndpointHandlerCollector<'a> {
         let Some(signature) = self.env.single_function(function) else {
             return Ok(());
         };
-        if !signature.params.is_empty() || signature.return_type != IrType::String {
+        let response_type = endpoint_response_ir_type(&signature.return_type);
+        let response_supported = matches!(response_type, IrType::String | IrType::Class(_));
+        if !signature.params.is_empty() || !response_supported {
             return Err(format!(
-                "typed IR: endpoint handler '{function}' must be string {}()",
-                function
+                "typed IR: endpoint handler '{function}' must be string/class {function}() or Task<string>/Task<class> {function}()"
             ));
         }
         self.handlers.push(EndpointHandlerBinding {
@@ -293,8 +294,8 @@ impl<'a> EndpointHandlerCollector<'a> {
             path: path.clone(),
             function: signature.symbol.clone(),
             return_type: signature.return_type.clone(),
-            response_type: signature.return_type.clone(),
-            ownership: ownership_for_type(&signature.return_type),
+            response_type: response_type.clone(),
+            ownership: ownership_for_type(&response_type),
             controller: None,
             constructor: None,
             constructor_params: Vec::new(),
@@ -340,6 +341,13 @@ impl<'a> EndpointHandlerCollector<'a> {
             Expr::Null => IrType::Unknown("null".to_string()),
             _ => IrType::Unknown("<expr>".to_string()),
         }
+    }
+}
+
+fn endpoint_response_ir_type(ty: &IrType) -> IrType {
+    match ty {
+        IrType::Task(inner) => endpoint_response_ir_type(inner),
+        _ => ty.clone(),
     }
 }
 

@@ -422,6 +422,14 @@ impl<'a> CompatibilityAnalyzer<'a> {
                     && type_name != "System.Exception"
                     && !self.known_types.contains(type_name)
                     && !self.known_types.contains(simple_name)
+                    && diagnostics_split_monomorphized_type(type_name).is_none_or(|(base, _)| {
+                        let base_simple = diagnostics_base_type_name(base);
+                        !self.known_types.contains(base)
+                            && !self.known_types.contains(base_simple)
+                            && !self.known_types.iter().any(|known| {
+                                known.ends_with(base_simple) || base_simple.ends_with(known)
+                            })
+                    })
                     && !self
                         .known_types
                         .iter()
@@ -600,10 +608,13 @@ fn is_llvm_runtime_function(symbol: &str) -> bool {
     matches!(
         symbol,
         "GlitchRestHost_Run"
+            | "GlitchRestHost_read_env_int"
             | "GlitchMiddlewareHandlers_Apply"
             | "glitch_register_attribute_routes"
             | "GlitchEndpointHandlers_Contains"
             | "GlitchEndpointHandlers_Invoke"
+            | "JsonSerializer_Serialize_Native"
+            | "JsonSerializer_Deserialize_Native"
             | "Ok"
             | "Created"
             | "CreatedAtAction"
@@ -612,6 +623,46 @@ fn is_llvm_runtime_function(symbol: &str) -> bool {
             | "NotFound"
             | "BadRequest"
     )
+}
+
+fn diagnostics_base_type_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+fn diagnostics_split_monomorphized_type(text: &str) -> Option<(&str, Vec<String>)> {
+    let start = text.find('<')?;
+    if !text.ends_with('>') {
+        return None;
+    }
+    let base = &text[..start];
+    let inner = &text[start + 1..text.len() - 1];
+    let mut args = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    for ch in inner.chars() {
+        match ch {
+            '<' => {
+                depth += 1;
+                current.push(ch);
+            }
+            '>' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                args.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        args.push(current.trim().to_string());
+    }
+    Some((base.trim(), args))
 }
 
 pub(crate) fn locate_source<'a>(source: &'a str, needle: &str) -> (Option<String>, usize, usize, &'a str) {
@@ -764,13 +815,34 @@ fn placeholder_member_diagnostic(
         ("ServiceProvider", "GetRequiredService")
         | ("ServiceProvider", "GetService")
         | ("IServiceProvider", "GetRequiredService")
-        | ("IServiceProvider", "GetService") => Some((
-            "dependency-injection lookup is still a compatibility stub; the current package returns a single stored object instead of resolving a scoped service graph".to_string(),
-            "construct the dependency explicitly, or add a real service-registration/runtime implementation before relying on container lookups".to_string(),
+        | ("IServiceProvider", "GetService") if !matches!(return_type, tir::IrType::String) => Some((
+            "dependency-injection lookup is still only partially implemented; named string lookups can resolve a stored singleton, but scoped generic service graphs are not built yet".to_string(),
+            "construct the dependency explicitly, or add a real service-registration/runtime implementation before relying on generic/scoped container resolution".to_string(),
+        )),
+        ("IServiceCollection", "AddDbContext")
+        | ("ServiceCollection", "AddDbContext")
+        | ("IServiceCollection", "AddDbContextPool")
+        | ("ServiceCollection", "AddDbContextPool") => Some((
+            "Entity Framework service registration is still only a compile-time surface; the current package does not build a real scoped DbContext graph".to_string(),
+            "construct the DbContext explicitly for now, or add a real DI registration/runtime implementation before relying on AddDbContext-style activation".to_string(),
+        )),
+        ("IServiceCollection", "AddLocalization")
+        | ("ServiceCollection", "AddLocalization")
+        | ("IServiceCollection", "AddCors")
+        | ("ServiceCollection", "AddCors")
+        | ("IServiceCollection", "AddMvc")
+        | ("ServiceCollection", "AddMvc")
+        | ("MvcBuilder", "AddJsonOptions") => Some((
+            "this service-registration/configuration call is still a compatibility surface; it compiles, but the underlying host/runtime behavior is not fully implemented".to_string(),
+            "keep the call only as a marker, or add the corresponding DI/host/runtime implementation before depending on its behavior at runtime".to_string(),
         )),
         ("Mapper", "Map") | ("IMapper", "Map") => Some((
             "AutoMapper `Map(...)` is still a compatibility stub; the current package returns a typed default instead of projecting fields".to_string(),
             "rewrite this call as an explicit object construction/copy, or add a real mapping implementation in the AutoMapper package".to_string(),
+        )),
+        ("DbSet", "FindAsync") => Some((
+            "DbSet.FindAsync is still a compatibility stub; the current package returns a typed default instead of resolving by key".to_string(),
+            "rewrite this lookup as an explicit predicate query such as `Where(...).FirstOrDefaultAsync(...)`, or add a real key-resolution implementation for your provider".to_string(),
         )),
         ("WebApplication", "UseSwagger")
         | ("WebApplication", "UseSwaggerUI")

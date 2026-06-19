@@ -28,12 +28,14 @@ pub(super) fn finish_module(emitter: &LlvmEmitter) -> Result<String, String> {
         out.push_str("declare void @System_Console_WriteLine_Bool(i1)\n");
         out.push_str("declare void @GlitchTask_RunVoid(ptr, ptr)\n");
         out.push_str("declare void @GlitchTask_RunI32(ptr, ptr)\n");
+        out.push_str("declare void @GlitchTask_RunBool(ptr, ptr)\n");
         out.push_str("declare void @GlitchTask_RunI64(ptr, ptr)\n");
         out.push_str("declare void @GlitchTask_RunDouble(ptr, ptr)\n");
         out.push_str("declare void @GlitchTask_RunPtr(ptr, ptr)\n");
         out.push_str("declare void @GlitchTask_Wait(ptr)\n");
         out.push_str("declare i1 @GlitchTask_IsCompleted(ptr)\n");
         out.push_str("declare void @GlitchTask_Destroy(ptr)\n");
+        out.push_str("declare i32 @GlitchRestHost_read_env_int(ptr, i32)\n");
         out.push_str("declare ptr @GlitchString_Lock()\n");
         out.push_str("declare void @GlitchString_Unlock(ptr)\n");
         out.push_str("declare i64 @GlitchLiveAllocations_Add(i64)\n");
@@ -96,6 +98,20 @@ done:\n  ret void\n}\n",
               call void @GlitchTask_RunI32(ptr %task, ptr %delegate)\n\
               ret ptr %task\n\
             }\n\
+            define ptr @glitch_task_run_bool(ptr %delegate) {\n\
+            entry:\n\
+              %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
+              %task_size = ptrtoint ptr %task_size_ptr to i64\n\
+              %task = call ptr @glitch_calloc(i64 1, i64 %task_size)\n\
+              %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
+              store i32 0, ptr %completed_ptr\n\
+              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
+              store ptr null, ptr %result_ptr\n\
+              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
+              store ptr null, ptr %state_ptr\n\
+              call void @GlitchTask_RunBool(ptr %task, ptr %delegate)\n\
+              ret ptr %task\n\
+            }\n\
             define ptr @glitch_task_run_i64(ptr %delegate) {\n\
             entry:\n\
               %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
@@ -144,6 +160,13 @@ done:\n  ret void\n}\n",
               %task = call ptr @glitch_task_from_result_ptr(ptr %val_ptr)\n\
               ret ptr %task\n\
             }\n\
+            define ptr @glitch_task_from_result_bool(i1 %result) {\n\
+            entry:\n\
+              %val_i64 = zext i1 %result to i64\n\
+              %val_ptr = inttoptr i64 %val_i64 to ptr\n\
+              %task = call ptr @glitch_task_from_result_ptr(ptr %val_ptr)\n\
+              ret ptr %task\n\
+            }\n\
             define ptr @glitch_task_from_result_i64(i64 %result) {\n\
             entry:\n\
               %val_ptr = inttoptr i64 %result to ptr\n\
@@ -175,6 +198,13 @@ done:\n  ret void\n}\n",
               %val = ptrtoint ptr %ptr to i32\n\
               ret i32 %val\n\
             }\n\
+            define i1 @glitch_task_get_result_bool(ptr %task) {\n\
+            entry:\n\
+              %ptr = call ptr @glitch_task_get_result_ptr(ptr %task)\n\
+              %val = ptrtoint ptr %ptr to i64\n\
+              %res = trunc i64 %val to i1\n\
+              ret i1 %res\n\
+            }\n\
             define i64 @glitch_task_get_result_i64(ptr %task) {\n\
             entry:\n\
               %ptr = call ptr @glitch_task_get_result_ptr(ptr %task)\n\
@@ -197,6 +227,54 @@ done:\n  ret void\n}\n",
             entry:\n\
               %completed = call i1 @GlitchTask_IsCompleted(ptr %task)\n\
               ret i1 %completed\n\
+            }\n\
+            define ptr @JsonSerializer_Serialize_Native(ptr %value) {\n\
+            entry:\n\
+              %is_null = icmp eq ptr %value, null\n\
+              br i1 %is_null, label %json_serialize_null, label %json_serialize_value\n\
+            json_serialize_null:\n\
+              ret ptr null\n\
+            json_serialize_value:\n\
+              %length = call i64 @glitch_string_length(ptr %value)\n\
+              %total = add i64 %length, 2\n\
+              %quoted = call ptr @glitch_string_allocate(i64 %total)\n\
+              store i8 34, ptr %quoted\n\
+              %content = getelementptr inbounds i8, ptr %quoted, i64 1\n\
+              call ptr @memcpy(ptr %content, ptr %value, i64 %length)\n\
+              %closing_index = add i64 %length, 1\n\
+              %closing = getelementptr inbounds i8, ptr %quoted, i64 %closing_index\n\
+              store i8 34, ptr %closing\n\
+              ret ptr %quoted\n\
+            }\n\
+            define ptr @JsonSerializer_Deserialize_Native(ptr %json) {\n\
+            entry:\n\
+              %is_null = icmp eq ptr %json, null\n\
+              br i1 %is_null, label %json_deserialize_null, label %json_deserialize_value\n\
+            json_deserialize_null:\n\
+              ret ptr null\n\
+            json_deserialize_value:\n\
+              %length = call i64 @glitch_string_length(ptr %json)\n\
+              %too_short = icmp ult i64 %length, 2\n\
+              br i1 %too_short, label %json_copy_full, label %json_check_quotes\n\
+            json_check_quotes:\n\
+              %first = load i8, ptr %json\n\
+              %last_index = sub i64 %length, 1\n\
+              %last_ptr = getelementptr inbounds i8, ptr %json, i64 %last_index\n\
+              %last = load i8, ptr %last_ptr\n\
+              %first_quote = icmp eq i8 %first, 34\n\
+              %last_quote = icmp eq i8 %last, 34\n\
+              %quoted = and i1 %first_quote, %last_quote\n\
+              br i1 %quoted, label %json_copy_inner, label %json_copy_full\n\
+            json_copy_inner:\n\
+              %inner_len = sub i64 %length, 2\n\
+              %inner = call ptr @glitch_string_allocate(i64 %inner_len)\n\
+              %source = getelementptr inbounds i8, ptr %json, i64 1\n\
+              call ptr @memcpy(ptr %inner, ptr %source, i64 %inner_len)\n\
+              ret ptr %inner\n\
+            json_copy_full:\n\
+              %copy = call ptr @glitch_string_allocate(i64 %length)\n\
+              call ptr @memcpy(ptr %copy, ptr %json, i64 %length)\n\
+              ret ptr %copy\n\
             }\n\
             define ptr @glitch_task_when_all2(ptr %left, ptr %right) {\n\
             entry:\n\

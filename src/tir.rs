@@ -97,6 +97,7 @@ pub(crate) struct TypedType {
 pub(crate) struct TypedFunction {
     pub(crate) name: String,
     pub(crate) symbol: String,
+    pub(crate) is_async: bool,
     pub(crate) generic_params: Vec<String>,
     pub(crate) is_extern: bool,
     pub(crate) required_params: usize,
@@ -480,12 +481,14 @@ impl TypedProgram {
         );
         let endpoint_handlers = collect_endpoint_handlers(program, &env)?;
 
-        Ok(Self {
+        let typed = Self {
             functions,
             types,
             generic_instantiations,
             endpoint_handlers,
-        })
+        };
+        typed.validate_async_lowering()?;
+        Ok(typed)
     }
 
     pub(crate) fn check_ownership(program: &Program) -> Result<(), String> {
@@ -608,6 +611,615 @@ impl TypedProgram {
             ));
         }
         out
+    }
+
+    pub(crate) fn validate_async_lowering(&self) -> Result<(), String> {
+        for function in &self.functions {
+            validate_async_function(function)?;
+        }
+        for ty in &self.types {
+            for constructor in &ty.constructors {
+                validate_async_function(constructor)?;
+            }
+            for method in &ty.methods {
+                validate_async_function(method)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_async_function(function: &TypedFunction) -> Result<(), String> {
+    if !function.is_async {
+        return Ok(());
+    }
+    let IrType::Task(_) = &function.return_type else {
+        return Err(format!(
+            "async lowering: function '{}' must return Task, Task<T>, ValueTask, or ValueTask<T> in the current gate",
+            function.name
+        ));
+    };
+    for param in &function.params {
+        if !async_state_capture_supported(param) {
+            return Err(format!(
+                "async lowering: parameter '{}' in '{}' cannot be captured into the async state safely yet; rewrite it to a copy/shared/class value or construct the owned value inside the async body",
+                param.name, function.name
+            ));
+        }
+    }
+    let mut scope = HashMap::new();
+    for param in &function.params {
+        scope.insert(param.name.clone(), param.clone());
+    }
+    validate_async_stmts(&function.name, &function.body, &HashSet::new(), &mut scope)
+}
+
+fn async_state_capture_supported(binding: &TypedBinding) -> bool {
+    match binding.ownership {
+        Ownership::Copy => true,
+        Ownership::Borrowed => {
+            binding.name == "this"
+                && matches!(binding.ty, IrType::Class(_) | IrType::Interface(_))
+        }
+        Ownership::Shared => matches!(
+            binding.ty,
+            IrType::Class(_)
+                | IrType::Interface(_)
+                | IrType::Function { .. }
+                | IrType::Nullable(_)
+                | IrType::Unknown(_)
+        ),
+        Ownership::Owned => matches!(binding.ty, IrType::String | IrType::Exception)
+            || matches!(&binding.ty, IrType::Struct(name) if name == "CancellationToken" || name.ends_with(".CancellationToken")),
+        Ownership::View | Ownership::Moved => false,
+    }
+}
+
+fn validate_async_stmts(
+    function_name: &str,
+    stmts: &[TypedStmt],
+    outer_after_uses: &HashSet<String>,
+    scope: &mut HashMap<String, TypedBinding>,
+) -> Result<(), String> {
+    let mut suffix_uses = vec![HashSet::<String>::new(); stmts.len() + 1];
+    suffix_uses[stmts.len()] = outer_after_uses.clone();
+    for index in (0..stmts.len()).rev() {
+        let mut uses = suffix_uses[index + 1].clone();
+        collect_used_bindings_stmt(&stmts[index], &mut uses);
+        suffix_uses[index] = uses;
+    }
+
+    for (index, stmt) in stmts.iter().enumerate() {
+        let after_uses = &suffix_uses[index + 1];
+        validate_async_stmt(function_name, stmt, after_uses, scope)?;
+        if let TypedStmtKind::Let { binding, .. } = &stmt.kind {
+            scope.insert(binding.name.clone(), binding.clone());
+        }
+    }
+    Ok(())
+}
+
+fn validate_async_stmt(
+    function_name: &str,
+    stmt: &TypedStmt,
+    after_uses: &HashSet<String>,
+    scope: &HashMap<String, TypedBinding>,
+) -> Result<(), String> {
+    match &stmt.kind {
+        TypedStmtKind::Let { expr, .. }
+        | TypedStmtKind::Assign { expr, .. }
+        | TypedStmtKind::Print(expr)
+        | TypedStmtKind::Expr(expr)
+        | TypedStmtKind::Return(Some(expr))
+        | TypedStmtKind::Throw(expr) => validate_async_expr(function_name, expr, after_uses, scope),
+        TypedStmtKind::AssignTarget { target, expr } => {
+            validate_async_expr(function_name, target, after_uses, scope)?;
+            validate_async_expr(function_name, expr, after_uses, scope)
+        }
+        TypedStmtKind::Block(body) => {
+            let mut nested_scope = scope.clone();
+            validate_async_stmts(function_name, body, after_uses, &mut nested_scope)
+        }
+        TypedStmtKind::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            let mut condition_after = after_uses.clone();
+            collect_used_bindings_stmts(then_body, &mut condition_after);
+            collect_used_bindings_stmts(else_body, &mut condition_after);
+            validate_async_expr(function_name, condition, &condition_after, scope)?;
+
+            let mut then_scope = scope.clone();
+            validate_async_stmts(function_name, then_body, after_uses, &mut then_scope)?;
+            let mut else_scope = scope.clone();
+            validate_async_stmts(function_name, else_body, after_uses, &mut else_scope)
+        }
+        TypedStmtKind::Try {
+            try_body,
+            catch_name,
+            catch_body,
+            finally_body,
+            ..
+        } => {
+            let mut try_after = after_uses.clone();
+            collect_used_bindings_stmts(catch_body, &mut try_after);
+            collect_used_bindings_stmts(finally_body, &mut try_after);
+            let mut try_scope = scope.clone();
+            validate_async_stmts(function_name, try_body, &try_after, &mut try_scope)?;
+
+            let mut catch_after = after_uses.clone();
+            collect_used_bindings_stmts(finally_body, &mut catch_after);
+            let mut catch_scope = scope.clone();
+            if let Some(name) = catch_name {
+                catch_scope.insert(
+                    name.clone(),
+                    TypedBinding {
+                        name: name.clone(),
+                        ty: IrType::Exception,
+                        ownership: Ownership::Owned,
+                    },
+                );
+            }
+            validate_async_stmts(function_name, catch_body, &catch_after, &mut catch_scope)?;
+
+            let mut finally_scope = scope.clone();
+            validate_async_stmts(function_name, finally_body, after_uses, &mut finally_scope)
+        }
+        TypedStmtKind::Switch { .. } => {
+            if stmt_contains_await(stmt) {
+                Err(format!(
+                    "async lowering: function '{}' does not support await inside switch yet; rewrite the suspension into if/else or split the method",
+                    function_name
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        TypedStmtKind::While { condition, body } => {
+            let mut loop_after = after_uses.clone();
+            collect_used_bindings_expr(condition, &mut loop_after);
+            collect_used_bindings_stmts(body, &mut loop_after);
+            validate_async_expr(function_name, condition, &loop_after, scope)?;
+            let mut body_scope = scope.clone();
+            validate_async_stmts(function_name, body, &loop_after, &mut body_scope)
+        }
+        TypedStmtKind::For {
+            init,
+            condition,
+            increment,
+            body,
+        } => {
+            let mut loop_after = after_uses.clone();
+            if let Some(init) = init.as_deref() {
+                collect_used_bindings_stmt(init, &mut loop_after);
+            }
+            if let Some(condition) = condition {
+                collect_used_bindings_expr(condition, &mut loop_after);
+            }
+            if let Some(increment) = increment.as_deref() {
+                collect_used_bindings_stmt(increment, &mut loop_after);
+            }
+            collect_used_bindings_stmts(body, &mut loop_after);
+            if let Some(init) = init.as_deref() {
+                validate_async_stmt(function_name, init, &loop_after, scope)?;
+            }
+            if let Some(condition) = condition {
+                validate_async_expr(function_name, condition, &loop_after, scope)?;
+            }
+            let mut body_scope = scope.clone();
+            validate_async_stmts(function_name, body, &loop_after, &mut body_scope)?;
+            if let Some(increment) = increment.as_deref() {
+                validate_async_stmt(function_name, increment, &loop_after, scope)?;
+            }
+            Ok(())
+        }
+        TypedStmtKind::ForEach {
+            item,
+            collection,
+            body,
+        } => {
+            let mut loop_after = after_uses.clone();
+            collect_used_bindings_expr(collection, &mut loop_after);
+            collect_used_bindings_stmts(body, &mut loop_after);
+            validate_async_expr(function_name, collection, &loop_after, scope)?;
+            let mut body_scope = scope.clone();
+            body_scope.insert(item.name.clone(), item.clone());
+            validate_async_stmts(function_name, body, &loop_after, &mut body_scope)
+        }
+        TypedStmtKind::Return(None) | TypedStmtKind::Break | TypedStmtKind::Continue => Ok(()),
+    }
+}
+
+fn validate_async_expr(
+    function_name: &str,
+    expr: &TypedExpr,
+    after_uses: &HashSet<String>,
+    scope: &HashMap<String, TypedBinding>,
+) -> Result<(), String> {
+    match &expr.kind {
+        TypedExprKind::Await(inner) => {
+            for (name, binding) in scope {
+                if !after_uses.contains(name) {
+                    continue;
+                }
+                if matches!(binding.ownership, Ownership::Borrowed | Ownership::View)
+                    && !(name == "this"
+                        && matches!(binding.ty, IrType::Class(_) | IrType::Interface(_)))
+                {
+                    let rewrite = if matches!(binding.ownership, Ownership::View) {
+                        "materialize the view into an owned collection or shorten the view scope before await"
+                    } else {
+                        "copy/move the value into an owned local or shorten the borrow before await"
+                    };
+                    return Err(format!(
+                        "async lowering: '{}' stays {:?} across await in '{}'; {rewrite}",
+                        name, binding.ownership, function_name
+                    ));
+                }
+            }
+            validate_async_expr(function_name, inner, after_uses, scope)
+        }
+        TypedExprKind::NullableSome(value)
+        | TypedExprKind::Throw(value)
+        | TypedExprKind::Unary { expr: value, .. } => {
+            validate_async_expr(function_name, value, after_uses, scope)
+        }
+        TypedExprKind::ArrayLiteral(values) => {
+            for value in values {
+                validate_async_expr(function_name, value, after_uses, scope)?;
+            }
+            Ok(())
+        }
+        TypedExprKind::NewArray { length, values, .. } => {
+            if let Some(length) = length {
+                validate_async_expr(function_name, length, after_uses, scope)?;
+            }
+            for value in values {
+                validate_async_expr(function_name, value, after_uses, scope)?;
+            }
+            Ok(())
+        }
+        TypedExprKind::Index { target, index } => {
+            validate_async_expr(function_name, target, after_uses, scope)?;
+            validate_async_expr(function_name, index, after_uses, scope)
+        }
+        TypedExprKind::Field { target, .. } => {
+            validate_async_expr(function_name, target, after_uses, scope)
+        }
+        TypedExprKind::IsPattern { expr, .. } => {
+            validate_async_expr(function_name, expr, after_uses, scope)
+        }
+        TypedExprKind::Assign { target, value } => {
+            validate_async_expr(function_name, target, after_uses, scope)?;
+            validate_async_expr(function_name, value, after_uses, scope)
+        }
+        TypedExprKind::Call(call) => {
+            if let TypedCallKind::Method { target, .. } = &call.kind {
+                validate_async_expr(function_name, target, after_uses, scope)?;
+            }
+            for arg in &call.args {
+                validate_async_expr(function_name, arg, after_uses, scope)?;
+            }
+            Ok(())
+        }
+        TypedExprKind::NewObject { args, fields, .. } => {
+            for arg in args {
+                validate_async_expr(function_name, arg, after_uses, scope)?;
+            }
+            for field in fields {
+                validate_async_expr(function_name, &field.expr, after_uses, scope)?;
+            }
+            Ok(())
+        }
+        TypedExprKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            validate_async_expr(function_name, condition, after_uses, scope)?;
+            validate_async_expr(function_name, when_true, after_uses, scope)?;
+            validate_async_expr(function_name, when_false, after_uses, scope)
+        }
+        TypedExprKind::Binary { left, right, .. } => {
+            validate_async_expr(function_name, left, after_uses, scope)?;
+            validate_async_expr(function_name, right, after_uses, scope)
+        }
+        TypedExprKind::IncDec { target, .. } => {
+            validate_async_expr(function_name, target, after_uses, scope)
+        }
+        TypedExprKind::Lambda { body, .. } => {
+            validate_async_expr(function_name, body, after_uses, scope)
+        }
+        TypedExprKind::NewCollection(_)
+        | TypedExprKind::NewThread(_)
+        | TypedExprKind::Int(_)
+        | TypedExprKind::Float(_)
+        | TypedExprKind::Bool(_)
+        | TypedExprKind::Null
+        | TypedExprKind::String(_)
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FunctionSymbol(_)
+        | TypedExprKind::Move(_)
+        | TypedExprKind::Borrow { .. } => Ok(()),
+    }
+}
+
+fn stmt_contains_await(stmt: &TypedStmt) -> bool {
+    match &stmt.kind {
+        TypedStmtKind::Let { expr, .. }
+        | TypedStmtKind::Assign { expr, .. }
+        | TypedStmtKind::Print(expr)
+        | TypedStmtKind::Expr(expr)
+        | TypedStmtKind::Return(Some(expr))
+        | TypedStmtKind::Throw(expr) => expr_contains_await(expr),
+        TypedStmtKind::AssignTarget { target, expr } => {
+            expr_contains_await(target) || expr_contains_await(expr)
+        }
+        TypedStmtKind::Block(body) => body.iter().any(stmt_contains_await),
+        TypedStmtKind::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            expr_contains_await(condition)
+                || then_body.iter().any(stmt_contains_await)
+                || else_body.iter().any(stmt_contains_await)
+        }
+        TypedStmtKind::Try {
+            try_body,
+            catch_body,
+            finally_body,
+            ..
+        } => {
+            try_body.iter().any(stmt_contains_await)
+                || catch_body.iter().any(stmt_contains_await)
+                || finally_body.iter().any(stmt_contains_await)
+        }
+        TypedStmtKind::Switch {
+            expr,
+            cases,
+            default,
+        } => {
+            expr_contains_await(expr)
+                || cases.iter().any(|case| {
+                    expr_contains_await(&case.value) || case.body.iter().any(stmt_contains_await)
+                })
+                || default.iter().any(stmt_contains_await)
+        }
+        TypedStmtKind::While { condition, body } => {
+            expr_contains_await(condition) || body.iter().any(stmt_contains_await)
+        }
+        TypedStmtKind::For {
+            init,
+            condition,
+            increment,
+            body,
+        } => {
+            init.as_deref().is_some_and(stmt_contains_await)
+                || condition.as_ref().is_some_and(expr_contains_await)
+                || increment.as_deref().is_some_and(stmt_contains_await)
+                || body.iter().any(stmt_contains_await)
+        }
+        TypedStmtKind::ForEach {
+            collection, body, ..
+        } => expr_contains_await(collection) || body.iter().any(stmt_contains_await),
+        TypedStmtKind::Return(None) | TypedStmtKind::Break | TypedStmtKind::Continue => false,
+    }
+}
+
+fn expr_contains_await(expr: &TypedExpr) -> bool {
+    match &expr.kind {
+        TypedExprKind::Await(_) => true,
+        TypedExprKind::NullableSome(value)
+        | TypedExprKind::Throw(value)
+        | TypedExprKind::Unary { expr: value, .. } => expr_contains_await(value),
+        TypedExprKind::ArrayLiteral(values) => values.iter().any(expr_contains_await),
+        TypedExprKind::NewArray { length, values, .. } => {
+            length.as_deref().is_some_and(expr_contains_await)
+                || values.iter().any(expr_contains_await)
+        }
+        TypedExprKind::Index { target, index } => {
+            expr_contains_await(target) || expr_contains_await(index)
+        }
+        TypedExprKind::Field { target, .. } | TypedExprKind::IsPattern { expr: target, .. } => {
+            expr_contains_await(target)
+        }
+        TypedExprKind::Assign { target, value } => {
+            expr_contains_await(target) || expr_contains_await(value)
+        }
+        TypedExprKind::Call(call) => {
+            let target_await = match &call.kind {
+                TypedCallKind::Method { target, .. } => expr_contains_await(target),
+                TypedCallKind::Function { .. } => false,
+            };
+            target_await || call.args.iter().any(expr_contains_await)
+        }
+        TypedExprKind::NewObject { args, fields, .. } => {
+            args.iter().any(expr_contains_await)
+                || fields.iter().any(|field| expr_contains_await(&field.expr))
+        }
+        TypedExprKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            expr_contains_await(condition)
+                || expr_contains_await(when_true)
+                || expr_contains_await(when_false)
+        }
+        TypedExprKind::Binary { left, right, .. } => {
+            expr_contains_await(left) || expr_contains_await(right)
+        }
+        TypedExprKind::IncDec { target, .. } => expr_contains_await(target),
+        TypedExprKind::Lambda { body, .. } => expr_contains_await(body),
+        TypedExprKind::NewCollection(_)
+        | TypedExprKind::NewThread(_)
+        | TypedExprKind::Int(_)
+        | TypedExprKind::Float(_)
+        | TypedExprKind::Bool(_)
+        | TypedExprKind::Null
+        | TypedExprKind::String(_)
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FunctionSymbol(_)
+        | TypedExprKind::Move(_)
+        | TypedExprKind::Borrow { .. } => false,
+    }
+}
+
+fn collect_used_bindings_stmts(stmts: &[TypedStmt], out: &mut HashSet<String>) {
+    for stmt in stmts {
+        collect_used_bindings_stmt(stmt, out);
+    }
+}
+
+fn collect_used_bindings_stmt(stmt: &TypedStmt, out: &mut HashSet<String>) {
+    match &stmt.kind {
+        TypedStmtKind::Let { expr, .. }
+        | TypedStmtKind::Assign { expr, .. }
+        | TypedStmtKind::Print(expr)
+        | TypedStmtKind::Expr(expr)
+        | TypedStmtKind::Return(Some(expr))
+        | TypedStmtKind::Throw(expr) => collect_used_bindings_expr(expr, out),
+        TypedStmtKind::AssignTarget { target, expr } => {
+            collect_used_bindings_expr(target, out);
+            collect_used_bindings_expr(expr, out);
+        }
+        TypedStmtKind::Block(body) => collect_used_bindings_stmts(body, out),
+        TypedStmtKind::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            collect_used_bindings_expr(condition, out);
+            collect_used_bindings_stmts(then_body, out);
+            collect_used_bindings_stmts(else_body, out);
+        }
+        TypedStmtKind::Try {
+            try_body,
+            catch_body,
+            finally_body,
+            ..
+        } => {
+            collect_used_bindings_stmts(try_body, out);
+            collect_used_bindings_stmts(catch_body, out);
+            collect_used_bindings_stmts(finally_body, out);
+        }
+        TypedStmtKind::Switch {
+            expr,
+            cases,
+            default,
+        } => {
+            collect_used_bindings_expr(expr, out);
+            for case in cases {
+                collect_used_bindings_expr(&case.value, out);
+                collect_used_bindings_stmts(&case.body, out);
+            }
+            collect_used_bindings_stmts(default, out);
+        }
+        TypedStmtKind::While { condition, body } => {
+            collect_used_bindings_expr(condition, out);
+            collect_used_bindings_stmts(body, out);
+        }
+        TypedStmtKind::For {
+            init,
+            condition,
+            increment,
+            body,
+        } => {
+            if let Some(init) = init.as_deref() {
+                collect_used_bindings_stmt(init, out);
+            }
+            if let Some(condition) = condition {
+                collect_used_bindings_expr(condition, out);
+            }
+            if let Some(increment) = increment.as_deref() {
+                collect_used_bindings_stmt(increment, out);
+            }
+            collect_used_bindings_stmts(body, out);
+        }
+        TypedStmtKind::ForEach {
+            collection, body, ..
+        } => {
+            collect_used_bindings_expr(collection, out);
+            collect_used_bindings_stmts(body, out);
+        }
+        TypedStmtKind::Return(None) | TypedStmtKind::Break | TypedStmtKind::Continue => {}
+    }
+}
+
+fn collect_used_bindings_expr(expr: &TypedExpr, out: &mut HashSet<String>) {
+    match &expr.kind {
+        TypedExprKind::Var(name) | TypedExprKind::Move(name) | TypedExprKind::Borrow { name, .. } => {
+            out.insert(name.clone());
+        }
+        TypedExprKind::NullableSome(value)
+        | TypedExprKind::Throw(value)
+        | TypedExprKind::Unary { expr: value, .. }
+        | TypedExprKind::Await(value) => collect_used_bindings_expr(value, out),
+        TypedExprKind::ArrayLiteral(values) => {
+            for value in values {
+                collect_used_bindings_expr(value, out);
+            }
+        }
+        TypedExprKind::NewArray { length, values, .. } => {
+            if let Some(length) = length {
+                collect_used_bindings_expr(length, out);
+            }
+            for value in values {
+                collect_used_bindings_expr(value, out);
+            }
+        }
+        TypedExprKind::Index { target, index } => {
+            collect_used_bindings_expr(target, out);
+            collect_used_bindings_expr(index, out);
+        }
+        TypedExprKind::Field { target, .. } | TypedExprKind::IsPattern { expr: target, .. } => {
+            collect_used_bindings_expr(target, out)
+        }
+        TypedExprKind::Assign { target, value } => {
+            collect_used_bindings_expr(target, out);
+            collect_used_bindings_expr(value, out);
+        }
+        TypedExprKind::Call(call) => {
+            if let TypedCallKind::Method { target, .. } = &call.kind {
+                collect_used_bindings_expr(target, out);
+            }
+            for arg in &call.args {
+                collect_used_bindings_expr(arg, out);
+            }
+        }
+        TypedExprKind::NewObject { args, fields, .. } => {
+            for arg in args {
+                collect_used_bindings_expr(arg, out);
+            }
+            for field in fields {
+                collect_used_bindings_expr(&field.expr, out);
+            }
+        }
+        TypedExprKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            collect_used_bindings_expr(condition, out);
+            collect_used_bindings_expr(when_true, out);
+            collect_used_bindings_expr(when_false, out);
+        }
+        TypedExprKind::Binary { left, right, .. } => {
+            collect_used_bindings_expr(left, out);
+            collect_used_bindings_expr(right, out);
+        }
+        TypedExprKind::IncDec { target, .. } => collect_used_bindings_expr(target, out),
+        TypedExprKind::Lambda { body, .. } => collect_used_bindings_expr(body, out),
+        TypedExprKind::NewCollection(_)
+        | TypedExprKind::NewThread(_)
+        | TypedExprKind::Int(_)
+        | TypedExprKind::Float(_)
+        | TypedExprKind::Bool(_)
+        | TypedExprKind::Null
+        | TypedExprKind::String(_)
+        | TypedExprKind::FunctionSymbol(_) => {}
     }
 }
 
@@ -3573,6 +4185,7 @@ fn lower_function(
             .map(|signature| signature.symbol.clone())
             .unwrap_or_else(|| function.name.clone())
         }),
+        is_async: function.is_async,
         generic_params: function
             .generic_params
             .iter()

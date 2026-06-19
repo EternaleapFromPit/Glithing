@@ -3,6 +3,8 @@ package Glitching.AspNetCore;
 using System.Collections.Generic;
 using Microsoft.Extensions.DependencyInjection;
 
+extern int GlitchRestHost_read_env_int(string name, int fallback);
+
 native "
 #ifdef _WIN32
 #include <winsock2.h>
@@ -447,7 +449,7 @@ class WebApplication {
         this.Responses = new Dictionary<string, string>();
         this.Middleware = new List<string>();
         this.Configuration = new ConfigurationManager();
-        this.Services = new ServiceProvider("");
+        this.Services = new ServiceProvider();
         this.Environment = new HostEnvironment();
         glitch_register_attribute_routes(this);
     }
@@ -509,10 +511,20 @@ class WebApplication {
         this.Use("controllers");
     }
 
+    void MapGet<T>(string path, Func<T> handler) {
+        string key = "GET " + path;
+        this.Routes.Add(key);
+    }
+
     void MapGet(string path, string text) {
         string key = "GET " + path;
         this.Routes.Add(key);
         this.Responses.Add(key, text);
+    }
+
+    void MapPost<T>(string path, Func<T> handler) {
+        string key = "POST " + path;
+        this.Routes.Add(key);
     }
 
     void MapPost(string path, string text) {

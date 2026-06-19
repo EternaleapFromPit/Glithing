@@ -111,6 +111,16 @@ fn is_string_like_type(ty: &IrType) -> bool {
     }
 }
 
+fn is_bool_like_type(ty: &IrType) -> bool {
+    match ty {
+        IrType::Bool => true,
+        IrType::Class(name) | IrType::Struct(name) | IrType::Unknown(name) => {
+            matches!(base_type_name(name), "bool" | "Boolean" | "System.Boolean")
+        }
+        _ => false,
+    }
+}
+
 fn is_task_surface_type(ty: &IrType) -> bool {
     matches!(
         ty,
@@ -201,6 +211,8 @@ pub(crate) struct LlvmEmitter {
     current_unwind_label: String,
     exception_handler: Option<String>,
     loop_targets: Vec<(String, String)>,
+    async_state_pc_ptr: Option<String>,
+    async_suspend_index: usize,
     terminated: bool,
 }
 
@@ -235,6 +247,8 @@ impl LlvmEmitter {
             current_unwind_label: String::new(),
             exception_handler: None,
             loop_targets: Vec::new(),
+            async_state_pc_ptr: None,
+            async_suspend_index: 0,
             terminated: false,
         };
         for ty in &program.types {
@@ -372,6 +386,30 @@ impl LlvmEmitter {
                 return_type: LlType::Void,
                 params: vec![LlType::I1],
                 required_params: 1,
+            },
+        );
+        emitter.functions.insert(
+            "JsonSerializer_Serialize_Native".to_string(),
+            LlFunctionSig {
+                return_type: LlType::Ptr,
+                params: vec![LlType::Ptr],
+                required_params: 1,
+            },
+        );
+        emitter.functions.insert(
+            "JsonSerializer_Deserialize_Native".to_string(),
+            LlFunctionSig {
+                return_type: LlType::Ptr,
+                params: vec![LlType::Ptr],
+                required_params: 1,
+            },
+        );
+        emitter.functions.insert(
+            "GlitchRestHost_read_env_int".to_string(),
+            LlFunctionSig {
+                return_type: LlType::I32,
+                params: vec![LlType::Ptr, LlType::I32],
+                required_params: 2,
             },
         );
         for ty in &program.types {
@@ -1126,6 +1164,8 @@ impl LlvmEmitter {
             current_unwind_label: String::new(),
             exception_handler: None,
             loop_targets: Vec::new(),
+            async_state_pc_ptr: None,
+            async_suspend_index: 0,
             terminated: false,
         };
         for function in &program.functions {
@@ -1157,6 +1197,15 @@ impl LlvmEmitter {
     }
 
     fn emit_external_declaration(&mut self, function: &TypedFunction) {
+        if matches!(
+            function.symbol.as_str(),
+            "GlitchRestHost_read_env_int"
+                | "glitch_string_equals"
+                | "JsonSerializer_Serialize_Native"
+                | "JsonSerializer_Deserialize_Native"
+        ) {
+            return;
+        }
         let return_type = llvm_ir_type(&function.return_type).as_ir();
         let params = function
             .params
@@ -1190,6 +1239,9 @@ impl LlvmEmitter {
         if function.is_extern {
             return Ok(());
         }
+        if function.is_async {
+            return self.emit_async_function(function);
+        }
         self.vars.clear();
         self.drop_order.clear();
         self.tmp = 0;
@@ -1197,6 +1249,8 @@ impl LlvmEmitter {
         self.terminated = false;
         self.exception_handler = None;
         self.current_unwind_label = "exception_unwind".to_string();
+        self.async_state_pc_ptr = None;
+        self.async_suspend_index = 0;
         let is_main = function.name == "main";
         self.current_is_main = is_main;
         self.current_return = if is_main {
@@ -1296,6 +1350,317 @@ impl LlvmEmitter {
         self.emit_default_return();
         self.body.push_str("}\n\n");
         Ok(())
+    }
+
+    fn emit_async_function(&mut self, function: &TypedFunction) -> Result<(), String> {
+        let result_ty = match &function.return_type {
+            IrType::Task(inner) => inner.as_ref().clone(),
+            other => {
+                return Err(format!(
+                    "LLVM backend: async function '{}' must lower to Task<T>, got {:?}",
+                    function.name, other
+                ));
+            }
+        };
+        let result_ll = llvm_ir_type(&result_ty);
+        let state_type = format!("glitch_async_state_{}", sanitize(&function.symbol));
+        let resume_symbol = format!("glitch_async_resume_{}", sanitize(&function.symbol));
+        let destroy_symbol = format!("glitch_async_destroy_{}", sanitize(&function.symbol));
+
+        let mut state_fields = vec!["i32".to_string()];
+        if result_ll != LlType::Void {
+            state_fields.push(result_ll.as_ir().to_string());
+        }
+        for param in &function.params {
+            state_fields.push(llvm_ir_type(&param.ty).as_ir().to_string());
+        }
+        self.type_defs.push(format!(
+            "%{state_type} = type {{ {} }}\n",
+            state_fields.join(", ")
+        ));
+
+        self.emit_async_resume_function(function, &state_type, &resume_symbol, &result_ty)?;
+        self.emit_async_destroy_function(function, &state_type, &destroy_symbol);
+
+        self.vars.clear();
+        self.drop_order.clear();
+        self.tmp = 0;
+        self.label = 0;
+        self.terminated = false;
+        self.exception_handler = None;
+        self.current_unwind_label = "exception_unwind".to_string();
+        self.async_state_pc_ptr = None;
+        self.async_suspend_index = 0;
+        self.current_is_main = false;
+        self.current_return = LlType::Ptr;
+
+        let params = function
+            .params
+            .iter()
+            .map(|param| {
+                format!(
+                    "{} %{}",
+                    llvm_ir_type(&param.ty).as_ir(),
+                    sanitize(&param.name)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.body.push_str(&format!(
+            "define ptr @{}({}) {{\nentry:\n",
+            sanitize(&function.symbol),
+            params
+        ));
+
+        let state_size_ptr = self.tmp();
+        let state_size = self.tmp();
+        let state_ptr = self.tmp();
+        self.body.push_str(&format!(
+            "  {state_size_ptr} = getelementptr %{state_type}, ptr null, i32 1\n  {state_size} = ptrtoint ptr {state_size_ptr} to i64\n  {state_ptr} = call ptr @glitch_calloc(i64 1, i64 {state_size})\n"
+        ));
+        let pc_ptr = self.tmp();
+        self.body.push_str(&format!(
+            "  {pc_ptr} = getelementptr inbounds %{state_type}, ptr {state_ptr}, i32 0, i32 0\n  store i32 0, ptr {pc_ptr}\n"
+        ));
+        if result_ll != LlType::Void {
+            let result_ptr = self.tmp();
+            self.body.push_str(&format!(
+                "  {result_ptr} = getelementptr inbounds %{state_type}, ptr {state_ptr}, i32 0, i32 1\n  store {} {}, ptr {result_ptr}\n",
+                result_ll.as_ir(),
+                result_ll.default_value()
+            ));
+        }
+        let param_start = if result_ll == LlType::Void { 1 } else { 2 };
+        for (index, param) in function.params.iter().enumerate() {
+            let field_ptr = self.tmp();
+            let ty = llvm_ir_type(&param.ty);
+            self.body.push_str(&format!(
+                "  {field_ptr} = getelementptr inbounds %{state_type}, ptr {state_ptr}, i32 0, i32 {}\n",
+                param_start + index
+            ));
+            self.emit_async_capture_retain(param, &format!("%{}", sanitize(&param.name)));
+            self.body.push_str(&format!(
+                "  store {} %{}, ptr {field_ptr}\n",
+                ty.as_ir(),
+                sanitize(&param.name)
+            ));
+        }
+
+        let delegate_size_ptr = self.tmp();
+        let delegate_size = self.tmp();
+        let delegate_ptr = self.tmp();
+        self.body.push_str(&format!(
+            "  {delegate_size_ptr} = getelementptr %glitch.delegate, ptr null, i32 1\n  {delegate_size} = ptrtoint ptr {delegate_size_ptr} to i64\n  {delegate_ptr} = call ptr @glitch_calloc(i64 1, i64 {delegate_size})\n"
+        ));
+        let rc_field = self.tmp();
+        let fn_field = self.tmp();
+        let env_field = self.tmp();
+        let destroy_field = self.tmp();
+        self.body.push_str(&format!(
+            "  {rc_field} = getelementptr inbounds %glitch.delegate, ptr {delegate_ptr}, i32 0, i32 0\n  store i64 1, ptr {rc_field}\n  {fn_field} = getelementptr inbounds %glitch.delegate, ptr {delegate_ptr}, i32 0, i32 1\n  store ptr @{resume_symbol}, ptr {fn_field}\n  {env_field} = getelementptr inbounds %glitch.delegate, ptr {delegate_ptr}, i32 0, i32 2\n  store ptr {state_ptr}, ptr {env_field}\n  {destroy_field} = getelementptr inbounds %glitch.delegate, ptr {delegate_ptr}, i32 0, i32 3\n  store ptr @{destroy_symbol}, ptr {destroy_field}\n"
+        ));
+
+        let task_ptr = self.tmp();
+        let helper_name = if matches!(result_ty, IrType::Void) {
+            "glitch_task_run_void"
+        } else if llvm_ir_type(&result_ty) == LlType::I1 || is_bool_like_type(&result_ty) {
+            "glitch_task_run_bool"
+        } else {
+            match result_ty {
+                IrType::Int | IrType::UInt => "glitch_task_run_i32",
+                IrType::Long => "glitch_task_run_i64",
+                IrType::Double | IrType::Decimal => "glitch_task_run_double",
+                _ => "glitch_task_run_ptr",
+            }
+        };
+        self.body.push_str(&format!(
+            "  {task_ptr} = call ptr @{helper_name}(ptr {delegate_ptr})\n  ret ptr {task_ptr}\n}}\n\n"
+        ));
+        Ok(())
+    }
+
+    fn emit_async_resume_function(
+        &mut self,
+        function: &TypedFunction,
+        state_type: &str,
+        resume_symbol: &str,
+        result_ty: &IrType,
+    ) -> Result<(), String> {
+        let saved_vars = self.vars.clone();
+        let saved_drop_order = self.drop_order.clone();
+        let saved_tmp = self.tmp;
+        let saved_label = self.label;
+        let saved_return = self.current_return.clone();
+        let saved_is_main = self.current_is_main;
+        let saved_unwind = self.current_unwind_label.clone();
+        let saved_handler = self.exception_handler.clone();
+        let saved_loop = self.loop_targets.clone();
+        let saved_terminated = self.terminated;
+        let saved_async_pc_ptr = self.async_state_pc_ptr.clone();
+        let saved_async_suspend_index = self.async_suspend_index;
+        let saved_body = std::mem::take(&mut self.body);
+
+        self.vars.clear();
+        self.drop_order.clear();
+        self.tmp = 0;
+        self.label = 0;
+        self.terminated = false;
+        self.current_is_main = false;
+        self.current_return = llvm_ir_type(result_ty);
+        self.current_unwind_label = "exception_unwind".to_string();
+        self.exception_handler = None;
+        self.loop_targets.clear();
+        self.async_suspend_index = 0;
+
+        self.body.push_str(&format!(
+            "define {} @{resume_symbol}(ptr %env) {{\nentry:\n",
+            self.current_return.as_ir()
+        ));
+        let pc_ptr = self.tmp();
+        self.body.push_str(&format!(
+            "  {pc_ptr} = getelementptr inbounds %{state_type}, ptr %env, i32 0, i32 0\n"
+        ));
+        self.async_state_pc_ptr = Some(pc_ptr);
+
+        let param_start = if self.current_return == LlType::Void { 1 } else { 2 };
+        for (index, param) in function.params.iter().enumerate() {
+            let ty = llvm_ir_type(&param.ty);
+            let ptr = self.tmp();
+            let field_ptr = self.tmp();
+            let loaded = self.tmp();
+            self.body.push_str(&format!(
+                "  {ptr} = alloca {}\n  {field_ptr} = getelementptr inbounds %{state_type}, ptr %env, i32 0, i32 {}\n  {loaded} = load {}, ptr {field_ptr}\n  store {} {loaded}, ptr {ptr}\n",
+                ty.as_ir(),
+                param_start + index,
+                ty.as_ir(),
+                ty.as_ir()
+            ));
+            self.vars.insert(
+                param.name.clone(),
+                LlVar {
+                    ptr,
+                    ty,
+                    ir_ty: param.ty.clone(),
+                    drop_kind: DropKind::BorrowOnly,
+                },
+            );
+        }
+        for local in &function.locals {
+            if self.vars.contains_key(&local.name) {
+                continue;
+            }
+            let ty = llvm_ir_type(&local.ty);
+            let ptr = self.tmp();
+            self.body
+                .push_str(&format!("  {ptr} = alloca {}\n", ty.as_ir()));
+            self.body.push_str(&format!(
+                "  store {} {}, ptr {ptr}\n",
+                ty.as_ir(),
+                ty.default_value()
+            ));
+            self.vars.insert(
+                local.name.clone(),
+                LlVar {
+                    ptr,
+                    ty,
+                    ir_ty: local.ty.clone(),
+                    drop_kind: local.drop_kind(),
+                },
+            );
+            self.drop_order.push(local.name.clone());
+        }
+
+        self.emit_typed_stmts(&function.body)?;
+        if !self.terminated {
+            self.emit_local_drops(None);
+            self.emit_default_return();
+        }
+        self.body
+            .push_str(&format!("{}:\n", self.current_unwind_label));
+        self.terminated = false;
+        self.emit_local_drops(None);
+        self.emit_default_return();
+        self.body.push_str("}\n\n");
+
+        let resume_body = std::mem::replace(&mut self.body, saved_body);
+        self.globals.push(resume_body);
+        self.vars = saved_vars;
+        self.drop_order = saved_drop_order;
+        self.tmp = saved_tmp;
+        self.label = saved_label;
+        self.current_return = saved_return;
+        self.current_is_main = saved_is_main;
+        self.current_unwind_label = saved_unwind;
+        self.exception_handler = saved_handler;
+        self.loop_targets = saved_loop;
+        self.terminated = saved_terminated;
+        self.async_state_pc_ptr = saved_async_pc_ptr;
+        self.async_suspend_index = saved_async_suspend_index;
+        Ok(())
+    }
+
+    fn emit_async_destroy_function(
+        &mut self,
+        function: &TypedFunction,
+        state_type: &str,
+        destroy_symbol: &str,
+    ) {
+        let mut body = format!("define void @{destroy_symbol}(ptr %env) {{\nentry:\n");
+        let param_start = if matches!(&function.return_type, IrType::Task(inner) if llvm_ir_type(inner) == LlType::Void) {
+            1
+        } else {
+            2
+        };
+        for (index, param) in function.params.iter().enumerate() {
+            let field_ptr = format!("%async_field_{}_ptr", index);
+            let loaded = format!("%async_field_{}", index);
+            let ty = llvm_ir_type(&param.ty);
+            body.push_str(&format!(
+                "  {field_ptr} = getelementptr inbounds %{state_type}, ptr %env, i32 0, i32 {}\n  {loaded} = load {}, ptr {field_ptr}\n",
+                param_start + index,
+                ty.as_ir()
+            ));
+            match &param.ty {
+                IrType::String | IrType::Exception => {
+                    body.push_str(&format!(
+                        "  call void @glitch_string_release(ptr {loaded})\n"
+                    ));
+                }
+                IrType::Function { .. } => {
+                    body.push_str(&format!(
+                        "  call void @glitch_delegate_release(ptr {loaded})\n"
+                    ));
+                }
+                IrType::Class(type_name) | IrType::Interface(type_name) => {
+                    if let Some(object) = self.object_types.get(type_name) {
+                        body.push_str(&format!(
+                            "  call void @{}(ptr {loaded})\n",
+                            drop_symbol(&object.name)
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        body.push_str("  call void @glitch_free(ptr %env)\n  ret void\n}\n\n");
+        self.globals.push(body);
+    }
+
+    fn emit_async_capture_retain(&mut self, binding: &TypedBinding, value: &str) {
+        match &binding.ty {
+            IrType::String | IrType::Exception => self
+                .body
+                .push_str(&format!("  call void @glitch_string_retain(ptr {value})\n")),
+            IrType::Function { .. } => self
+                .body
+                .push_str(&format!("  call void @glitch_delegate_retain(ptr {value})\n")),
+            IrType::Class(type_name) | IrType::Interface(type_name) => {
+                if self.object_types.contains_key(type_name) {
+                    self.emit_retain(type_name, value);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn emit_function(&mut self, function: &Function) -> Result<(), String> {
@@ -1558,7 +1923,7 @@ impl LlvmEmitter {
                     ) || matches!(
                         &expr.kind,
                         TypedExprKind::Var(name)
-                            if self.vars.get(name).is_some_and(|var| var.drop_kind == DropKind::BorrowOnly)
+                            if self.vars.contains_key(name)
                     ))
                 {
                     self.body.push_str(&format!(
@@ -2137,11 +2502,17 @@ impl LlvmEmitter {
                             return Ok(void_value());
                         } else {
                             let call_res = self.tmp();
-                            let helper_name = match &result_ty {
-                                IrType::Int | IrType::UInt => "glitch_task_get_result_i32",
-                                IrType::Long => "glitch_task_get_result_i64",
-                                IrType::Double | IrType::Decimal => "glitch_task_get_result_double",
-                                _ => "glitch_task_get_result_ptr",
+                            let helper_name = if llvm_ir_type(&result_ty) == LlType::I1
+                                || is_bool_like_type(&result_ty)
+                            {
+                                "glitch_task_get_result_bool"
+                            } else {
+                                match &result_ty {
+                                    IrType::Int | IrType::UInt => "glitch_task_get_result_i32",
+                                    IrType::Long => "glitch_task_get_result_i64",
+                                    IrType::Double | IrType::Decimal => "glitch_task_get_result_double",
+                                    _ => "glitch_task_get_result_ptr",
+                                }
                             };
                             self.body.push_str(&format!(
                                 "  {} = call {} @{}(ptr {})\n",
@@ -2688,6 +3059,10 @@ impl LlvmEmitter {
                             let app_value = self.emit_typed_expr(app)?;
                             let text_value = self.emit_typed_expr(text)?;
                             self.emit_temporary_drop(app, &app_value);
+                            self.body.push_str(&format!(
+                                "  call void @glitch_string_retain(ptr {})\n",
+                                text_value.value
+                            ));
                             return self.cast_value(text_value, &LlType::Ptr);
                         }
                         if self.functions.contains_key(symbol) {
@@ -2902,17 +3277,31 @@ impl LlvmEmitter {
             }
             TypedExprKind::Await(inner) => {
                 let task_val = self.emit_typed_expr(inner)?;
+                if let Some(pc_ptr) = self.async_state_pc_ptr.clone() {
+                    self.async_suspend_index += 1;
+                    self.body.push_str(&format!(
+                        "  store i32 {}, ptr {pc_ptr}\n",
+                        self.async_suspend_index
+                    ));
+                }
                 let result_ty = expr.ty.clone();
                 let result_llvm_type = llvm_ir_type(&result_ty);
                 if matches!(result_ty, IrType::Void) {
+                    self.emit_temporary_drop(inner, &task_val);
                     Ok(void_value())
                 } else {
                     let call_res = self.tmp();
-                    let helper_name = match &result_ty {
-                        IrType::Int | IrType::UInt => "glitch_task_get_result_i32",
-                        IrType::Long => "glitch_task_get_result_i64",
-                        IrType::Double | IrType::Decimal => "glitch_task_get_result_double",
-                        _ => "glitch_task_get_result_ptr",
+                    let helper_name = if llvm_ir_type(&result_ty) == LlType::I1
+                        || is_bool_like_type(&result_ty)
+                    {
+                        "glitch_task_get_result_bool"
+                    } else {
+                        match &result_ty {
+                            IrType::Int | IrType::UInt => "glitch_task_get_result_i32",
+                            IrType::Long => "glitch_task_get_result_i64",
+                            IrType::Double | IrType::Decimal => "glitch_task_get_result_double",
+                            _ => "glitch_task_get_result_ptr",
+                        }
                     };
                     self.body.push_str(&format!(
                         "  {} = call {} @{}(ptr {})\n",
@@ -2931,10 +3320,12 @@ impl LlvmEmitter {
                             self.emit_retain(type_name, &call_res);
                         }
                     }
-                    Ok(LlValue {
+                    let value = LlValue {
                         value: call_res,
                         ty: result_llvm_type,
-                    })
+                    };
+                    self.emit_temporary_drop(inner, &task_val);
+                    Ok(value)
                 }
             }
             TypedExprKind::FunctionSymbol(name) => {
@@ -3968,11 +4359,17 @@ impl LlvmEmitter {
                     Ok(void_value())
                 } else {
                     let call_res = self.tmp();
-                    let helper_name = match &result_ty {
-                        IrType::Int | IrType::UInt => "glitch_task_get_result_i32",
-                        IrType::Long => "glitch_task_get_result_i64",
-                        IrType::Double | IrType::Decimal => "glitch_task_get_result_double",
-                        _ => "glitch_task_get_result_ptr",
+                    let helper_name = if llvm_ir_type(&result_ty) == LlType::I1
+                        || is_bool_like_type(&result_ty)
+                    {
+                        "glitch_task_get_result_bool"
+                    } else {
+                        match &result_ty {
+                            IrType::Int | IrType::UInt => "glitch_task_get_result_i32",
+                            IrType::Long => "glitch_task_get_result_i64",
+                            IrType::Double | IrType::Decimal => "glitch_task_get_result_double",
+                            _ => "glitch_task_get_result_ptr",
+                        }
                     };
                     self.body.push_str(&format!(
                         "  {} = call {} @{}(ptr {})\n",
@@ -5105,7 +5502,7 @@ impl LlvmEmitter {
         let len_without_null = value.as_bytes().len();
         let len = len_without_null + 1;
         self.globals.push(format!(
-            "@.str.{id} = private unnamed_addr constant {{ i64, i64, [{len} x i8] }} {{ i64 1000000000, i64 {len_without_null}, [{len} x i8] c\"{bytes}\\00\" }}\n"
+            "@.str.{id} = private unnamed_addr global {{ i64, i64, [{len} x i8] }} {{ i64 1000000000, i64 {len_without_null}, [{len} x i8] c\"{bytes}\\00\" }}\n"
         ));
         format!("getelementptr inbounds ({{ i64, i64, [{len} x i8] }}, ptr @.str.{id}, i32 0, i32 2, i64 0)")
     }

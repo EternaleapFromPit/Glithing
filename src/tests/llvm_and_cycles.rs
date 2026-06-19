@@ -197,7 +197,7 @@ fn lowers_attribute_controller_routes_to_owned_llvm_thunks() {
         "#;
 
     let llvm = compile_llvm_ir(source).expect("attribute controller route should lower");
-    assert!(llvm.contains("define ptr @glitch_endpoint_handler_0(ptr %path, ptr %body)"));
+    assert!(llvm.contains("define ptr @glitch_endpoint_handler_0(ptr %app, ptr %path, ptr %body)"));
     assert!(llvm.contains("call ptr @StatusController__g0__t"));
     assert!(llvm.contains("call void @glitch_drop_StatusController__g0__t"));
     assert!(llvm.contains("define i1 @glitch_endpoint_handlers_contains"));
@@ -497,7 +497,7 @@ fn warns_for_service_provider_lookup_stubs() {
     let diagnostics = output.diagnostics.join("\n");
 
     assert!(diagnostics.contains("warning GL3013"));
-    assert!(diagnostics.contains("dependency-injection lookup is still a compatibility stub"));
+    assert!(diagnostics.contains("dependency-injection lookup is still only partially implemented"));
 }
 
 #[test]
