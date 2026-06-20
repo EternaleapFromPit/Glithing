@@ -71,4 +71,5 @@ mod llvm_and_cycles;
 mod packages_and_generics;
 mod framework_and_xunit;
 mod borrow_checker;
+mod cli;
 

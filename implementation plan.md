@@ -48,6 +48,7 @@ The following items from the analysis are now implemented or superseded by later
 - `System.Collections.Generic` now also recognizes `IReadOnlyDictionary<K,V>` as a view-style framework surface, and the compiler lowers it through the existing dictionary runtime path without treating it as owned
 - `System.Threading.Tasks` now has a slightly richer surface with `ValueTask<T>.AsTask()` and a fixed-arity `Task.WhenAll` helper for the supported subset, in addition to `FromResult`
 - `delegate` declarations are now first-class in the parser, typed IR, and LLVM pipeline, including generic instantiations such as `Predicate<int>` and namespace-qualified forms, and `ValueTask<T>.FromResult` lowers through the task runtime path
+- the stale prototype package `packages/System.CSharp/System.CSharp.gl` has been removed; the actual frontend remains Rust-implemented compiler code, not a package-defined lexer/parser surface
 - borrow-check control-flow joins now preserve moved/borrowed state across `if`, `switch`, `try/finally`, and early-return paths
 - xUnit test execution now runs through the Rust runtime path instead of the old native C runner
 - `using Xunit;` now resolves through a dedicated compatibility package, and the compiler auto-discovers `[Fact]` methods into native test registrations for C#-style test classes
@@ -139,7 +140,11 @@ The current boundary is:
 - Package type merging now keys on package id as well as name/namespace, which prevents package extension carrier types from accidentally merging with root types that only share the same short name.
 - The native test harness now recovers cleanly from a transient runtime-library build failure by retrying the Rust runtime build and ignoring a poisoned in-process native-build mutex.
 - `Dictionary<K,V>.GetEnumerator()` now lowers through a real LLVM snapshot-enumerator path instead of the old null placeholder, and there is regression coverage for both direct enumerator lowering and dictionary `foreach` lowering on the LLVM path.
+- Dictionary enumeration is now covered end to end on the native path as well: both direct `IEnumerator<KeyValuePair<K,V>>.Current` access and `foreach` over `Dictionary<string,int>` execute correctly with leak reporting enabled.
 - Generic `ServiceProvider.GetRequiredService<T>()` / `GetService<T>()` calls now have a real lowering slice for the currently supported cases (service-provider/self surfaces, scope-factory-style surfaces, and concrete-class activation), and the previous blanket compatibility warning for every generic lookup has been removed.
+- Explicit DI registrations now affect LLVM-native service resolution for the current safe slice: `AddTransient<TService,TImplementation>()` and `AddScoped<TService,TImplementation>()` are tracked by the compiler, `GetRequiredService<T>()` prefers those registrations for interface lookup, and `GetService<T>()` now returns null/default for missing interface/class registrations instead of fabricating an object.
+- Singleton DI resolution now has a real reuse slice on the native LLVM path: `AddSingleton<T>(value)` reuses the same registered instance on repeated `GetRequiredService<T>()` calls when the singleton source is a stable local/field expression, and there is native regression coverage for identity-preserving lookup.
+- Singleton DI resolution now also accepts temporary constructor/object-initializer sources on the native LLVM path by hoisting them into hidden function-entry locals for deterministic reuse, and `WebApplicationBuilder.Build()` now propagates the builder's tracked service registrations into direct `app.Services.GetRequiredService<T>()` lookups.
 - The blocking async gate now accepts `await` inside `switch` bodies and keeps the existing borrowed/view-across-suspension rejection in place.
 
 ## Next work items
@@ -150,6 +155,7 @@ The current boundary is:
 4. Improve framework compatibility for collections, tasks, delegates, and async lowering beyond the current synchronous task surface.
 5. Add stronger borrow-check analysis across any remaining control-flow joins that still need explicit tracking beyond the current loop-exit, early-return, and `finally`-propagation handling.
 6. Replace any remaining compatibility stubs with real lowering or real diagnostics, especially in package surfaces that still return typed defaults or behave as no-op placeholders.
+   - The next DI/runtime step after the current compiler-tracked singleton/transient/scoped slice is wider provider-state coverage across more scopes and controller-activation paths, plus reuse of constructed dependency graphs instead of only direct service registrations.
 7. Expand framework compatibility in small, test-driven slices where the runtime model already exists, and keep unsupported members on explicit diagnostics with rewrite guidance.
 8. Add additional sample/runtime acceptance work only where a concrete blocker remains after the current compile gates.
    - The next useful acceptance step is still a native ASP.NET-style host smoke path once the remaining async/runtime and package-helper gaps are closed.

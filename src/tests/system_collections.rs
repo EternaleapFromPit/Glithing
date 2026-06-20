@@ -392,6 +392,66 @@ fn compiles_dictionary_enumerator_runtime_shape() {
 }
 
 #[test]
+fn runs_dictionary_enumerator_natively_without_leaks() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            fn main() {
+                Dictionary<string, int> values = new Dictionary<string, int>();
+                values.Add("a", 1);
+                values.Add("b", 2);
+
+                IEnumerator<KeyValuePair<string, int>> enumerator = values.GetEnumerator();
+                while (enumerator.MoveNext()) {
+                    KeyValuePair<string, int> pair = enumerator.Current;
+                    print(pair.Key);
+                    print(pair.Value);
+                }
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("dict-enumerator-native", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "dictionary enumerator sample should exit cleanly\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, "a\r\n1\r\nb\r\n2\r\n0\r\n");
+}
+
+#[test]
+fn runs_dictionary_foreach_natively_without_leaks() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            fn main() {
+                Dictionary<string, int> values = new Dictionary<string, int>();
+                values.Add("a", 1);
+                values.Add("b", 2);
+
+                foreach (KeyValuePair<string, int> pair in values) {
+                    print(pair.Key);
+                    print(pair.Value);
+                }
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("dict-foreach-native", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "dictionary foreach sample should exit cleanly\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, "a\r\n1\r\nb\r\n2\r\n0\r\n");
+}
+
+#[test]
 fn compiles_hashset_package_surface() {
     let source = r#"
             using System.Collections.Generic;

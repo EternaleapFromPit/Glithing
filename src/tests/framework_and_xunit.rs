@@ -262,6 +262,164 @@ fn compiles_service_provider_scope_factory_and_concrete_service_resolution() {
 }
 
 #[test]
+fn runs_registered_interface_service_resolution_natively() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+
+            interface IMessageWriter {
+                string Message();
+            }
+
+            class ConsoleMessageWriter : IMessageWriter {
+                string Message() {
+                    return "hello from registration";
+                }
+            }
+
+            fn main() {
+                ServiceCollection services = new ServiceCollection();
+                services.AddTransient<IMessageWriter, ConsoleMessageWriter>();
+                ServiceProvider provider = services.BuildServiceProvider();
+                IMessageWriter writer = provider.GetRequiredService<IMessageWriter>();
+                print(writer.Message());
+            }
+        "#;
+
+    let output_exe =
+        emit_native_executable_from_source("service-registration-interface", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines, vec!["hello from registration", "0"]);
+}
+
+#[test]
+fn get_service_returns_null_for_unregistered_interface() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+
+            interface IMessageWriter {
+                string Message();
+            }
+
+            fn main() {
+                ServiceCollection services = new ServiceCollection();
+                ServiceProvider provider = services.BuildServiceProvider();
+                IMessageWriter writer = provider.GetService<IMessageWriter>();
+                print(writer == null);
+            }
+        "#;
+
+    let output_exe =
+        emit_native_executable_from_source("service-registration-missing", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines, vec!["true", "0"]);
+}
+
+#[test]
+fn singleton_service_resolution_reuses_registered_instance_natively() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+
+            class Service {
+                public string Name;
+            }
+
+            fn main() {
+                Service singleton = new Service();
+                singleton.Name = "first";
+
+                ServiceCollection services = new ServiceCollection();
+                services.AddSingleton<Service>(singleton);
+                ServiceProvider provider = services.BuildServiceProvider();
+
+                Service one = provider.GetRequiredService<Service>();
+                one.Name = "updated";
+                Service two = provider.GetRequiredService<Service>();
+                print(two.Name);
+            }
+        "#;
+
+    let output_exe =
+        emit_native_executable_from_source("service-singleton-reuse", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines, vec!["updated", "0"]);
+}
+
+#[test]
+fn singleton_temporary_constructor_registration_reuses_instance_natively() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+
+            class Service {
+                public string Name;
+            }
+
+            fn main() {
+                ServiceCollection services = new ServiceCollection();
+                services.AddSingleton<Service>(new Service { Name = "first" });
+                ServiceProvider provider = services.BuildServiceProvider();
+
+                Service one = provider.GetRequiredService<Service>();
+                one.Name = "updated";
+                Service two = provider.GetRequiredService<Service>();
+                print(two.Name);
+            }
+        "#;
+
+    let output_exe =
+        emit_native_executable_from_source("service-singleton-temporary", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines, vec!["updated", "0"]);
+}
+
+#[test]
+fn builder_build_propagates_singleton_registrations_to_app_services() {
+    let source = r#"
+            using Glitching.AspNetCore;
+            using Microsoft.Extensions.DependencyInjection;
+
+            class Service {
+                public string Name;
+            }
+
+            fn main() {
+                WebApplicationBuilder builder = CreateBuilder(System.Array.Empty<string>());
+                builder.Services.AddSingleton<Service>(new Service { Name = "first" });
+                WebApplication app = builder.Build();
+
+                Service one = app.Services.GetRequiredService<Service>();
+                one.Name = "updated";
+                Service two = app.Services.GetRequiredService<Service>();
+                print(two.Name);
+            }
+        "#;
+
+    let output_exe =
+        emit_native_executable_from_source("builder-service-singleton", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines, vec!["updated", "0"]);
+}
+
+#[test]
 fn compiles_mediatr_send_infers_response_from_request_contract() {
     let source = r#"
             using MediatR;

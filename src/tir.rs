@@ -3302,6 +3302,19 @@ impl OwnershipChecker {
                         ty: IrType::Int,
                         ownership: Ownership::Copy,
                     }),
+                    (IrType::Interface(type_name), "Current")
+                        if base_type_name(type_name) == "IEnumerator" =>
+                    {
+                        split_monomorphized_type(type_name)
+                            .and_then(|(_, args)| args.first().cloned())
+                            .and_then(|arg| parse_monomorphized_ir_type(&arg, env))
+                            .map(|ty| FieldSignature {
+                                package_id: None,
+                                visibility: Visibility::Public,
+                                ownership: ownership_for_type(&ty),
+                                ty,
+                            })
+                    }
                     (IrType::Task(inner), "Result") => Some(FieldSignature {
                         package_id: None,
                         visibility: Visibility::Public,
@@ -5686,6 +5699,23 @@ fn lower_typed_expr_with_expected(
                     ));
                 }
             }
+            if let IrType::Interface(type_name) = &target.ty {
+                if base_type_name(type_name) == "IEnumerator" && name == "Current" {
+                    if let Some(item_ty) = split_monomorphized_type(type_name)
+                        .and_then(|(_, args)| args.first().cloned())
+                        .and_then(|arg| parse_monomorphized_ir_type(&arg, env))
+                    {
+                        return Ok(typed_expr_with_ownership(
+                            TypedExprKind::Field {
+                                target: Box::new(target),
+                                name: name.clone(),
+                            },
+                            item_ty.clone(),
+                            ownership_for_type(&item_ty),
+                        ));
+                    }
+                }
+            }
             if let IrType::Class(type_name)
             | IrType::Struct(type_name)
             | IrType::Interface(type_name) = &target.ty
@@ -5721,6 +5751,19 @@ fn lower_typed_expr_with_expected(
                     ty: IrType::Int,
                     ownership: Ownership::Copy,
                 }),
+                (IrType::Interface(type_name), "Current")
+                    if base_type_name(type_name) == "IEnumerator" =>
+                {
+                    split_monomorphized_type(type_name)
+                        .and_then(|(_, args)| args.first().cloned())
+                        .and_then(|arg| parse_monomorphized_ir_type(&arg, env))
+                        .map(|ty| FieldSignature {
+                            package_id: None,
+                            visibility: Visibility::Public,
+                            ownership: ownership_for_type(&ty),
+                            ty,
+                        })
+                }
                 (IrType::String, "Length") => Some(FieldSignature {
                     package_id: None,
                     visibility: Visibility::Public,
@@ -6401,6 +6444,19 @@ fn lower_expr(
                     ty: IrType::Int,
                     ownership: Ownership::Copy,
                 }),
+                (IrType::Interface(type_name), "Current")
+                    if base_type_name(type_name) == "IEnumerator" =>
+                {
+                    split_monomorphized_type(type_name)
+                        .and_then(|(_, args)| args.first().cloned())
+                        .and_then(|arg| parse_monomorphized_ir_type(&arg, env))
+                        .map(|ty| FieldSignature {
+                            package_id: None,
+                            visibility: Visibility::Public,
+                            ownership: ownership_for_type(&ty),
+                            ty,
+                        })
+                }
                 (IrType::String, "Length") => Some(FieldSignature {
                     package_id: None,
                     visibility: Visibility::Public,

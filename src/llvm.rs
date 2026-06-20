@@ -101,6 +101,21 @@ struct LlObjectType {
     constructor_params: Vec<IrType>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServiceLifetime {
+    Singleton,
+    Transient,
+    Scoped,
+}
+
+#[derive(Debug, Clone)]
+struct ServiceRegistration {
+    lifetime: ServiceLifetime,
+    implementation_name: String,
+    source_expr: Option<TypedExpr>,
+    stored_ty: IrType,
+}
+
 fn is_string_like_type(ty: &IrType) -> bool {
     match ty {
         IrType::String => true,
@@ -150,6 +165,20 @@ fn is_service_provider_lookup_type(ty: &IrType) -> bool {
                     | "IServiceProvider"
                     | "Microsoft.Extensions.DependencyInjection.ServiceProvider"
                     | "Microsoft.Extensions.DependencyInjection.IServiceProvider"
+            )
+    )
+}
+
+fn is_service_collection_type(ty: &IrType) -> bool {
+    matches!(
+        ty,
+        IrType::Unknown(name) | IrType::Class(name) | IrType::Interface(name)
+            if matches!(
+                base_type_name(name),
+                "ServiceCollection"
+                    | "IServiceCollection"
+                    | "Microsoft.Extensions.DependencyInjection.ServiceCollection"
+                    | "Microsoft.Extensions.DependencyInjection.IServiceCollection"
             )
     )
 }
@@ -215,6 +244,9 @@ pub(crate) struct LlvmEmitter {
     object_types: HashMap<String, LlObjectType>,
     nullable_layouts: HashSet<String>,
     endpoint_handlers: Vec<EndpointHandlerBinding>,
+    service_registrations: HashMap<String, String>,
+    service_collection_registrations: HashMap<String, HashMap<String, ServiceRegistration>>,
+    service_provider_registrations: HashMap<String, HashMap<String, ServiceRegistration>>,
     drop_order: Vec<String>,
     tmp: usize,
     label: usize,
@@ -227,6 +259,7 @@ pub(crate) struct LlvmEmitter {
     loop_targets: Vec<(String, String)>,
     async_state_pc_ptr: Option<String>,
     async_suspend_index: usize,
+    entry_insert_pos: Option<usize>,
     terminated: bool,
 }
 
@@ -251,6 +284,9 @@ impl LlvmEmitter {
             object_types: HashMap::new(),
             nullable_layouts: HashSet::new(),
             endpoint_handlers: program.endpoint_handlers.clone(),
+            service_registrations: HashMap::new(),
+            service_collection_registrations: HashMap::new(),
+            service_provider_registrations: HashMap::new(),
             drop_order: Vec::new(),
             tmp: 0,
             label: 0,
@@ -263,6 +299,7 @@ impl LlvmEmitter {
             loop_targets: Vec::new(),
             async_state_pc_ptr: None,
             async_suspend_index: 0,
+            entry_insert_pos: None,
             terminated: false,
         };
         for ty in &program.types {
@@ -1168,6 +1205,9 @@ impl LlvmEmitter {
             object_types: HashMap::new(),
             nullable_layouts: HashSet::new(),
             endpoint_handlers: Vec::new(),
+            service_registrations: HashMap::new(),
+            service_collection_registrations: HashMap::new(),
+            service_provider_registrations: HashMap::new(),
             drop_order: Vec::new(),
             tmp: 0,
             label: 0,
@@ -1180,6 +1220,7 @@ impl LlvmEmitter {
             loop_targets: Vec::new(),
             async_state_pc_ptr: None,
             async_suspend_index: 0,
+            entry_insert_pos: None,
             terminated: false,
         };
         for function in &program.functions {
@@ -1257,6 +1298,8 @@ impl LlvmEmitter {
             return self.emit_async_function(function);
         }
         self.vars.clear();
+        self.service_collection_registrations.clear();
+        self.service_provider_registrations.clear();
         self.drop_order.clear();
         self.tmp = 0;
         self.label = 0;
@@ -1298,6 +1341,7 @@ impl LlvmEmitter {
             sanitize(&function.symbol),
             params
         ));
+        self.entry_insert_pos = Some(self.body.len());
         for param in &function.params {
             let ty = llvm_ir_type(&param.ty);
             let ptr = self.tmp();
@@ -1363,6 +1407,7 @@ impl LlvmEmitter {
         self.emit_local_drops(None);
         self.emit_default_return();
         self.body.push_str("}\n\n");
+        self.entry_insert_pos = None;
         Ok(())
     }
 
@@ -1425,6 +1470,7 @@ impl LlvmEmitter {
             sanitize(&function.symbol),
             params
         ));
+        self.entry_insert_pos = Some(self.body.len());
 
         let state_size_ptr = self.tmp();
         let state_size = self.tmp();
@@ -1490,6 +1536,7 @@ impl LlvmEmitter {
         self.body.push_str(&format!(
             "  {task_ptr} = call ptr @{helper_name}(ptr {delegate_ptr})\n  ret ptr {task_ptr}\n}}\n\n"
         ));
+        self.entry_insert_pos = None;
         Ok(())
     }
 
@@ -1530,6 +1577,7 @@ impl LlvmEmitter {
             "define {} @{resume_symbol}(ptr %env) {{\nentry:\n",
             self.current_return.as_ir()
         ));
+        self.entry_insert_pos = Some(self.body.len());
         let pc_ptr = self.tmp();
         self.body.push_str(&format!(
             "  {pc_ptr} = getelementptr inbounds %{state_type}, ptr %env, i32 0, i32 0\n"
@@ -1595,6 +1643,7 @@ impl LlvmEmitter {
         self.emit_local_drops(None);
         self.emit_default_return();
         self.body.push_str("}\n\n");
+        self.entry_insert_pos = None;
 
         let resume_body = std::mem::replace(&mut self.body, saved_body);
         self.globals.push(resume_body);
@@ -1610,6 +1659,7 @@ impl LlvmEmitter {
         self.terminated = saved_terminated;
         self.async_state_pc_ptr = saved_async_pc_ptr;
         self.async_suspend_index = saved_async_suspend_index;
+        self.entry_insert_pos = None;
         Ok(())
     }
 
@@ -1679,6 +1729,8 @@ impl LlvmEmitter {
 
     fn emit_function(&mut self, function: &Function) -> Result<(), String> {
         self.vars.clear();
+        self.service_collection_registrations.clear();
+        self.service_provider_registrations.clear();
         self.tmp = 0;
         self.label = 0;
         self.terminated = false;
@@ -1709,6 +1761,7 @@ impl LlvmEmitter {
             sanitize(&function.name),
             params
         ));
+        self.entry_insert_pos = Some(self.body.len());
         for param in &function.params {
             let ty = llvm_type(&param.ty);
             let ptr = self.tmp();
@@ -1734,6 +1787,7 @@ impl LlvmEmitter {
             self.emit_default_return();
         }
         self.body.push_str("}\n\n");
+        self.entry_insert_pos = None;
         Ok(())
     }
 
@@ -1794,6 +1848,18 @@ impl LlvmEmitter {
                     );
                     self.drop_order.push(binding.name.clone());
                 }
+                if let Some(collection_key) = self.is_build_service_provider_call(expr) {
+                    self.propagate_service_provider_registrations(
+                        &binding.name,
+                        &collection_key,
+                    );
+                }
+                if let Some(builder_key) = self.is_web_application_build_call(expr) {
+                    self.propagate_web_application_service_registrations(
+                        &binding.name,
+                        &builder_key,
+                    );
+                }
             }
             TypedStmtKind::Assign { name, expr } => {
                 let var = self
@@ -1811,6 +1877,15 @@ impl LlvmEmitter {
                     value.value,
                     var.ptr
                 ));
+                if let Some(collection_key) = self.is_build_service_provider_call(expr) {
+                    self.propagate_service_provider_registrations(name, &collection_key);
+                } else if let Some(builder_key) = self.is_web_application_build_call(expr) {
+                    self.propagate_web_application_service_registrations(name, &builder_key);
+                } else {
+                    self.service_provider_registrations.remove(name);
+                    self.service_provider_registrations
+                        .remove(&format!("{name}.Services"));
+                }
             }
             TypedStmtKind::AssignTarget { target, expr } => match &target.kind {
                 TypedExprKind::Field { .. } => {
@@ -3158,6 +3233,27 @@ impl LlvmEmitter {
                             {
                                 return self.emit_intrinsic_equals_pair(target, &call.args[0]);
                             }
+                            if is_service_collection_type(&target.ty)
+                                && matches!(name.as_str(), "AddTransient" | "AddScoped")
+                            {
+                                return self.emit_service_registration_marker(
+                                    name,
+                                    target,
+                                    &call.args,
+                                    &call.generic_args,
+                                );
+                            }
+                            if is_service_collection_type(&target.ty)
+                                && name == "AddSingleton"
+                                && call.generic_args.len() == 1
+                                && call.args.len() == 1
+                            {
+                                return self.emit_service_singleton_registration(
+                                    target,
+                                    &call.args,
+                                    &call.generic_args,
+                                );
+                            }
                             if is_service_provider_lookup_type(&target.ty)
                                 && matches!(name.as_str(), "GetRequiredService" | "GetService")
                                 && call.args.is_empty()
@@ -3263,6 +3359,27 @@ impl LlvmEmitter {
                             Ok(void_value())
                         }
                         CallResolution::Unknown => {
+                            if is_service_collection_type(&target.ty)
+                                && matches!(name.as_str(), "AddTransient" | "AddScoped")
+                            {
+                                return self.emit_service_registration_marker(
+                                    name,
+                                    target,
+                                    &call.args,
+                                    &call.generic_args,
+                                );
+                            }
+                            if is_service_collection_type(&target.ty)
+                                && name == "AddSingleton"
+                                && call.generic_args.len() == 1
+                                && call.args.len() == 1
+                            {
+                                return self.emit_service_singleton_registration(
+                                    target,
+                                    &call.args,
+                                    &call.generic_args,
+                                );
+                            }
                             if is_service_provider_lookup_type(&target.ty)
                                 && matches!(name.as_str(), "GetRequiredService" | "GetService")
                                 && call.args.is_empty()
@@ -4500,6 +4617,43 @@ impl LlvmEmitter {
         (fallback.len() == 1).then(|| fallback.remove(0))
     }
 
+    fn resolve_key_value_pair_type(
+        &self,
+        key_ty: &IrType,
+        value_ty: &IrType,
+    ) -> Option<LlObjectType> {
+        let mut candidates = self
+            .object_types
+            .values()
+            .filter(|object| {
+                base_type_name(&object.name) == "KeyValuePair"
+                    && object
+                        .fields
+                        .get("Key")
+                        .is_some_and(|field| field.ty == *key_ty)
+                    && object
+                        .fields
+                        .get("Value")
+                        .is_some_and(|field| field.ty == *value_ty)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.name.cmp(&right.name));
+        candidates.dedup_by(|left, right| left.name == right.name);
+        if candidates.len() == 1 {
+            return candidates.pop();
+        }
+        let mut fallback = self
+            .object_types
+            .values()
+            .filter(|object| base_type_name(&object.name) == "KeyValuePair")
+            .cloned()
+            .collect::<Vec<_>>();
+        fallback.sort_by(|left, right| left.name.cmp(&right.name));
+        fallback.dedup_by(|left, right| left.name == right.name);
+        (fallback.len() == 1).then(|| fallback.remove(0))
+    }
+
     fn emit_dictionary_snapshot_array(
         &mut self,
         dict: &str,
@@ -4632,17 +4786,10 @@ impl LlvmEmitter {
             self.object_types
                 .get(type_name)
                 .cloned()
+                .or_else(|| self.resolve_key_value_pair_type(key_ty, value_ty))
                 .ok_or_else(|| format!("LLVM TIR backend: type '{type_name}' has no LLVM layout"))?
         } else {
-            let mut candidates = self
-                .object_types
-                .values()
-                .filter(|candidate| base_type_name(&candidate.name) == "KeyValuePair")
-                .cloned()
-                .collect::<Vec<_>>();
-            candidates.sort_by(|left, right| left.name.cmp(&right.name));
-            candidates.dedup_by(|left, right| left.name == right.name);
-            candidates.into_iter().next().ok_or_else(|| {
+            self.resolve_key_value_pair_type(key_ty, value_ty).ok_or_else(|| {
                 format!(
                     "LLVM TIR backend: dictionary foreach item type {:?} has no object layout",
                     pair_ty
@@ -4815,6 +4962,37 @@ impl LlvmEmitter {
                 ty: LlType::Ptr,
             });
         }
+        let requested_name = self.service_registration_name(requested_ty);
+        let registration = requested_name
+            .as_deref()
+            .and_then(|service_name| self.resolve_service_registration_from_target(target, service_name));
+        if let Some(registration) = registration {
+            let value = match registration.lifetime {
+                ServiceLifetime::Singleton => {
+                    let source_expr = registration.source_expr.as_ref().ok_or_else(|| {
+                        "LLVM TIR backend: singleton service registration lost its source expression"
+                            .to_string()
+                    })?;
+                    let loaded = self.emit_typed_expr(source_expr)?;
+                    self.retain_for_store(&registration.stored_ty, source_expr, &loaded.value);
+                    self.cast_value(
+                        loaded,
+                        &llvm_ir_type(requested_ty),
+                    )?
+                }
+                ServiceLifetime::Transient | ServiceLifetime::Scoped => {
+                    LlValue {
+                        value: self.emit_endpoint_object_allocation(
+                            &registration.implementation_name,
+                            "service_lookup",
+                        )?,
+                        ty: LlType::Ptr,
+                    }
+                }
+            };
+            self.emit_temporary_drop(target, &receiver);
+            return Ok(value);
+        }
         let result = match requested_ty {
             IrType::Class(type_name) | IrType::Interface(type_name)
                 if matches!(
@@ -4838,7 +5016,21 @@ impl LlvmEmitter {
                 }
             }
             IrType::Class(type_name) => {
-                let allocated = self.emit_endpoint_object_allocation(type_name, "service_lookup")?;
+                let implementation = self
+                    .resolve_registered_service_implementation(type_name)
+                    .unwrap_or_else(|| type_name.clone());
+                if name == "GetService"
+                    && implementation == *type_name
+                    && !self.service_registrations.contains_key(type_name)
+                    && !self
+                        .service_registrations
+                        .contains_key(base_type_name(type_name))
+                {
+                    self.emit_temporary_drop(target, &receiver);
+                    return self.default_typed_value(result_ty);
+                }
+                let allocated =
+                    self.emit_endpoint_object_allocation(&implementation, "service_lookup")?;
                 self.emit_temporary_drop(target, &receiver);
                 return Ok(LlValue {
                     value: allocated,
@@ -4846,13 +5038,22 @@ impl LlvmEmitter {
                 });
             }
             IrType::Interface(interface_name) => {
-                let implementation = self
-                    .resolve_interface_implementation(interface_name)
-                    .ok_or_else(|| {
-                        format!(
-                            "LLVM TIR backend: {name}<{interface_name}> requires a unique concrete implementation; register or rewrite to the concrete class"
-                        )
-                    })?;
+                let implementation = if let Some(registered) =
+                    self.resolve_registered_service_implementation(interface_name)
+                {
+                    registered
+                } else if let Some(resolved) =
+                    self.resolve_interface_implementation(interface_name)
+                {
+                    resolved
+                } else if name == "GetService" {
+                    self.emit_temporary_drop(target, &receiver);
+                    return self.default_typed_value(result_ty);
+                } else {
+                    return Err(format!(
+                        "LLVM TIR backend: {name}<{interface_name}> requires a unique concrete implementation or an explicit AddTransient/AddScoped registration"
+                    ));
+                };
                 let allocated =
                     self.emit_endpoint_object_allocation(&implementation, "service_lookup")?;
                 self.emit_temporary_drop(target, &receiver);
@@ -4872,6 +5073,290 @@ impl LlvmEmitter {
         Ok(result)
     }
 
+    fn record_service_registration(&mut self, service_ty: &IrType, implementation_ty: &IrType) {
+        let Some(service_name) = self.service_registration_name(service_ty) else {
+            return;
+        };
+        let Some(implementation_name) = self.service_registration_name(implementation_ty) else {
+            return;
+        };
+        self.service_registrations
+            .insert(service_name.clone(), implementation_name.clone());
+        self.service_registrations.insert(
+            base_type_name(&service_name).to_string(),
+            implementation_name,
+        );
+    }
+
+    fn expr_tracking_key(&self, expr: &TypedExpr) -> Option<String> {
+        match &expr.kind {
+            TypedExprKind::Var(name) => Some(name.clone()),
+            TypedExprKind::Field { target, name } => self
+                .expr_tracking_key(target)
+                .map(|prefix| format!("{prefix}.{name}")),
+            _ => None,
+        }
+    }
+
+    fn is_web_application_build_call(&self, expr: &TypedExpr) -> Option<String> {
+        let TypedExprKind::Call(call) = &expr.kind else {
+            return None;
+        };
+        let TypedCallKind::Method { target, name, .. } = &call.kind else {
+            return None;
+        };
+        if name != "Build" {
+            return None;
+        }
+        match &target.ty {
+            IrType::Class(type_name) | IrType::Unknown(type_name)
+                if matches!(base_type_name(type_name), "WebApplicationBuilder") =>
+            {
+                self.expr_tracking_key(target)
+            }
+            _ => None,
+        }
+    }
+
+    fn is_build_service_provider_call(&self, expr: &TypedExpr) -> Option<String> {
+        let TypedExprKind::Call(call) = &expr.kind else {
+            return None;
+        };
+        let TypedCallKind::Method { target, name, .. } = &call.kind else {
+            return None;
+        };
+        if name != "BuildServiceProvider" || !is_service_collection_type(&target.ty) {
+            return None;
+        }
+        self.expr_tracking_key(target)
+    }
+
+    fn propagate_service_provider_registrations(
+        &mut self,
+        provider_name: &str,
+        collection_key: &str,
+    ) {
+        if let Some(registrations) = self
+            .service_collection_registrations
+            .get(collection_key)
+            .cloned()
+        {
+            self.service_provider_registrations
+                .insert(provider_name.to_string(), registrations);
+        } else {
+            self.service_provider_registrations.remove(provider_name);
+        }
+    }
+
+    fn propagate_web_application_service_registrations(
+        &mut self,
+        app_name: &str,
+        builder_key: &str,
+    ) {
+        let collection_key = format!("{builder_key}.Services");
+        if let Some(registrations) = self
+            .service_collection_registrations
+            .get(&collection_key)
+            .cloned()
+        {
+            self.service_provider_registrations
+                .insert(format!("{app_name}.Services"), registrations);
+        } else {
+            self.service_provider_registrations
+                .remove(&format!("{app_name}.Services"));
+        }
+    }
+
+    fn emit_hidden_entry_alloca(&mut self, ty: &LlType) -> String {
+        let ptr = self.tmp();
+        let insert = format!("  {ptr} = alloca {}\n", ty.as_ir());
+        if let Some(pos) = self.entry_insert_pos {
+            self.body.insert_str(pos, &insert);
+            self.entry_insert_pos = Some(pos + insert.len());
+        } else {
+            self.body.push_str(&insert);
+        }
+        ptr
+    }
+
+    fn resolve_service_registration_from_target(
+        &self,
+        target: &TypedExpr,
+        service_name: &str,
+    ) -> Option<ServiceRegistration> {
+        let key = self.expr_tracking_key(target)?;
+        self.service_provider_registrations
+            .get(&key)
+            .and_then(|services| {
+                services
+                    .get(service_name)
+                    .cloned()
+                    .or_else(|| services.get(base_type_name(service_name)).cloned())
+            })
+    }
+
+    fn resolve_registered_service_implementation(&self, service_name: &str) -> Option<String> {
+        self.service_registrations
+            .get(service_name)
+            .cloned()
+            .or_else(|| {
+                self.service_registrations
+                    .get(base_type_name(service_name))
+                    .cloned()
+            })
+    }
+
+    fn service_registration_name(&self, ty: &IrType) -> Option<String> {
+        match ty {
+            IrType::Class(name)
+            | IrType::Struct(name)
+            | IrType::Interface(name)
+            | IrType::Unknown(name) => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    fn emit_service_registration_marker(
+        &mut self,
+        method_name: &str,
+        target: &TypedExpr,
+        args: &[TypedExpr],
+        generic_args: &[IrType],
+    ) -> Result<LlValue, String> {
+        let receiver = self.emit_typed_expr(target)?;
+        for arg in args {
+            let value = self.emit_typed_expr(arg)?;
+            self.emit_temporary_drop(arg, &value);
+        }
+        if generic_args.len() >= 2 {
+            self.record_service_registration(&generic_args[0], &generic_args[1]);
+            if let Some(collection_key) = self.expr_tracking_key(target) {
+                if let (Some(service_name), Some(implementation_name)) = (
+                    self.service_registration_name(&generic_args[0]),
+                    self.service_registration_name(&generic_args[1]),
+                ) {
+                    let registration = ServiceRegistration {
+                        lifetime: if method_name == "AddScoped" {
+                            ServiceLifetime::Scoped
+                        } else {
+                            ServiceLifetime::Transient
+                        },
+                        implementation_name: implementation_name.clone(),
+                        source_expr: None,
+                        stored_ty: generic_args[1].clone(),
+                    };
+                    let entry = self
+                        .service_collection_registrations
+                        .entry(collection_key)
+                        .or_default();
+                    entry.insert(service_name.clone(), registration.clone());
+                    entry.insert(base_type_name(&service_name).to_string(), registration);
+                }
+            }
+        }
+        self.emit_temporary_drop(target, &receiver);
+        Ok(void_value())
+    }
+
+    fn emit_service_singleton_registration(
+        &mut self,
+        target: &TypedExpr,
+        args: &[TypedExpr],
+        generic_args: &[IrType],
+    ) -> Result<LlValue, String> {
+        let receiver = self.emit_typed_expr(target)?;
+        let Some(collection_key) = self.expr_tracking_key(target) else {
+            self.emit_temporary_drop(target, &receiver);
+            for arg in args {
+                let value = self.emit_typed_expr(arg)?;
+                self.emit_temporary_drop(arg, &value);
+            }
+            return Ok(void_value());
+        };
+        if generic_args.len() != 1 || args.len() != 1 {
+            self.emit_temporary_drop(target, &receiver);
+            for arg in args {
+                let value = self.emit_typed_expr(arg)?;
+                self.emit_temporary_drop(arg, &value);
+            }
+            return Ok(void_value());
+        }
+        let service_ty = &generic_args[0];
+        let value_expr = &args[0];
+        let value = self.emit_typed_expr(value_expr)?;
+        let stable_singleton_source = matches!(
+            value_expr.kind,
+            TypedExprKind::Var(_) | TypedExprKind::Field { .. } | TypedExprKind::Index { .. }
+        );
+        let source_expr = if stable_singleton_source {
+            if should_drop_argument_after_call(value_expr) {
+                self.emit_temporary_drop(value_expr, &value);
+            }
+            value_expr.clone()
+        } else {
+            let slot_name = format!("__service_singleton_{}", self.tmp());
+            let slot_ptr = self.emit_hidden_entry_alloca(&value.ty);
+            self.retain_for_store(&value_expr.ty, value_expr, &value.value);
+            self.body.push_str(&format!(
+                "  store {} {}, ptr {slot_ptr}\n",
+                value.ty.as_ir(),
+                value.value
+            ));
+            let hidden_expr = TypedExpr {
+                kind: TypedExprKind::Var(slot_name.clone()),
+                ty: value_expr.ty.clone(),
+                ownership: value_expr.ownership.clone(),
+                drop_kind: value_expr.drop_kind.clone(),
+            };
+            self.vars.insert(
+                slot_name.clone(),
+                LlVar {
+                    ptr: slot_ptr,
+                    ty: value.ty.clone(),
+                    ir_ty: value_expr.ty.clone(),
+                    drop_kind: value_expr.drop_kind.clone(),
+                },
+            );
+            self.drop_order.push(slot_name);
+            hidden_expr
+        };
+        if stable_singleton_source {
+            if let Some(service_name) = self.service_registration_name(service_ty) {
+                if let Some(implementation_name) = self.service_registration_name(&value_expr.ty) {
+                let registration = ServiceRegistration {
+                    lifetime: ServiceLifetime::Singleton,
+                    implementation_name,
+                    source_expr: Some(source_expr),
+                    stored_ty: value_expr.ty.clone(),
+                };
+                let entry = self
+                    .service_collection_registrations
+                    .entry(collection_key)
+                    .or_default();
+                entry.insert(service_name.clone(), registration.clone());
+                entry.insert(base_type_name(&service_name).to_string(), registration);
+            }
+            }
+        } else if let Some(service_name) = self.service_registration_name(service_ty) {
+            if let Some(implementation_name) = self.service_registration_name(&value_expr.ty) {
+                let registration = ServiceRegistration {
+                    lifetime: ServiceLifetime::Singleton,
+                    implementation_name,
+                    source_expr: Some(source_expr),
+                    stored_ty: value_expr.ty.clone(),
+                };
+                let entry = self
+                    .service_collection_registrations
+                    .entry(collection_key)
+                    .or_default();
+                entry.insert(service_name.clone(), registration.clone());
+                entry.insert(base_type_name(&service_name).to_string(), registration);
+            }
+        }
+        self.emit_temporary_drop(target, &receiver);
+        Ok(void_value())
+    }
+
     fn resolve_dictionary_enumerator_layout_from_target(
         &self,
         target: &TypedExpr,
@@ -4884,6 +5369,20 @@ impl LlvmEmitter {
                     .cloned()
             }
             IrType::Interface(interface_name) if base_type_name(interface_name) == "IEnumerator" => {
+                let mut exact = self
+                    .object_types
+                    .values()
+                    .filter(|object| {
+                        base_type_name(&object.name) == "DictionaryEnumerator"
+                            && object.bases.iter().any(|base| base == interface_name)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                exact.sort_by(|left, right| left.name.cmp(&right.name));
+                exact.dedup_by(|left, right| left.name == right.name);
+                if exact.len() == 1 {
+                    return exact.pop();
+                }
                 if let Some(implementation) = self.resolve_interface_implementation(interface_name) {
                     if base_type_name(&implementation) == "DictionaryEnumerator" {
                         return self
@@ -4958,34 +5457,6 @@ impl LlvmEmitter {
             }
             "Dispose" => void_value(),
             "get_Current" => {
-                let pair_object = if let Some(pair_name) = object_type_name(result_ty) {
-                    self.object_types.get(pair_name).cloned().ok_or_else(|| {
-                        format!("LLVM TIR backend: type '{pair_name}' has no LLVM layout")
-                    })?
-                } else {
-                    let mut candidates = self
-                        .object_types
-                        .values()
-                        .filter(|candidate| base_type_name(&candidate.name) == "KeyValuePair")
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    candidates.sort_by(|left, right| left.name.cmp(&right.name));
-                    candidates.dedup_by(|left, right| left.name == right.name);
-                    candidates.into_iter().next().ok_or_else(|| {
-                        "LLVM TIR backend: dictionary enumerator Current requires a concrete KeyValuePair result".to_string()
-                    })?
-                };
-                let pair_name = pair_object.name.clone();
-                let key_ty = pair_object
-                    .fields
-                    .get("Key")
-                    .map(|field| field.ty.clone())
-                    .ok_or_else(|| format!("LLVM TIR backend: '{pair_name}' is missing field 'Key'"))?;
-                let value_ty = pair_object
-                    .fields
-                    .get("Value")
-                    .map(|field| field.ty.clone())
-                    .ok_or_else(|| format!("LLVM TIR backend: '{pair_name}' is missing field 'Value'"))?;
                 let keys_field = object.fields.get("Keys").ok_or_else(|| {
                     format!("LLVM TIR backend: '{}' is missing field 'Keys'", object.name)
                 })?;
@@ -4995,6 +5466,46 @@ impl LlvmEmitter {
                 let index_field = object.fields.get("Index").ok_or_else(|| {
                     format!("LLVM TIR backend: '{}' is missing field 'Index'", object.name)
                 })?;
+                let pair_object = if let Some(pair_name) = object_type_name(result_ty) {
+                    self.object_types
+                        .get(pair_name)
+                        .cloned()
+                        .ok_or_else(|| {
+                            format!("LLVM TIR backend: type '{pair_name}' has no LLVM layout")
+                        })?
+                } else {
+                    let key_ty = match &keys_field.ty {
+                        IrType::Array(inner) => inner.as_ref().clone(),
+                        other => {
+                            self.emit_temporary_drop(target, &receiver);
+                            return Err(format!(
+                                "LLVM TIR backend: dictionary enumerator Keys field is not an array: {other:?}"
+                            ));
+                        }
+                    };
+                    let value_ty = match &values_field.ty {
+                        IrType::Array(inner) => inner.as_ref().clone(),
+                        other => {
+                            self.emit_temporary_drop(target, &receiver);
+                            return Err(format!(
+                                "LLVM TIR backend: dictionary enumerator Values field is not an array: {other:?}"
+                            ));
+                        }
+                    };
+                    self.resolve_key_value_pair_type(&key_ty, &value_ty).ok_or_else(|| {
+                        "LLVM TIR backend: dictionary enumerator Current requires a concrete KeyValuePair result".to_string()
+                    })?
+                };
+                let key_ty = pair_object
+                    .fields
+                    .get("Key")
+                    .map(|field| field.ty.clone())
+                    .ok_or_else(|| format!("LLVM TIR backend: '{}' is missing field 'Key'", pair_object.name))?;
+                let value_ty = pair_object
+                    .fields
+                    .get("Value")
+                    .map(|field| field.ty.clone())
+                    .ok_or_else(|| format!("LLVM TIR backend: '{}' is missing field 'Value'", pair_object.name))?;
                 let keys_ptr_ptr = self.tmp();
                 let keys_array = self.tmp();
                 let values_ptr_ptr = self.tmp();
@@ -5026,7 +5537,17 @@ impl LlvmEmitter {
                     llvm_ir_type(&value_ty).as_ir(),
                     llvm_ir_type(&value_ty).as_ir()
                 ));
-                self.emit_key_value_pair_object(result_ty, &key_ty, &key_value, &value_ty, &value_value)?
+                let concrete_pair_ty = match result_ty {
+                    IrType::Class(_) | IrType::Struct(_) => result_ty.clone(),
+                    _ => IrType::Struct(pair_object.name.clone()),
+                };
+                self.emit_key_value_pair_object(
+                    &concrete_pair_ty,
+                    &key_ty,
+                    &key_value,
+                    &value_ty,
+                    &value_value,
+                )?
             }
             _ => {
                 self.emit_temporary_drop(target, &receiver);

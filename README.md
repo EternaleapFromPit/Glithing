@@ -4,6 +4,35 @@ This is a small compiler prototype for a C#-inspired systems language with Rust-
 
 Accepted source file extensions are `.gl` and `.cs`. The parser is the same for both; `.cs` is intended for C#-migration snippets.
 
+The repo now exposes a `gl` CLI surface alongside the lower-level `glitchc` compiler entrypoint. Use:
+
+```powershell
+cargo run --bin gl -- help
+```
+
+Current `gl` commands:
+
+- `gl new console|classlib|xunit [name]`
+- `gl restore [project|solution|directory|file]`
+- `gl build [project|solution|directory|file] [--output <path>]`
+- `gl publish [project|solution|directory|file] [--output <path>]`
+- `gl run [project|directory|file] [-- <program args...>]`
+- `gl test [project|solution|directory|file]`
+- `gl clean [project|solution|directory|file]`
+- `gl sln new|add|remove|list`
+- `gl store [project|solution|directory|file] [--output <path>] [--package-id <id>] [--package-version <version>]`
+- `gl watch [--poll-ms <ms>] [--once] <build|publish|run|test|clean|restore|format> [...]`
+- `gl format [project|solution|directory|file] [--check]`
+
+Current command limitations:
+
+- `gl restore` is source-linked only. There is no remote feed restore yet.
+- `gl watch` is a polling watcher over project/source files, not an OS-native file notification backend.
+- `gl format` currently applies a conservative whitespace/indentation formatter for `.gl` / `.cs` sources, not a full Roslyn-equivalent formatter.
+- `gl sln` manages Glitching solution manifests in `.sln` files for the `gl` toolchain; it is not full MSBuild/Visual Studio solution parity.
+
+The language frontend is implemented directly in Rust compiler code under [src/lexer.rs](/D:/Repos/Glitching/src/lexer.rs) and [src/parser.rs](/D:/Repos/Glitching/src/parser.rs). There is no package-backed `System.CSharp` lexer/parser surface in the current compiler.
+
 Current implemented subset:
 
 - `fn name() { ... }`

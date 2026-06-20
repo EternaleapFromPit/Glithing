@@ -11,3 +11,4 @@
 *.user
 editor/vscode/glitching-language-support/node_modules/
 editor/vscode/glitching-language-support/*.vsix
+external/csharp_lexer/target/
