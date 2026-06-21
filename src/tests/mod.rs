@@ -64,7 +64,7 @@ fn temp_smoke_executable(stem: &str) -> std::path::PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    std::env::temp_dir().join(format!("glitching-{stem}-{stamp}.exe"))
+    crate::toolchain::native_host_temp_dir().join(format!("glitching-{stem}-{stamp}.exe"))
 }
 
 mod async_and_basics;

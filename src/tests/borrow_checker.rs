@@ -340,6 +340,10 @@ fn compiles_selected_repo_examples_through_llvm() {
 #[test]
 fn compiles_conduit_integration_tests_project_file_through_llvm() {
     let project = "external/aspnetcore-realworld-example-app/tests/Conduit.IntegrationTests/Conduit.IntegrationTests.csproj";
+    if !std::path::Path::new(project).exists() {
+        eprintln!("skipping missing external fixture: {project}");
+        return;
+    }
     let llvm_ir = compile_llvm_ir_from_path(project)
         .unwrap_or_else(|error| panic!("Conduit integration tests project should compile through LLVM: {error}"));
     assert!(llvm_ir.contains("XUnit_RunAllTests"));

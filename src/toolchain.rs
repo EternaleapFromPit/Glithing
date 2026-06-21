@@ -5,15 +5,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 pub(crate) fn emit_llvm_bitcode(llvm_ir: &str, output_path: &str) -> Result<(), String> {
-    let ll_path = format!("{output_path}.ll.tmp");
+    let output_path = normalize_native_host_path(Path::new(output_path));
+    let ll_path = companion_temp_path(&output_path, "ll.tmp");
     fs::write(&ll_path, llvm_ir).map_err(|e| format!("failed to write temporary LLVM IR: {e}"))?;
     let result = if let Some(llvm_as) = find_llvm_tool("llvm-as") {
         run_llvm_tool(
             &llvm_as,
             &[
-                OsString::from(&ll_path),
+                ll_path.as_os_str().to_os_string(),
                 OsString::from("-o"),
-                OsString::from(output_path),
+                output_path.as_os_str().to_os_string(),
             ],
             "llvm-as",
         )
@@ -26,9 +27,9 @@ pub(crate) fn emit_llvm_bitcode(llvm_ir: &str, output_path: &str) -> Result<(), 
                 OsString::from("ir"),
                 OsString::from("-c"),
                 OsString::from("-emit-llvm"),
-                OsString::from(&ll_path),
+                ll_path.as_os_str().to_os_string(),
                 OsString::from("-o"),
-                OsString::from(output_path),
+                output_path.as_os_str().to_os_string(),
             ],
             "clang for LLVM bitcode emission",
         )
@@ -49,18 +50,19 @@ pub(crate) fn emit_native_executable(
     llvm_ir: &str,
     output_path: &str,
 ) -> Result<(), String> {
-    let ll_path = format!("{output_path}.ll.tmp");
+    let output_path = normalize_native_host_path(Path::new(output_path));
+    let ll_path = companion_temp_path(&output_path, "ll.tmp");
     fs::write(&ll_path, llvm_ir).map_err(|e| format!("failed to write temporary LLVM IR: {e}"))?;
     let clang = require_llvm_tool("clang")?;
     let mut args = vec![
         OsString::from("-O3"),
         OsString::from("-x"),
         OsString::from("ir"),
-        OsString::from(&ll_path),
+        ll_path.as_os_str().to_os_string(),
     ];
     let runtime_library = find_runtime_library()?;
     args.push(OsString::from("-o"));
-    args.push(OsString::from(output_path));
+    args.push(output_path.as_os_str().to_os_string());
     args.push(OsString::from("-x"));
     args.push(OsString::from("none"));
     args.push(runtime_library.into_os_string());
@@ -98,6 +100,50 @@ pub(crate) fn emit_native_executable(
             String::from_utf8_lossy(&output.stderr)
         ))
     }
+}
+
+pub(crate) fn native_host_temp_dir() -> PathBuf {
+    normalize_native_host_path(&env::temp_dir())
+}
+
+fn companion_temp_path(path: &Path, suffix: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "glitching-output".to_string());
+    path.with_file_name(format!("{file_name}.{suffix}"))
+}
+
+fn normalize_native_host_path(path: &Path) -> PathBuf {
+    if !cfg!(windows) {
+        return path.to_path_buf();
+    }
+    if path.exists() {
+        return strip_windows_verbatim_prefix(
+            fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
+        );
+    }
+    match path.parent() {
+        Some(parent) if parent != path => {
+            let normalized_parent = normalize_native_host_path(parent);
+            match path.file_name() {
+                Some(name) => normalized_parent.join(name),
+                None => normalized_parent,
+            }
+        }
+        _ => path.to_path_buf(),
+    }
+}
+
+fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let raw = path.to_string_lossy();
+        if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+    }
+    path
 }
 
 fn run_llvm_tool(

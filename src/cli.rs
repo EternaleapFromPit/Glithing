@@ -757,7 +757,7 @@ pub(crate) fn temp_cli_executable(input: &str, suffix: &str) -> PathBuf {
         .unwrap_or_default()
         .as_nanos();
     let name = artifact_name_for_input(input);
-    std::env::temp_dir().join(format!("gl-{name}-{suffix}-{stamp}.exe"))
+    crate::toolchain::native_host_temp_dir().join(format!("gl-{name}-{suffix}-{stamp}.exe"))
 }
 
 fn default_template_name(template: &str) -> String {

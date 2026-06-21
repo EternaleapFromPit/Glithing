@@ -64,7 +64,7 @@ fn temp_executable_path() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    std::env::temp_dir().join(format!("glitching-realworld-smoke-{stamp}.exe"))
+    crate::toolchain::native_host_temp_dir().join(format!("glitching-realworld-smoke-{stamp}.exe"))
 }
 
 fn free_tcp_port() -> Result<u16, String> {

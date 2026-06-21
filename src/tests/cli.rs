@@ -10,7 +10,7 @@ fn temp_cli_dir(stem: &str) -> std::path::PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("gl-cli-{stem}-{stamp}"));
+    let dir = crate::toolchain::native_host_temp_dir().join(format!("gl-cli-{stem}-{stamp}"));
     fs::create_dir_all(&dir).expect("temp CLI dir should be created");
     dir
 }

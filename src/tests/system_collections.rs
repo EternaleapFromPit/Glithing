@@ -240,7 +240,7 @@ fn emits_llvm_native_nuget_package_assets() {
     let output = compile_source_with_options(source, true, false)
         .expect("package emission fixture should compile");
     let llvm_ir = output.llvm_ir().expect("LLVM IR should be present");
-    let package_path = std::env::temp_dir().join(format!(
+    let package_path = crate::toolchain::native_host_temp_dir().join(format!(
         "glitching-package-{}.nupkg",
         std::process::id()
     ));
