@@ -853,10 +853,27 @@ pub(super) fn lower_typed_expr_with_expected(
             let mut candidates = Vec::new();
             if let IrType::Class(type_name)
             | IrType::Struct(type_name)
-            | IrType::Interface(type_name) = &target.ty
+            | IrType::Interface(type_name)
+            | IrType::Unknown(type_name) = &target.ty
             {
                 if let Some(sigs) = env.methods.get(&(type_name.clone(), name.clone())) {
                     candidates = sigs.clone();
+                }
+                if candidates.is_empty() {
+                    let short = base_type_name(type_name);
+                    if let Some(sigs) = env.methods.get(&(short.to_string(), name.clone())) {
+                        candidates = sigs.clone();
+                    }
+                }
+                if candidates.is_empty() {
+                    candidates = env
+                        .methods
+                        .iter()
+                        .filter(|((owner, method_name), _)| {
+                            method_name == name && base_type_name(owner) == base_type_name(type_name)
+                        })
+                        .flat_map(|(_, signatures)| signatures.clone())
+                        .collect();
                 }
             }
             if candidates.is_empty() {

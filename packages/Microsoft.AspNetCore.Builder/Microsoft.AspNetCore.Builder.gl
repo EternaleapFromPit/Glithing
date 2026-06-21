@@ -6,16 +6,16 @@ delegate void CorsConfigure(CorsPolicyBuilder options);
 delegate void SwaggerOptionsConfigure(SwaggerOptions options);
 delegate void SwaggerUiOptionsConfigure(SwaggerUiOptions options);
 
-class CorsPolicyBuilder {
-    CorsPolicyBuilder AllowAnyOrigin() {
+public class CorsPolicyBuilder {
+    public CorsPolicyBuilder AllowAnyOrigin() {
         return new CorsPolicyBuilder();
     }
 
-    CorsPolicyBuilder AllowAnyHeader() {
+    public CorsPolicyBuilder AllowAnyHeader() {
         return new CorsPolicyBuilder();
     }
 
-    CorsPolicyBuilder AllowAnyMethod() {
+    public CorsPolicyBuilder AllowAnyMethod() {
         return new CorsPolicyBuilder();
     }
 }
@@ -28,7 +28,7 @@ class SwaggerOptions {
     }
 }
 
-class SwaggerUiOptions {
+public class SwaggerUiOptions {
     public string SwaggerEndpointUrl;
     public string SwaggerEndpointName;
 
@@ -37,57 +37,57 @@ class SwaggerUiOptions {
         this.SwaggerEndpointName = "";
     }
 
-    void SwaggerEndpoint(string url, string name) {
+    public void SwaggerEndpoint(string url, string name) {
         this.SwaggerEndpointUrl = url;
         this.SwaggerEndpointName = name;
     }
 }
 
-class WebApplicationBuilder {
+public class WebApplicationBuilder {
     public ServiceCollection Services;
 
     public WebApplicationBuilder() {
         this.Services = new ServiceCollection();
     }
 
-    WebApplication Build() {
+    public WebApplication Build() {
         return new WebApplication();
     }
 }
 
-class WebApplication {
+public class WebApplication {
     public ServiceProvider Services;
 
     public WebApplication() {
         this.Services = new ServiceProvider();
     }
 
-    static WebApplicationBuilder CreateBuilder(string[] args) {
+    public static WebApplicationBuilder CreateBuilder(string[] args) {
         return new WebApplicationBuilder();
     }
 
-    void UseMiddleware<T>() {}
-    void UseMiddleware<T>(object arg) {}
-    void UseCors() {}
-    void UseCors(CorsConfigure configure) {
+    public void UseMiddleware<T>() {}
+    public void UseMiddleware<T>(object arg) {}
+    public void UseCors() {}
+    public void UseCors(CorsConfigure configure) {
         configure(new CorsPolicyBuilder());
     }
-    void UseAuthentication() {}
-    void UseMvc() {}
-    void UseSwagger() {}
-    void UseSwagger(SwaggerOptionsConfigure configure) {
+    public void UseAuthentication() {}
+    public void UseMvc() {}
+    public void UseSwagger() {}
+    public void UseSwagger(SwaggerOptionsConfigure configure) {
         configure(new SwaggerOptions());
     }
-    void UseSwaggerUI() {}
-    void UseSwaggerUI(SwaggerUiOptionsConfigure configure) {
+    public void UseSwaggerUI() {}
+    public void UseSwaggerUI(SwaggerUiOptionsConfigure configure) {
         configure(new SwaggerUiOptions());
     }
-    void UseHttpsRedirection() {}
-    void UseStaticFiles() {}
-    void UseStaticFiles(object options) {}
-    void UseRouting() {}
-    void UseEndpoints() {}
-    void MapControllers() {}
-    void Run() {}
-    void Run(int port) {}
+    public void UseHttpsRedirection() {}
+    public void UseStaticFiles() {}
+    public void UseStaticFiles(object options) {}
+    public void UseRouting() {}
+    public void UseEndpoints() {}
+    public void MapControllers() {}
+    public void Run() {}
+    public void Run(int port) {}
 }

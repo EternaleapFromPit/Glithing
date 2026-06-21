@@ -71,6 +71,11 @@ pub(super) fn populate_method_signatures(program: &Program, env: &mut TypeEnv) {
                 sanitize_ir_symbol(&method.name),
                 method.generic_params.len()
             );
+            let base = if method.is_extension {
+                format!("{base}__ext")
+            } else {
+                base
+            };
             // Preserve the C# source method name for lookup, but give each overload
             // a stable lowered symbol that later IR/codegen stages can call directly.
             let symbol = if overloaded {
@@ -86,7 +91,14 @@ pub(super) fn populate_method_signatures(program: &Program, env: &mut TypeEnv) {
             let return_ownership = ownership_for_declared_type_syntax(&method.return_type, env);
             let params_element_type = params_element_type(&method.params, env);
             let required_params = method.params.iter().take_while(|param| param.default.is_none()).count();
-            let key = (ty.name.clone(), method.name.clone());
+            let key = if method.is_extension || ty.is_extension {
+                (
+                    extension_receiver_type_key(method, ty, env),
+                    method.name.clone(),
+                )
+            } else {
+                (ty.name.clone(), method.name.clone())
+            };
             let signature = FunctionSignature {
                 package_id: method.package_id.clone().or_else(|| ty.package_id.clone()),
                 visibility: method.visibility,
@@ -110,6 +122,27 @@ pub(super) fn populate_method_signatures(program: &Program, env: &mut TypeEnv) {
                 env.methods.entry(key).or_default().push(signature);
             }
         }
+    }
+}
+
+fn extension_receiver_type_key(method: &Function, owner: &TypeDef, env: &TypeEnv) -> String {
+    let Some(receiver) = method
+        .params
+        .iter()
+        .find(|param| param.modifier == ParamModifier::This)
+    else {
+        return owner.name.clone();
+    };
+    match type_syntax_to_ir(&receiver.ty, env) {
+        IrType::Class(name)
+        | IrType::Struct(name)
+        | IrType::Interface(name)
+        | IrType::Unknown(name) => name,
+        IrType::String => "string".to_string(),
+        IrType::List(_) => "List".to_string(),
+        IrType::Dictionary(_, _) => "Dictionary".to_string(),
+        IrType::Enumerable(_) => "IEnumerable".to_string(),
+        other => render_monomorphized_ir_type(&other),
     }
 }
 
@@ -383,22 +416,49 @@ impl TypeEnv {
         receiver: &TypedExpr,
         args: &[TypedExpr],
     ) -> Result<Option<FunctionSignature>, String> {
-        let Some(signatures) = self
-            .extension_methods
-            .get(&(type_name.to_string(), method_name.to_string()))
-        else {
-            return Ok(None);
-        };
         let mut combined = Vec::with_capacity(args.len() + 1);
         combined.push(receiver.clone());
         combined.extend(args.iter().cloned());
-        Ok(resolve_call_signature(
-            signatures,
-            &combined,
-            |expected, arg| ir_conversion_rank(expected, arg, self),
-            || format!("extension call to '{}.{}'", type_name, method_name),
-        )?
-        .cloned())
+        let try_resolve = |owner: &str| -> Result<Option<FunctionSignature>, String> {
+            let Some(signatures) = self
+                .extension_methods
+                .get(&(owner.to_string(), method_name.to_string()))
+            else {
+                return Ok(None);
+            };
+            Ok(resolve_call_signature(
+                signatures,
+                &combined,
+                |expected, arg| ir_conversion_rank(expected, arg, self),
+                || format!("extension call to '{}.{}'", owner, method_name),
+            )?
+            .cloned())
+        };
+        if let Some(signature) = try_resolve(type_name)? {
+            return Ok(Some(signature));
+        }
+        let simple = base_type_name(type_name);
+        if simple != type_name {
+            if let Some(signature) = try_resolve(simple)? {
+                return Ok(Some(signature));
+            }
+        }
+        if let Some(bases) = self.bases.get(type_name) {
+            for base in bases {
+                if let Some(signature) = self.resolve_extension_method_call(base, method_name, receiver, args)? {
+                    return Ok(Some(signature));
+                }
+                let base_simple = base.rsplit('.').next().unwrap_or(base);
+                if base_simple != base {
+                    if let Some(signature) =
+                        self.resolve_extension_method_call(base_simple, method_name, receiver, args)?
+                    {
+                        return Ok(Some(signature));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub(super) fn resolve_constructor(

@@ -673,6 +673,54 @@ fn warns_for_authentication_configuration_markers() {
 }
 
 #[test]
+fn startup_configuration_surfaces_resolve_without_missing_member_fallbacks() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+            using Microsoft.AspNetCore.Authentication.JwtBearer;
+            using Microsoft.EntityFrameworkCore;
+
+            class DemoContext : DbContext {
+                public DemoContext(DbContextOptions options) : base(options) {}
+            }
+
+            fn main() {
+                ServiceCollection services = new ServiceCollection();
+                services.AddDbContext<DemoContext>(options => {
+                    options.UseSqlite("demo.db");
+                });
+                services.AddLocalization(x => x.ResourcesPath = "Resources");
+                services.AddSwaggerGen(x => {
+                    x.SupportNonNullableReferenceTypes();
+                });
+                services.AddCors();
+                services.AddMvc(opt => {
+                    opt.EnableEndpointRouting = false;
+                }).AddJsonOptions(opt => {});
+
+                AuthenticationBuilder auth = services.AddAuthentication();
+                auth.AddJwtBearer(options => {});
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("startup configuration surfaces should compile through package members");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(diagnostics.contains("warning GL3013"), "{diagnostics}");
+    for member in [
+        "member 'AddDbContext'",
+        "member 'AddLocalization'",
+        "member 'AddSwaggerGen'",
+        "member 'AddMvc'",
+        "member 'AddJsonOptions'",
+        "member 'AddJwtBearer'",
+    ] {
+        assert!(!diagnostics.contains(member), "{diagnostics}");
+    }
+    assert!(!diagnostics.contains("static or opaque member 'ResourcesPath'"), "{diagnostics}");
+}
+
+#[test]
 fn warns_for_swagger_option_configuration_markers() {
     let source = r#"
             using Microsoft.Extensions.DependencyInjection;

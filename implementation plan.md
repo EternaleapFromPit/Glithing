@@ -149,6 +149,8 @@ The current boundary is:
 - `.csproj` parsing no longer rejects ordinary `.NET` `TargetFramework` values like `net7.0`; Glitching now treats that metadata as informational instead of requiring a synthetic `gl*` target.
 - ASP.NET controller discovery no longer depends on `[ApiController]` alone: route-attributed MVC controllers and `Controller` / `ControllerBase`-derived classes now reach endpoint collection and route lowering on the LLVM path.
 - The native endpoint binder now handles nullable query primitives (`bool?`, `int?`, `long?`) and treats `CancellationToken` as a default request-scoped token handle on the current controller/runtime slice, with both LLVM and native regression coverage.
+- Void-compatible startup/configuration lambdas now resolve through delegate-typed package members on the LLVM path, including statement-bodied and assignment-bodied configuration lambdas used by `AddDbContext`, `AddLocalization`, `AddSwaggerGen`, `AddMvc`, `AddJsonOptions`, and `AddJwtBearer`.
+- C#-style static-class extension methods with `this` receivers are now parsed, registered, symbolized, and lowered consistently, including receiver-type dispatch through loaded package types such as `IServiceCollection` / `ServiceCollection`.
 
 ## Next work items
 
@@ -162,6 +164,7 @@ The current boundary is:
 7. Expand framework compatibility in small, test-driven slices where the runtime model already exists, and keep unsupported members on explicit diagnostics with rewrite guidance.
 8. Add additional sample/runtime acceptance work only where a concrete blocker remains after the current compile gates.
    - The next useful acceptance step is still a native ASP.NET-style host smoke path once the remaining async/runtime and package-helper gaps are closed.
+9. Add explicit generic method type-argument support in method-call lowering, so calls like `GetRequiredService<ILoggerFactory>()` specialize their return type instead of degrading to `Unknown("T")`.
 
 ## C# Standard v7 Gap Analysis
 

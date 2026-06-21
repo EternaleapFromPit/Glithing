@@ -38,19 +38,19 @@ public class DbContextOptionsBuilder {
         this.Options = new DbContextOptions();
     }
 
-    void UseSqlite(string connectionString) {
+    public void UseSqlite(string connectionString) {
         if (this.Options != null) {
             this.Options.ConnectionString = connectionString;
         }
     }
 
-    void UseSqlServer(string connectionString) {
+    public void UseSqlServer(string connectionString) {
         if (this.Options != null) {
             this.Options.ConnectionString = connectionString;
         }
     }
 
-    void UseInMemoryDatabase(string connectionString) {
+    public void UseInMemoryDatabase(string connectionString) {
         if (this.Options != null) {
             this.Options.ConnectionString = "inmemory:" + connectionString;
         }
@@ -62,17 +62,17 @@ public class LocalizationOptions {
 }
 
 public class CorsPolicyBuilder {
-    CorsPolicyBuilder AllowAnyOrigin() { return new CorsPolicyBuilder(); }
-    CorsPolicyBuilder AllowAnyHeader() { return new CorsPolicyBuilder(); }
-    CorsPolicyBuilder AllowAnyMethod() { return new CorsPolicyBuilder(); }
+    public CorsPolicyBuilder AllowAnyOrigin() { return new CorsPolicyBuilder(); }
+    public CorsPolicyBuilder AllowAnyHeader() { return new CorsPolicyBuilder(); }
+    public CorsPolicyBuilder AllowAnyMethod() { return new CorsPolicyBuilder(); }
 }
 
 public class MvcConventions {
-    void Add(object convention) {}
+    public void Add(object convention) {}
 }
 
 public class MvcFilterCollection {
-    void Add<T>() {}
+    public void Add<T>() {}
 }
 
 public class MvcJsonOptions {
@@ -96,13 +96,13 @@ public class MvcOptions {
 }
 
 public class AuthenticationBuilder {
-    AuthenticationBuilder AddJwtBearer(JwtBearerConfigure configure) {
+    public AuthenticationBuilder AddJwtBearer(JwtBearerConfigure configure) {
         return new AuthenticationBuilder();
     }
 }
 
 public class MediatRServiceConfiguration {
-    void RegisterServicesFromAssembly(object assembly) {}
+    public void RegisterServicesFromAssembly(object assembly) {}
 }
 
 public delegate void SwaggerGenConfigure(SwaggerGenOptions options);
@@ -115,13 +115,13 @@ public class SwaggerActionDescriptor {
 }
 
 public class SwaggerGenOptions {
-    void AddSecurityDefinition(string name, OpenApiSecurityScheme scheme) {}
-    void SupportNonNullableReferenceTypes() {}
-    void AddSecurityRequirement(OpenApiSecurityRequirement requirement) {}
-    void SwaggerDoc(string documentName, OpenApiInfo info) {}
-    void CustomSchemaIds(SwaggerSchemaIdSelector selector) {}
-    void DocInclusionPredicate(SwaggerDocInclusionPredicate predicate) {}
-    void TagActionsBy(SwaggerTagActionsBySelector selector) {}
+    public void AddSecurityDefinition(string name, OpenApiSecurityScheme scheme) {}
+    public void SupportNonNullableReferenceTypes() {}
+    public void AddSecurityRequirement(OpenApiSecurityRequirement requirement) {}
+    public void SwaggerDoc(string documentName, OpenApiInfo info) {}
+    public void CustomSchemaIds(SwaggerSchemaIdSelector selector) {}
+    public void DocInclusionPredicate(SwaggerDocInclusionPredicate predicate) {}
+    public void TagActionsBy(SwaggerTagActionsBySelector selector) {}
 }
 
 public class ServiceProvider : IServiceProvider, IServiceScopeFactory {
@@ -138,22 +138,22 @@ public class ServiceProvider : IServiceProvider, IServiceScopeFactory {
         this.NamedValue = namedValue;
     }
 
-    T GetRequiredService<T>() {
+    public T GetRequiredService<T>() {
         return default(T);
     }
 
-    string GetRequiredService(string name) {
+    public string GetRequiredService(string name) {
         if (name != null && this.NamedKey != null && glitch_string_equals(name, this.NamedKey)) {
             return this.NamedValue;
         }
         return "";
     }
 
-    T GetService<T>() {
+    public T GetService<T>() {
         return default(T);
     }
 
-    IServiceScope CreateScope() {
+    public IServiceScope CreateScope() {
         return new ServiceScope(this);
     }
 }
@@ -175,23 +175,23 @@ public class ServiceScope : IServiceScope {
 }
 
 public class MvcBuilder {
-    MvcBuilder AddJsonOptions(JsonOptionsConfigure configure) {
+    public MvcBuilder AddJsonOptions(JsonOptionsConfigure configure) {
         return new MvcBuilder();
     }
 
-    MvcBuilder ConfigureApiBehaviorOptions(object configure) {
+    public MvcBuilder ConfigureApiBehaviorOptions(object configure) {
         return new MvcBuilder();
     }
 
-    MvcBuilder AddJwtBearer(JwtBearerConfigure configure) {
+    public MvcBuilder AddJwtBearer(JwtBearerConfigure configure) {
         return new MvcBuilder();
     }
 
-    MvcBuilder AddAuthentication() {
+    public MvcBuilder AddAuthentication() {
         return new MvcBuilder();
     }
 
-    MvcBuilder AddAuthentication(string scheme) {
+    public MvcBuilder AddAuthentication(string scheme) {
         return new MvcBuilder();
     }
 }
@@ -205,53 +205,53 @@ public class IServiceCollection {
         this.NamedValue = "";
     }
 
-    void AddSingleton<T>(T value) {
+    public void AddSingleton<T>(T value) {
     }
-    void AddSingleton(string key, string value) {
+    public void AddSingleton(string key, string value) {
         this.NamedKey = key;
         this.NamedValue = value;
     }
-    void AddTransient<TService, TImplementation>() {}
-    void AddTransient(object serviceType, object implementationType) {}
-    void AddScoped(object serviceType, object implementationType) {}
-    void AddScoped<TService, TImplementation>() {}
+    public void AddTransient<TService, TImplementation>() {}
+    public void AddTransient(object serviceType, object implementationType) {}
+    public void AddScoped(object serviceType, object implementationType) {}
+    public void AddScoped<TService, TImplementation>() {}
 
-    void Configure(object configure) {}
-    void AddApiVersioning(object configure) {}
-    void AddVersionedApiExplorer(object configure) {}
-    void AddSwaggerGen(SwaggerGenConfigure configure) {}
-    void AddMemoryCache() {}
-    void AddHttpContextAccessor() {}
-    void AddEndpointsApiExplorer() {}
-    void AddLibraryApiVersionConfiguration(object version) {}
-    void AddAndConfigureSwagger(object configuration, string path, bool enabled) {}
-    void AddOptions() {}
-    void AddLogging() {}
-    void AddMediatR(MediatRConfigure configure) {}
-    void AddValidatorsFromAssemblyContaining<T>() {}
-    void AddDbContext<T>(DbContextOptionsConfigure configure) {}
-    void AddDbContextPool<T>(object configure) {}
-    void AddLocalization(LocalizationConfigure configure) {}
-    void AddCors() {}
-    void AddCors(CorsConfigure configure) {}
-    void AddAutoMapper(AutoMapperConfigure marker) {}
-    void AddAutoMapper(MapperConfigurationExpression marker) {}
-    void AddRepositories() {}
-    void AddDataServices() {}
-    MvcBuilder AddMvc(MvcOptionsConfigure configure) {
+    public void Configure(object configure) {}
+    public void AddApiVersioning(object configure) {}
+    public void AddVersionedApiExplorer(object configure) {}
+    public void AddSwaggerGen(SwaggerGenConfigure configure) {}
+    public void AddMemoryCache() {}
+    public void AddHttpContextAccessor() {}
+    public void AddEndpointsApiExplorer() {}
+    public void AddLibraryApiVersionConfiguration(object version) {}
+    public void AddAndConfigureSwagger(object configuration, string path, bool enabled) {}
+    public void AddOptions() {}
+    public void AddLogging() {}
+    public void AddMediatR(MediatRConfigure configure) {}
+    public void AddValidatorsFromAssemblyContaining<T>() {}
+    public void AddDbContext<T>(DbContextOptionsConfigure configure) {}
+    public void AddDbContextPool<T>(object configure) {}
+    public void AddLocalization(LocalizationConfigure configure) {}
+    public void AddCors() {}
+    public void AddCors(CorsConfigure configure) {}
+    public void AddAutoMapper(AutoMapperConfigure marker) {}
+    public void AddAutoMapper(MapperConfigurationExpression marker) {}
+    public void AddRepositories() {}
+    public void AddDataServices() {}
+    public MvcBuilder AddMvc(MvcOptionsConfigure configure) {
         return new MvcBuilder();
     }
-    MvcBuilder AddControllers(object configure) {
+    public MvcBuilder AddControllers(object configure) {
         return new MvcBuilder();
     }
-    AuthenticationBuilder AddAuthentication() {
+    public AuthenticationBuilder AddAuthentication() {
         return new AuthenticationBuilder();
     }
-    AuthenticationBuilder AddAuthentication(string scheme) {
+    public AuthenticationBuilder AddAuthentication(string scheme) {
         return new AuthenticationBuilder();
     }
 
-    ServiceProvider BuildServiceProvider() {
+    public ServiceProvider BuildServiceProvider() {
         return new ServiceProvider {
             NamedKey = this.NamedKey,
             NamedValue = this.NamedValue,
@@ -265,7 +265,55 @@ public class ServiceCollection : IServiceCollection {
         this.NamedValue = "";
     }
 
-    void AddSwaggerGen(SwaggerGenConfigure configure) {}
+    public void AddSingleton<T>(T value) {}
+    public void AddSingleton(string key, string value) {
+        this.NamedKey = key;
+        this.NamedValue = value;
+    }
+    public void AddTransient<TService, TImplementation>() {}
+    public void AddTransient(object serviceType, object implementationType) {}
+    public void AddScoped(object serviceType, object implementationType) {}
+    public void AddScoped<TService, TImplementation>() {}
+    public void Configure(object configure) {}
+    public void AddApiVersioning(object configure) {}
+    public void AddVersionedApiExplorer(object configure) {}
+    public void AddSwaggerGen(SwaggerGenConfigure configure) {}
+    public void AddMemoryCache() {}
+    public void AddHttpContextAccessor() {}
+    public void AddEndpointsApiExplorer() {}
+    public void AddLibraryApiVersionConfiguration(object version) {}
+    public void AddAndConfigureSwagger(object configuration, string path, bool enabled) {}
+    public void AddOptions() {}
+    public void AddLogging() {}
+    public void AddMediatR(MediatRConfigure configure) {}
+    public void AddValidatorsFromAssemblyContaining<T>() {}
+    public void AddDbContext<T>(DbContextOptionsConfigure configure) {}
+    public void AddDbContextPool<T>(object configure) {}
+    public void AddLocalization(LocalizationConfigure configure) {}
+    public void AddCors() {}
+    public void AddCors(CorsConfigure configure) {}
+    public void AddAutoMapper(AutoMapperConfigure marker) {}
+    public void AddAutoMapper(MapperConfigurationExpression marker) {}
+    public void AddRepositories() {}
+    public void AddDataServices() {}
+    public MvcBuilder AddMvc(MvcOptionsConfigure configure) {
+        return new MvcBuilder();
+    }
+    public MvcBuilder AddControllers(object configure) {
+        return new MvcBuilder();
+    }
+    public AuthenticationBuilder AddAuthentication() {
+        return new AuthenticationBuilder();
+    }
+    public AuthenticationBuilder AddAuthentication(string scheme) {
+        return new AuthenticationBuilder();
+    }
+    public ServiceProvider BuildServiceProvider() {
+        return new ServiceProvider {
+            NamedKey = this.NamedKey,
+            NamedValue = this.NamedValue,
+        };
+    }
 }
 
 native "/*

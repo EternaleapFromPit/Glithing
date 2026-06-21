@@ -1,4 +1,5 @@
 use super::*;
+use crate::ast::ParamModifier;
 
 #[test]
 fn compiles_aspnet_endpoint_handler_function_pointer() {
@@ -468,6 +469,104 @@ fn resolves_instance_methods_before_extension_methods() {
 
     assert!(output.status.success());
     assert!(stdout.contains("100"));
+}
+
+#[test]
+fn resolves_extension_methods_through_base_receiver_types() {
+    let source = r#"
+            class IServiceCollection {}
+
+            class ServiceCollection : IServiceCollection {}
+
+            extension IServiceCollection {
+                int Marker(this IServiceCollection services) {
+                    return 7;
+                }
+            }
+
+            fn main() {
+                ServiceCollection services = new ServiceCollection();
+                int value = services.Marker();
+                print(value);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("extension methods should resolve through base/interface receiver types");
+
+    assert!(llvm_ir.contains("Marker__g0__ext"));
+}
+
+#[test]
+fn resolves_csharp_style_static_extension_methods() {
+    let source = r#"
+            class IServiceCollection {}
+
+            class ServiceCollection : IServiceCollection {}
+
+            class Extensions {
+                public static int Marker(this IServiceCollection services) {
+                    return 9;
+                }
+            }
+
+            fn main() {
+                ServiceCollection services = new ServiceCollection();
+                int value = services.Marker();
+                print(value);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("C#-style static extension methods should lower through the receiver type");
+
+    assert!(llvm_ir.contains("Marker__g0__ext"));
+}
+
+#[test]
+fn resolves_static_extension_methods_against_loaded_service_collection_types() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+
+            class Extensions {
+                public static void AddMarker(this IServiceCollection services) {}
+            }
+
+            fn main() {
+                IServiceCollection iface = new ServiceCollection();
+                iface.AddMarker();
+                ServiceCollection services = new ServiceCollection();
+                services.AddMarker();
+            }
+        "#;
+
+    let linked = link_package_sources(source).expect("package linking should succeed");
+    let tokens = Lexer::new(&linked).tokenize().expect("tokenization should succeed");
+    let program = Parser::new(tokens).parse_program().expect("parse should succeed");
+    let extension_method = program
+        .types
+        .iter()
+        .find(|ty| ty.name == "Extensions")
+        .and_then(|ty| ty.methods.iter().find(|method| method.name == "AddMarker"))
+        .expect("Extensions.AddMarker should parse");
+    assert!(extension_method.is_static);
+    assert!(extension_method.is_extension, "{extension_method:?}");
+    assert_eq!(
+        extension_method.params.first().map(|param| param.modifier),
+        Some(ParamModifier::This)
+    );
+    let typed = TypedProgram::lower(&program, None).expect("typed lowering should succeed");
+    let summary = typed.ownership_summary();
+    let output = compile_source_with_options(source, true, false)
+        .expect("static extension methods over loaded ServiceCollection types should compile");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(summary.contains("tir call method AddMarker"), "{summary}");
+    assert!(
+        summary.contains("AddMarker__g0__ext") || summary.contains("Marker__g0__ext"),
+        "{summary}"
+    );
+    assert!(!diagnostics.contains("member 'AddMarker'"), "{diagnostics}\n\n{summary}");
 }
 
 #[test]

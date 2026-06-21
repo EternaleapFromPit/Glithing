@@ -286,7 +286,7 @@ impl Parser {
                 continue;
             }
             if self.at(&TokenKind::Fn) {
-                methods.push(self.parse_function(
+                let mut method = self.parse_function(
                     package_id.clone(),
                     member_modifiers.visibility.unwrap_or_else(|| {
                         default_visibility_for_package(package_id.as_ref())
@@ -296,7 +296,16 @@ impl Parser {
                     member_modifiers.is_async,
                     member_modifiers.is_extern,
                     member_modifiers.is_static,
-                )?);
+                )?;
+                if method.is_static
+                    && method
+                        .params
+                        .first()
+                        .is_some_and(|param| param.modifier == ParamModifier::This)
+                {
+                    method.is_extension = true;
+                }
+                methods.push(method);
                 continue;
             }
             let ty = self
@@ -317,7 +326,7 @@ impl Parser {
                 } else {
                     self.parse_stmt_body()?
                 };
-                methods.push(Function {
+                let mut method = Function {
                     package_id: package_id.clone(),
                     visibility: member_modifiers.visibility.unwrap_or_else(|| {
                         default_visibility_for_package(package_id.as_ref())
@@ -333,7 +342,16 @@ impl Parser {
                     params,
                     return_type: ty,
                     body,
-                });
+                };
+                if method.is_static
+                    && method
+                        .params
+                        .first()
+                        .is_some_and(|param| param.modifier == ParamModifier::This)
+                {
+                    method.is_extension = true;
+                }
+                methods.push(method);
             } else if self.match_kind(&TokenKind::Arrow) {
                 let expr = self.parse_expr()?;
                 self.expect(TokenKind::Semi)?;

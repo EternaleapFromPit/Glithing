@@ -2,19 +2,19 @@ package Microsoft.AspNetCore.Authentication.JwtBearer;
 
 using Microsoft.IdentityModel.Tokens;
 
-class JwtBearerDefaults {
-    static string AuthenticationScheme {
+public class JwtBearerDefaults {
+    public static string AuthenticationScheme {
         get {
             return "Bearer";
         }
     }
 }
 
-class JwtBearerOptions {
+public class JwtBearerOptions {
     public TokenValidationParameters TokenValidationParameters;
     public JwtBearerEvents Events;
 }
 
-class JwtBearerEvents {
+public class JwtBearerEvents {
     public object OnMessageReceived;
 }

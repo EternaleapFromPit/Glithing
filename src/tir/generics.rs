@@ -331,6 +331,20 @@ pub(super) fn ir_conversion_rank(expected: &IrType, arg: &TypedExpr, env: &TypeE
             }
             if matches!(
                 (expected_return.as_ref(), actual_return.as_ref()),
+                (IrType::Void, IrType::Unknown(actual)) if actual == "null"
+            ) {
+                // Statement-bodied lambdas are still parsed through a placeholder
+                // expression path, so treat that placeholder as compatible with
+                // Action-style / void delegates during overload resolution.
+                return Some(0);
+            }
+            if matches!(expected_return.as_ref(), IrType::Void)
+                && lambda_body_is_void_compatible(arg)
+            {
+                return Some(0);
+            }
+            if matches!(
+                (expected_return.as_ref(), actual_return.as_ref()),
                 (IrType::Enumerable(expected_inner), IrType::List(actual_inner))
                     if expected_inner.as_ref() == actual_inner.as_ref()
             ) {
@@ -371,6 +385,21 @@ pub(super) fn ir_conversion_rank(expected: &IrType, arg: &TypedExpr, env: &TypeE
         }
         (_, IrType::Unknown(_)) | (IrType::Unknown(_), _) => Some(100),
         _ => None,
+    }
+}
+
+fn lambda_body_is_void_compatible(arg: &TypedExpr) -> bool {
+    match &arg.kind {
+        TypedExprKind::Lambda { body, .. } => matches!(
+            body.kind,
+            TypedExprKind::Assign { .. }
+                | TypedExprKind::Call(_)
+                | TypedExprKind::IncDec { .. }
+                | TypedExprKind::Await(_)
+                | TypedExprKind::NewObject { .. }
+                | TypedExprKind::Null
+        ),
+        _ => false,
     }
 }
 
