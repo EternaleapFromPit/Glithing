@@ -13,6 +13,7 @@ pub(crate) struct ProjectSpec {
     pub(crate) project_dir: PathBuf,
     pub(crate) assembly_name: Option<String>,
     pub(crate) output_type: Option<String>,
+    #[allow(dead_code)]
     pub(crate) target_framework: Option<String>,
     pub(crate) root_namespace: Option<String>,
     pub(crate) startup_object: Option<String>,
@@ -56,19 +57,6 @@ impl ProjectSpec {
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
-        if let Some(target_framework) = &self.target_framework {
-            let normalized = target_framework.trim();
-            if !normalized.is_empty()
-                && !normalized.eq_ignore_ascii_case("gl1.0")
-                && !normalized.to_ascii_lowercase().starts_with("gl")
-            {
-                return Err(format!(
-                    "unsupported TargetFramework '{}' in {}; Glitching currently expects a 'gl*' target",
-                    normalized,
-                    self.path.display()
-                ));
-            }
-        }
         Ok(())
     }
 

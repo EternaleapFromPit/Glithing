@@ -146,6 +146,9 @@ The current boundary is:
 - Singleton DI resolution now has a real reuse slice on the native LLVM path: `AddSingleton<T>(value)` reuses the same registered instance on repeated `GetRequiredService<T>()` calls when the singleton source is a stable local/field expression, and there is native regression coverage for identity-preserving lookup.
 - Singleton DI resolution now also accepts temporary constructor/object-initializer sources on the native LLVM path by hoisting them into hidden function-entry locals for deterministic reuse, and `WebApplicationBuilder.Build()` now propagates the builder's tracked service registrations into direct `app.Services.GetRequiredService<T>()` lookups.
 - The blocking async gate now accepts `await` inside `switch` bodies and keeps the existing borrowed/view-across-suspension rejection in place.
+- `.csproj` parsing no longer rejects ordinary `.NET` `TargetFramework` values like `net7.0`; Glitching now treats that metadata as informational instead of requiring a synthetic `gl*` target.
+- ASP.NET controller discovery no longer depends on `[ApiController]` alone: route-attributed MVC controllers and `Controller` / `ControllerBase`-derived classes now reach endpoint collection and route lowering on the LLVM path.
+- The native endpoint binder now handles nullable query primitives (`bool?`, `int?`, `long?`) and treats `CancellationToken` as a default request-scoped token handle on the current controller/runtime slice, with both LLVM and native regression coverage.
 
 ## Next work items
 
@@ -195,7 +198,7 @@ These standard sections depend on raw memory access or GC-style runtime behavior
 
 The next safe expansion path is to continue implementing the language and framework slices listed above, while keeping the unsafe/GC-dependent sections as explicit diagnostics or limited compatibility shims instead of silent lowering.
 
-The current RealWorld blocker is narrower now: the LLVM compile gate is green, so the next acceptance step is native entrypoint synthesis and smoke execution rather than more package import surgery.
+The current RealWorld blocker is narrower now: the LLVM compile gate is green and controller routes are discovered, but native startup/serving still stops before a successful smoke response because broader host/runtime and package-backed framework behavior remains incomplete.
 
 The nullable value-type and boxing/unboxing slice is currently implemented for the supported subset and covered by tests; further widening will be incremental rather than foundational.
 

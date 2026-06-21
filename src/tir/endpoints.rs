@@ -497,11 +497,36 @@ pub(super) fn controller_metadata_type<'a>(
     ty: &'a TypeDef,
     types: &HashMap<&str, &'a TypeDef>,
 ) -> Option<&'a TypeDef> {
-    if has_attribute(&ty.attributes, "ApiController") {
+    if has_attribute(&ty.attributes, "ApiController")
+        || has_attribute(&ty.attributes, "Route")
+        || has_http_annotated_method(ty)
+        || derives_from_controller_runtime_base(ty, types)
+    {
         return Some(ty);
     }
     ty.bases.iter().find_map(|base| {
         controller_base_type(base, types).and_then(|base| controller_metadata_type(base, types))
+    })
+}
+
+fn has_http_annotated_method(ty: &TypeDef) -> bool {
+    ty.methods
+        .iter()
+        .any(|method| http_method_attribute(&method.attributes).is_some())
+}
+
+fn derives_from_controller_runtime_base(
+    ty: &TypeDef,
+    types: &HashMap<&str, &TypeDef>,
+) -> bool {
+    ty.bases.iter().any(|base| {
+        let short = base.rsplit('.').next().unwrap_or(base);
+        if matches!(short, "Controller" | "ControllerBase") {
+            return true;
+        }
+        controller_base_type(base, types)
+            .map(|resolved| derives_from_controller_runtime_base(resolved, types))
+            .unwrap_or(false)
     })
 }
 

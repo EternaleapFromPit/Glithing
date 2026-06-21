@@ -429,6 +429,21 @@ impl LlvmEmitter {
                     ));
                     args.push(format!("i1 {value}"));
                 }
+                (EndpointParameterSource::Query, IrType::Nullable(inner)) => {
+                    let value = self.emit_endpoint_nullable_query_argument(
+                        index,
+                        &param.name,
+                        inner,
+                        path,
+                    )?;
+                    args.push(format!("ptr {value}"));
+                    objects_to_release.push((Self::nullable_type_name(inner), value));
+                }
+                (EndpointParameterSource::Query, IrType::Struct(type_name))
+                    if is_cancellation_token_type_name(type_name) =>
+                {
+                    args.push("ptr null".to_string());
+                }
                 _ => {
                     return Err(format!(
                         "LLVM TIR backend: unsupported endpoint parameter {param:?}"
@@ -472,8 +487,86 @@ impl LlvmEmitter {
                 EndpointParameterSource::Query,
                 IrType::Bool | IrType::Int | IrType::Long | IrType::String,
             ) => true,
+            (EndpointParameterSource::Query, IrType::Nullable(inner)) => {
+                matches!(inner.as_ref(), IrType::Bool | IrType::Int | IrType::Long)
+            }
+            (EndpointParameterSource::Query, IrType::Struct(type_name))
+                if is_cancellation_token_type_name(type_name) =>
+            {
+                true
+            }
             _ => false,
         }
+    }
+
+    fn emit_endpoint_nullable_query_argument(
+        &mut self,
+        index: usize,
+        param_name: &str,
+        inner: &IrType,
+        path: &str,
+    ) -> Result<String, String> {
+        let nullable_name = self.ensure_nullable_object_type(inner);
+        let llvm_name = llvm_object_name(&nullable_name);
+        let prefix = format!("action_arg_{index}_nullable");
+        let size_ptr = format!("%{prefix}_size_ptr");
+        let size = format!("%{prefix}_size");
+        let value = format!("%{prefix}");
+        let text = format!("%{prefix}_text");
+        let key = self.string_global(param_name);
+        let key_length = param_name.len();
+        let empty = self.string_global("");
+        let missing_cmp = format!("%{prefix}_missing_cmp");
+        let missing = format!("%{prefix}_missing");
+        let missing_label = self.next_label(&format!("{prefix}_missing"));
+        let present_label = self.next_label(&format!("{prefix}_present"));
+        let done_label = self.next_label(&format!("{prefix}_done"));
+        let present_value = format!("%{prefix}_present_value");
+        self.body.push_str(&format!(
+            "  {text} = call ptr @glitch_query_value_string(ptr {path}, ptr {key}, i64 {key_length})\n  {missing_cmp} = call i32 @strcmp(ptr {text}, ptr {empty})\n  {missing} = icmp eq i32 {missing_cmp}, 0\n  br i1 {missing}, label %{missing_label}, label %{present_label}\n{missing_label}:\n  call void @glitch_string_release(ptr {text})\n  br label %{done_label}\n{present_label}:\n  {size_ptr} = getelementptr %{llvm_name}, ptr null, i32 1\n  {size} = ptrtoint ptr {size_ptr} to i64\n  {present_value} = call ptr @glitch_calloc(i64 1, i64 {size})\n",
+        ));
+        let rc_ptr = format!("%{prefix}_rc_ptr");
+        let has_value_ptr = format!("%{prefix}_has_value_ptr");
+        let value_ptr = format!("%{prefix}_value_ptr");
+        self.body.push_str(&format!(
+            "  {rc_ptr} = getelementptr inbounds %{llvm_name}, ptr {present_value}, i32 0, i32 0\n  store i64 1, ptr {rc_ptr}\n  {has_value_ptr} = getelementptr inbounds %{llvm_name}, ptr {present_value}, i32 0, i32 2\n  store i1 true, ptr {has_value_ptr}\n  {value_ptr} = getelementptr inbounds %{llvm_name}, ptr {present_value}, i32 0, i32 3\n",
+        ));
+        match inner {
+            IrType::Bool => {
+                let true_text = self.string_global("true");
+                let one_text = self.string_global("1");
+                let true_cmp = format!("%{prefix}_true_cmp");
+                let one_cmp = format!("%{prefix}_one_cmp");
+                let is_true = format!("%{prefix}_is_true");
+                let is_one = format!("%{prefix}_is_one");
+                let raw = format!("%{prefix}_raw");
+                self.body.push_str(&format!(
+                    "  {true_cmp} = call i32 @strcmp(ptr {text}, ptr {true_text})\n  {one_cmp} = call i32 @strcmp(ptr {text}, ptr {one_text})\n  {is_true} = icmp eq i32 {true_cmp}, 0\n  {is_one} = icmp eq i32 {one_cmp}, 0\n  {raw} = or i1 {is_true}, {is_one}\n  store i1 {raw}, ptr {value_ptr}\n"
+                ));
+            }
+            IrType::Int => {
+                let raw = format!("%{prefix}_raw");
+                let cast = format!("%{prefix}_cast");
+                self.body.push_str(&format!(
+                    "  {raw} = call i64 @strtoll(ptr {text}, ptr null, i32 10)\n  {cast} = trunc i64 {raw} to i32\n  store i32 {cast}, ptr {value_ptr}\n"
+                ));
+            }
+            IrType::Long => {
+                let raw = format!("%{prefix}_raw");
+                self.body.push_str(&format!(
+                    "  {raw} = call i64 @strtoll(ptr {text}, ptr null, i32 10)\n  store i64 {raw}, ptr {value_ptr}\n"
+                ));
+            }
+            other => {
+                return Err(format!(
+                    "LLVM TIR backend: unsupported nullable query parameter type {other:?}"
+                ));
+            }
+        }
+        self.body.push_str(&format!(
+            "  call void @glitch_string_release(ptr {text})\n  br label %{done_label}\n{done_label}:\n  {value} = phi ptr [null, %{missing_label}], [{present_value}, %{present_label}]\n"
+        ));
+        Ok(value)
     }
 
     pub(super) fn endpoint_return_supported(&self, ty: &IrType) -> bool {
@@ -1220,6 +1313,13 @@ impl LlvmEmitter {
         self.emit_temporary_drop(source, &source_value);
         Ok(mapped)
     }
+}
+
+fn is_cancellation_token_type_name(type_name: &str) -> bool {
+    matches!(
+        base_type_name(type_name),
+        "CancellationToken"
+    )
 }
 
 fn request_type_matches(object_name: &str, request_name: &str) -> bool {

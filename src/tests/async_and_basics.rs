@@ -725,6 +725,86 @@ fn runs_async_aspnet_route_natively() {
 }
 
 #[test]
+fn runs_checked_in_aspnet_socket_smoke_example_natively() {
+    let port = free_tcp_port();
+    let source = include_str!("../../examples/aspnet_socket_smoke.gl")
+        .replace("app.RunOnce(5099);", &format!("app.RunOnce({port});"));
+
+    let output_exe = emit_native_executable_from_source("aspnet-socket-smoke-example", &source);
+    let child = Command::new(&output_exe)
+        .env("GLITCH_MAX_REQUESTS", "2")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("checked-in ASP.NET socket smoke example should start");
+
+    wait_for_port(port);
+    let response = http_get(port, "/health");
+    let output = child
+        .wait_with_output()
+        .expect("checked-in ASP.NET socket smoke example should exit cleanly");
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nresponse={}\nstdout={}\nstderr={}",
+        output.status.code(),
+        response,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert!(response.contains("{\"status\":\"ok\"}"));
+}
+
+#[test]
+fn runs_nullable_query_and_cancellation_token_controller_natively() {
+    let port = free_tcp_port();
+    let source = format!(
+        r#"
+            using Glitching.AspNetCore;
+            using System.Threading;
+
+            [Route("articles")]
+            class ArticlesController : Controller {{
+                [HttpGet]
+                string Get([FromQuery] int? limit, CancellationToken cancellationToken) {{
+                    if (limit.HasValue) {{
+                        return "limited";
+                    }}
+                    return "all";
+                }}
+            }}
+
+            fn main() {{
+                WebApplication app = new WebApplication();
+                app.RunOnce({port});
+            }}
+        "#
+    );
+
+    let exe = emit_native_executable_from_source("nullable-query-controller", &source);
+    let child = Command::new(&exe)
+        .env("GLITCH_MAX_REQUESTS", "2")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("nullable-query host should start");
+
+    wait_for_port(port);
+    let response = http_get(port, "/articles?limit=2");
+    let output = child
+        .wait_with_output()
+        .expect("nullable-query host should exit cleanly");
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(response.contains("HTTP/1.1 200 OK"), "response:\n{response}");
+    assert!(response.contains("limited"), "response:\n{response}");
+}
+
+#[test]
 fn runs_async_controller_route_with_di_via_app_handle_natively() {
     let source = r#"
             using System.Threading.Tasks;

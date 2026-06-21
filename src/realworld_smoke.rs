@@ -45,9 +45,9 @@ pub fn run() -> Result<(), String> {
 
     let child = wait_for_port_ready(child, port, Duration::from_secs(20))?;
 
-    let articles = http_get(port, "/api/articles")?;
+    let articles = http_get(port, "/articles")?;
     if !articles.starts_with("HTTP/1.1 200") {
-        return fail_with_response("GET /api/articles", articles, child);
+        return fail_with_response("GET /articles", articles, child);
     }
 
     let swagger = http_get(port, "/swagger/v1/swagger.json")?;

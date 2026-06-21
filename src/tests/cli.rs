@@ -241,6 +241,28 @@ fn gl_build_uses_csproj_assembly_name_for_output() {
 }
 
 #[test]
+fn gl_build_accepts_standard_dotnet_targetframework_metadata() {
+    let cwd = temp_cli_dir("net-targetframework");
+    let project_dir = cwd.join("DemoApp");
+    fs::create_dir_all(&project_dir).expect("project dir should be created");
+    fs::write(
+        project_dir.join("DemoApp.csproj"),
+        "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>net7.0</TargetFramework>\n    <AssemblyName>CustomHost</AssemblyName>\n  </PropertyGroup>\n</Project>\n",
+    )
+    .expect("project file should be written");
+    fs::write(
+        project_dir.join("Program.cs"),
+        "fn main() {\n    print(\"ok\");\n}\n",
+    )
+    .expect("program file should be written");
+
+    run_cli_with_args_from(vec!["build".to_string()], &project_dir)
+        .expect("gl build should tolerate standard .NET TargetFramework metadata");
+
+    assert!(project_dir.join("bin").join("Debug").join("CustomHost.exe").exists());
+}
+
+#[test]
 fn gl_build_library_project_emits_bitcode_and_run_rejects_it() {
     let cwd = temp_cli_dir("library-build");
     run_cli_with_args_from(

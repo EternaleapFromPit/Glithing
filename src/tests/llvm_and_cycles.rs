@@ -455,6 +455,62 @@ fn emits_task_aware_compatibility_hint_for_missing_async_member() {
 }
 
 #[test]
+fn lowers_controller_routes_without_apicontroller_attribute() {
+    let source = r#"
+            using Glitching.AspNetCore;
+
+            [Route("articles")]
+            class ArticlesController : Controller {
+                [HttpGet]
+                string Get() {
+                    return "{\"status\":\"ready\"}";
+                }
+            }
+
+            fn main() {
+                WebApplication app = new WebApplication();
+                app.RunOnce(5105);
+            }
+        "#;
+
+    let llvm =
+        compile_llvm_ir(source).expect("route-attributed MVC controller should lower");
+    assert!(llvm.contains("define ptr @glitch_endpoint_handler_0(ptr %app, ptr %path, ptr %body)"));
+    assert!(llvm.contains("c\"/articles\\00\""));
+}
+
+#[test]
+fn lowers_nullable_query_and_cancellation_token_controller_parameters() {
+    let source = r#"
+            using Glitching.AspNetCore;
+            using System.Threading;
+
+            [Route("articles")]
+            class ArticlesController : Controller {
+                [HttpGet]
+                string Get([FromQuery] int? limit, CancellationToken cancellationToken) {
+                    if (limit.HasValue) {
+                        return "limited";
+                    }
+                    return "all";
+                }
+            }
+
+            fn main() {
+                WebApplication app = new WebApplication();
+                app.RunOnce(5106);
+            }
+        "#;
+
+    let llvm =
+        compile_llvm_ir(source).expect("nullable query and cancellation token parameters should lower");
+    assert!(llvm.contains("glitch_query_value_string"));
+    assert!(llvm.contains("strtoll"));
+    assert!(llvm.contains("Nullable_int"));
+    assert!(llvm.contains("CancellationToken"));
+}
+
+#[test]
 fn warns_for_configuration_manager_stub_members() {
     let source = r#"
             using Glitching.AspNetCore;
