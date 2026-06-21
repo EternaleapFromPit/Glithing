@@ -207,6 +207,7 @@ public class IServiceCollection {
 
     public void AddSingleton<T>(T value) {
     }
+    public void AddSingleton<TService, TImplementation>() {}
     public void AddSingleton(string key, string value) {
         this.NamedKey = key;
         this.NamedValue = value;
@@ -217,6 +218,7 @@ public class IServiceCollection {
     public void AddScoped<TService, TImplementation>() {}
 
     public void Configure(object configure) {}
+    public void Configure<T>(object configure) {}
     public void AddApiVersioning(object configure) {}
     public void AddVersionedApiExplorer(object configure) {}
     public void AddSwaggerGen(SwaggerGenConfigure configure) {}
@@ -266,6 +268,7 @@ public class ServiceCollection : IServiceCollection {
     }
 
     public void AddSingleton<T>(T value) {}
+    public void AddSingleton<TService, TImplementation>() {}
     public void AddSingleton(string key, string value) {
         this.NamedKey = key;
         this.NamedValue = value;
@@ -275,6 +278,7 @@ public class ServiceCollection : IServiceCollection {
     public void AddScoped(object serviceType, object implementationType) {}
     public void AddScoped<TService, TImplementation>() {}
     public void Configure(object configure) {}
+    public void Configure<T>(object configure) {}
     public void AddApiVersioning(object configure) {}
     public void AddVersionedApiExplorer(object configure) {}
     public void AddSwaggerGen(SwaggerGenConfigure configure) {}

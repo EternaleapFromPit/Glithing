@@ -186,7 +186,7 @@ impl<'a> EndpointHandlerCollector<'a> {
 
     fn collect_expr(&mut self, expr: &Expr) -> Result<(), String> {
         match expr {
-            Expr::MethodCall { target, name, args } => {
+            Expr::MethodCall { target, name, args, .. } => {
                 self.collect_endpoint_handler(target, name, args)?;
                 self.collect_expr(target)?;
                 for arg in args {
@@ -323,15 +323,26 @@ impl<'a> EndpointHandlerCollector<'a> {
                 }
                 _ => IrType::Struct(type_name.clone()),
             },
-            Expr::FunctionCall { name, args } => self
+            Expr::FunctionCall { name, args, generic_args } => self
                 .env
-                .resolve_function(
+                .resolve_function_call_with_generic_args(
                     name,
                     &args
                         .iter()
-                        .map(|arg| self.expr_type(arg))
+                        .map(|arg| TypedExpr {
+                            kind: TypedExprKind::Var("<endpoint>".to_string()),
+                            ty: self.expr_type(arg),
+                            ownership: Ownership::Copy,
+                            drop_kind: DropKind::None,
+                        })
+                        .collect::<Vec<_>>(),
+                    &generic_args
+                        .iter()
+                        .map(|arg| type_syntax_to_ir(arg, &self.env))
                         .collect::<Vec<_>>(),
                 )
+                .ok()
+                .flatten()
                 .map(|signature| signature.return_type.clone())
                 .unwrap_or_else(|| IrType::Unknown(name.clone())),
             Expr::String(_) => IrType::String,

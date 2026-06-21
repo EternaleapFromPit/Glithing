@@ -890,12 +890,25 @@ impl OwnershipChecker {
                     is_move: false,
                 }
             }
-            Expr::MethodCall { target, name, args } => {
+            Expr::MethodCall { target, name, generic_args, args } => {
                 let target = Self::check_expr(target, env, state)?;
                 let args = args
                     .iter()
                     .map(|arg| Self::check_expr(arg, env, state))
                     .collect::<Result<Vec<_>, _>>()?;
+                let explicit_generic_args = generic_args
+                    .iter()
+                    .map(|arg| type_syntax_to_ir(arg, env))
+                    .collect::<Vec<_>>();
+                let typed_args = args
+                    .iter()
+                    .map(|arg| TypedExpr {
+                        kind: TypedExprKind::Var("<checked>".to_string()),
+                        ty: arg.ty.clone(),
+                        ownership: arg.ownership.clone(),
+                        drop_kind: drop_kind_for_type(&arg.ty, &arg.ownership),
+                    })
+                    .collect::<Vec<_>>();
                 let ty = match (&target.ty, name.as_str()) {
                     (IrType::Class(type_name), "MapGet" | "MapPost")
                         if type_name == "WebApplication" =>
@@ -916,18 +929,33 @@ impl OwnershipChecker {
                     }
                     _ => IrType::Unknown(name.clone()),
                 };
-                let ownership = if target.ty == IrType::Exception && matches!(name.as_str(), "Message")
-                {
-                    Ownership::Borrowed
-                } else if let IrType::Class(type_name)
+                let resolved_signature = if let IrType::Class(type_name)
                 | IrType::Struct(type_name)
                 | IrType::Interface(type_name) = &target.ty
                 {
-                    env.resolve_method(type_name, name, &args.iter().map(|arg| arg.ty.clone()).collect::<Vec<_>>())
+                    env.resolve_method_call_with_generic_args(
+                        type_name,
+                        name,
+                        &typed_args,
+                        &explicit_generic_args,
+                    )
+                    .ok()
+                    .flatten()
+                } else {
+                    None
+                };
+                let ty = resolved_signature
+                    .as_ref()
+                    .map(|signature| signature.return_type.clone())
+                    .unwrap_or(ty);
+                let ownership = if target.ty == IrType::Exception && matches!(name.as_str(), "Message")
+                {
+                    Ownership::Borrowed
+                } else {
+                    resolved_signature
+                        .as_ref()
                         .map(|signature| signature.return_ownership.clone())
                         .unwrap_or_else(|| ownership_for_type(&ty))
-                } else {
-                    ownership_for_type(&ty)
                 };
                 CheckedExpr {
                     ownership,
@@ -936,7 +964,7 @@ impl OwnershipChecker {
                     is_move: false,
                 }
             }
-            Expr::FunctionCall { name, args } => {
+            Expr::FunctionCall { name, generic_args, args } => {
                 if name == "sizeof" {
                     return Ok(CheckedExpr {
                         ownership: Ownership::Copy,
@@ -949,29 +977,35 @@ impl OwnershipChecker {
                 .iter()
                 .map(|arg| Self::check_expr(arg, env, state))
                 .collect::<Result<Vec<_>, _>>()?;
+            let explicit_generic_args = generic_args
+                .iter()
+                .map(|arg| type_syntax_to_ir(arg, env))
+                .collect::<Vec<_>>();
+            let typed_args = checked_args
+                .iter()
+                .map(|arg| TypedExpr {
+                    kind: TypedExprKind::Var("<checked>".to_string()),
+                    ty: arg.ty.clone(),
+                    ownership: arg.ownership.clone(),
+                    drop_kind: drop_kind_for_type(&arg.ty, &arg.ownership),
+                })
+                .collect::<Vec<_>>();
             let signature = env
-                .resolve_function(
-                name,
-                checked_args
-                    .iter()
-                    .map(|arg| arg.ty.clone())
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            )
-                .cloned()
+                .resolve_function_call_with_generic_args(name, &typed_args, &explicit_generic_args)
+                .ok()
+                .flatten()
                 .or_else(|| {
                     current_enclosing_type_from_state(state).and_then(|current_type| {
-                        env.resolve_method(
+                        env.resolve_method_call_with_generic_args(
                             &current_type,
                             name,
-                            &checked_args
-                                .iter()
-                                .map(|arg| arg.ty.clone())
-                                .collect::<Vec<_>>(),
+                            &typed_args,
+                            &explicit_generic_args,
                         )
+                        .ok()
+                        .flatten()
                     })
-                })
-            ;
+                });
             let (ty, ownership) = signature
                 .map(|signature| {
                     (
@@ -999,6 +1033,7 @@ impl OwnershipChecker {
                     let expr = Self::check_expr(&field.expr, env, state)?;
                     let target_info = env
                         .resolve_field(type_name, &field.name)
+                        .or_else(|| env.resolve_field(base_type_name(type_name), &field.name))
                         .unwrap_or_else(|| FieldSignature {
                             package_id: None,
                             visibility: Visibility::Public,

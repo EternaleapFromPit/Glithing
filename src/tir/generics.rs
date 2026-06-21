@@ -193,6 +193,7 @@ pub(super) fn substitute_function_signature(
         package_id: signature.package_id.clone(),
         visibility: signature.visibility,
         generic_params: signature.generic_params.clone(),
+        generic_constraints: signature.generic_constraints.clone(),
         params: signature
             .params
             .iter()
@@ -209,6 +210,138 @@ pub(super) fn substitute_function_signature(
         symbol: signature.symbol.clone(),
         is_static: signature.is_static,
     }
+}
+
+pub(super) fn explicit_generic_subst(
+    signature: &FunctionSignature,
+    generic_args: &[IrType],
+) -> Result<HashMap<String, IrType>, String> {
+    if signature.generic_params.len() != generic_args.len() {
+        return Err(format!(
+            "generic method expects {} type argument(s), found {}",
+            signature.generic_params.len(),
+            generic_args.len()
+        ));
+    }
+    let mut subst = HashMap::new();
+    for (name, arg) in signature
+        .generic_params
+        .iter()
+        .cloned()
+        .zip(generic_args.iter().cloned())
+    {
+        subst.insert(name, arg);
+    }
+    Ok(subst)
+}
+
+pub(super) fn specialize_signature_with_explicit_generic_args(
+    signature: &FunctionSignature,
+    generic_args: &[IrType],
+    env: &TypeEnv,
+    context: &str,
+) -> Result<FunctionSignature, String> {
+    let subst = explicit_generic_subst(signature, generic_args)?;
+    validate_explicit_generic_constraints(signature, generic_args, env, context)?;
+    let mut specialized = substitute_function_signature(signature, &subst);
+    specialized.generic_params.clear();
+    specialized.generic_constraints.clear();
+    Ok(specialized)
+}
+
+pub(super) fn validate_explicit_generic_constraints(
+    signature: &FunctionSignature,
+    generic_args: &[IrType],
+    env: &TypeEnv,
+    context: &str,
+) -> Result<(), String> {
+    if signature.generic_params.len() != generic_args.len() {
+        return Err(format!(
+            "{context} expects {} type argument(s), found {}",
+            signature.generic_params.len(),
+            generic_args.len()
+        ));
+    }
+    for ((param_name, constraints), actual) in signature
+        .generic_params
+        .iter()
+        .zip(signature.generic_constraints.iter())
+        .zip(generic_args.iter())
+    {
+        for constraint in constraints {
+            if explicit_generic_constraint_satisfied(actual, constraint, env) {
+                continue;
+            }
+            return Err(format!(
+                "{context} type argument '{}' does not satisfy constraint '{}' for '{}'",
+                render_monomorphized_ir_type(actual),
+                constraint,
+                param_name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn explicit_generic_constraint_satisfied(actual: &IrType, constraint: &str, env: &TypeEnv) -> bool {
+    match constraint {
+        "class" | "notnull" => !is_value_type_ir(actual) && !matches!(actual, IrType::Nullable(_)),
+        "struct" | "unmanaged" => is_value_type_ir(actual),
+        "new()" => has_parameterless_construction(actual, env),
+        other => matches_named_generic_constraint(actual, other, env),
+    }
+}
+
+fn has_parameterless_construction(actual: &IrType, env: &TypeEnv) -> bool {
+    if is_value_type_ir(actual) {
+        return true;
+    }
+    let Some(type_name) = named_ir_type(actual) else {
+        return false;
+    };
+    env.resolve_constructor(type_name, &[]).is_some()
+}
+
+fn matches_named_generic_constraint(actual: &IrType, constraint: &str, env: &TypeEnv) -> bool {
+    let Some(actual_name) = named_ir_type(actual) else {
+        return false;
+    };
+    let actual_base = base_type_name(actual_name);
+    let constraint_base = base_type_name(constraint);
+    actual_name == constraint
+        || actual_base == constraint
+        || actual_name == constraint_base
+        || actual_base == constraint_base
+        || derives_from(env, actual_name, constraint)
+        || derives_from(env, actual_name, constraint_base)
+        || derives_from(env, actual_base, constraint)
+        || derives_from(env, actual_base, constraint_base)
+}
+
+fn named_ir_type(actual: &IrType) -> Option<&str> {
+    match actual {
+        IrType::Class(name)
+        | IrType::Struct(name)
+        | IrType::Interface(name)
+        | IrType::Unknown(name) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn is_value_type_ir(actual: &IrType) -> bool {
+    matches!(
+        actual,
+        IrType::Bool
+            | IrType::Byte
+            | IrType::Short
+            | IrType::Int
+            | IrType::Long
+            | IrType::UInt
+            | IrType::Double
+            | IrType::Decimal
+            | IrType::Nullable(_)
+            | IrType::Struct(_)
+    )
 }
 
 pub(super) fn infer_generic_args_from_type(

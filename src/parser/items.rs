@@ -48,6 +48,7 @@ impl Parser {
                         let mut body = self.test_registrations.clone();
                         body.push(Stmt::Expr(Expr::FunctionCall {
                             name: "XUnit_RunAllTests".to_string(),
+                            generic_args: Vec::new(),
                             args: Vec::new(),
                         }));
                         body

@@ -107,6 +107,11 @@ pub(super) fn populate_method_signatures(program: &Program, env: &mut TypeEnv) {
                     .iter()
                     .map(|param| param.name.clone())
                     .collect(),
+                generic_constraints: method
+                    .generic_params
+                    .iter()
+                    .map(|param| param.constraints.clone())
+                    .collect(),
                 params,
                 param_ownerships,
                 required_params,
@@ -195,6 +200,11 @@ pub(super) fn populate_constructor_signatures(program: &Program, env: &mut TypeE
                         .generic_params
                         .iter()
                         .map(|param| param.name.clone())
+                        .collect(),
+                    generic_constraints: ty
+                        .generic_params
+                        .iter()
+                        .map(|param| param.constraints.clone())
                         .collect(),
                     params,
                     param_ownerships,
@@ -338,6 +348,37 @@ impl TypeEnv {
         )
     }
 
+    pub(super) fn resolve_function_call_with_generic_args(
+        &self,
+        name: &str,
+        args: &[TypedExpr],
+        generic_args: &[IrType],
+    ) -> Result<Option<FunctionSignature>, String> {
+        let Some(signatures) = self.functions.get(name) else {
+            return Ok(None);
+        };
+        let resolved = resolve_explicit_call_signature(
+            signatures,
+            args,
+            generic_args,
+            self,
+            &format!("call to '{name}'"),
+        )?;
+        if resolved.is_none()
+            && !generic_args.is_empty()
+            && !signatures
+                .iter()
+                .any(|signature| signature.generic_params.len() == generic_args.len())
+        {
+            return Err(explicit_generic_arity_error(
+                signatures,
+                generic_args,
+                &format!("call to '{name}'"),
+            ));
+        }
+        Ok(resolved)
+    }
+
     pub(super) fn resolve_method(
         &self,
         type_name: &str,
@@ -457,6 +498,136 @@ impl TypeEnv {
                     }
                 }
             }
+        }
+        Ok(None)
+    }
+
+    pub(super) fn resolve_extension_method_call_with_generic_args(
+        &self,
+        type_name: &str,
+        method_name: &str,
+        receiver: &TypedExpr,
+        args: &[TypedExpr],
+        generic_args: &[IrType],
+    ) -> Result<Option<FunctionSignature>, String> {
+        let mut combined = Vec::with_capacity(args.len() + 1);
+        combined.push(receiver.clone());
+        combined.extend(args.iter().cloned());
+        let try_resolve = |owner: &str| -> Result<Option<FunctionSignature>, String> {
+            let Some(signatures) = self
+                .extension_methods
+                .get(&(owner.to_string(), method_name.to_string()))
+            else {
+                return Ok(None);
+            };
+            resolve_explicit_call_signature(
+                signatures,
+                &combined,
+                generic_args,
+                self,
+                &format!("extension call to '{}.{}'", owner, method_name),
+            )
+        };
+        if let Some(signature) = try_resolve(type_name)? {
+            return Ok(Some(signature));
+        }
+        let simple = base_type_name(type_name);
+        if simple != type_name {
+            if let Some(signature) = try_resolve(simple)? {
+                return Ok(Some(signature));
+            }
+        }
+        if let Some(bases) = self.bases.get(type_name) {
+            for base in bases {
+                if let Some(signature) = self.resolve_extension_method_call_with_generic_args(
+                    base,
+                    method_name,
+                    receiver,
+                    args,
+                    generic_args,
+                )? {
+                    return Ok(Some(signature));
+                }
+                let base_simple = base.rsplit('.').next().unwrap_or(base);
+                if base_simple != base {
+                    if let Some(signature) = self.resolve_extension_method_call_with_generic_args(
+                        base_simple,
+                        method_name,
+                        receiver,
+                        args,
+                        generic_args,
+                    )? {
+                        return Ok(Some(signature));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub(super) fn resolve_method_call_with_generic_args(
+        &self,
+        type_name: &str,
+        method_name: &str,
+        args: &[TypedExpr],
+        generic_args: &[IrType],
+    ) -> Result<Option<FunctionSignature>, String> {
+        let resolve = |owner: &str, call_args: &[TypedExpr]| -> Result<Option<FunctionSignature>, String> {
+            let Some(signatures) = self
+                .methods
+                .get(&(owner.to_string(), method_name.to_string()))
+            else {
+                return Ok(None);
+            };
+            resolve_explicit_call_signature(
+                signatures,
+                call_args,
+                generic_args,
+                self,
+                &format!("call to '{}.{}'", owner, method_name),
+            )
+        };
+        if let Some(sig) = resolve(type_name, args)? {
+            return Ok(Some(sig));
+        }
+        if let Some(signature) = self.resolve_specialized_method_call_signature_with_generic_args(
+            type_name,
+            method_name,
+            args,
+            generic_args,
+        )? {
+            return Ok(Some(signature));
+        }
+        if method_name.ends_with("Async") && args.len() > 1 {
+            if let Some(sig) = resolve(type_name, &args[..args.len() - 1])? {
+                return Ok(Some(sig));
+            }
+        }
+        if let Some(bases) = self.bases.get(type_name) {
+            for base in bases {
+                let simple = base.rsplit('.').next().unwrap_or(base);
+                if let Some(sig) = self.resolve_method_call_with_generic_args(
+                    simple,
+                    method_name,
+                    args,
+                    generic_args,
+                )? {
+                    return Ok(Some(sig));
+                }
+            }
+        }
+        let all_candidates = self.method_candidate_signatures(type_name, method_name);
+        if !generic_args.is_empty()
+            && !all_candidates.is_empty()
+            && !all_candidates
+                .iter()
+                .any(|signature| signature.generic_params.len() == generic_args.len())
+        {
+            return Err(explicit_generic_arity_error(
+                &all_candidates,
+                generic_args,
+                &format!("call to '{}.{}'", type_name, method_name),
+            ));
         }
         Ok(None)
     }
@@ -601,6 +772,89 @@ impl TypeEnv {
             || format!("call to '{}.{}'", type_name, method_name),
         )?;
         Ok(signature.map(|sig| substitute_function_signature(sig, &subst)))
+    }
+
+    pub(super) fn resolve_specialized_method_call_signature_with_generic_args(
+        &self,
+        type_name: &str,
+        method_name: &str,
+        args: &[TypedExpr],
+        generic_args: &[IrType],
+    ) -> Result<Option<FunctionSignature>, String> {
+        let Some((base_name, subst)) = self.generic_owner_subst(type_name) else {
+            return Ok(None);
+        };
+        let Some(signatures) = self.methods.get(&(base_name.clone(), method_name.to_string())) else {
+            return Ok(None);
+        };
+        let signature = resolve_explicit_call_signature(
+            signatures,
+            args,
+            generic_args,
+            self,
+            &format!("call to '{}.{}'", type_name, method_name),
+        )?;
+        Ok(signature.map(|sig| substitute_function_signature(&sig, &subst)))
+    }
+
+    pub(super) fn method_candidate_signatures(
+        &self,
+        type_name: &str,
+        method_name: &str,
+    ) -> Vec<FunctionSignature> {
+        let mut seen = HashSet::new();
+        let mut results = Vec::new();
+        self.collect_method_candidate_signatures(type_name, method_name, &mut seen, &mut results);
+        results
+    }
+
+    fn collect_method_candidate_signatures(
+        &self,
+        type_name: &str,
+        method_name: &str,
+        seen: &mut HashSet<String>,
+        results: &mut Vec<FunctionSignature>,
+    ) {
+        if !seen.insert(type_name.to_string()) {
+            return;
+        }
+        if let Some(signatures) = self
+            .methods
+            .get(&(type_name.to_string(), method_name.to_string()))
+        {
+            results.extend(signatures.iter().cloned());
+        }
+        let simple = base_type_name(type_name);
+        if simple != type_name {
+            if let Some(signatures) = self
+                .methods
+                .get(&(simple.to_string(), method_name.to_string()))
+            {
+                results.extend(signatures.iter().cloned());
+            }
+        }
+        if let Some((base_name, subst)) = self.generic_owner_subst(type_name) {
+            if let Some(signatures) = self
+                .methods
+                .get(&(base_name.clone(), method_name.to_string()))
+            {
+                results.extend(
+                    signatures
+                        .iter()
+                        .map(|signature| substitute_function_signature(signature, &subst)),
+                );
+            }
+            if let Some(bases) = self.bases.get(&base_name) {
+                for base in bases {
+                    self.collect_method_candidate_signatures(base, method_name, seen, results);
+                }
+            }
+        }
+        if let Some(bases) = self.bases.get(type_name) {
+            for base in bases {
+                self.collect_method_candidate_signatures(base, method_name, seen, results);
+            }
+        }
     }
 
     pub(super) fn resolve_specialized_constructor_signature(
@@ -867,6 +1121,69 @@ where
     Ok(Some(*best))
 }
 
+pub(super) fn resolve_explicit_call_signature(
+    signatures: &[FunctionSignature],
+    args: &[TypedExpr],
+    generic_args: &[IrType],
+    env: &TypeEnv,
+    context: &str,
+) -> Result<Option<FunctionSignature>, String> {
+    if generic_args.is_empty() {
+        return Ok(resolve_call_signature(
+            signatures,
+            args,
+            |expected, arg| ir_conversion_rank(expected, arg, env),
+            || context.to_string(),
+        )?
+        .cloned());
+    }
+    let mut arity_matched = Vec::new();
+    for signature in signatures {
+        if signature.generic_params.len() == generic_args.len() {
+            arity_matched.push(specialize_signature_with_explicit_generic_args(
+                signature,
+                generic_args,
+                env,
+                context,
+            )?);
+        }
+    }
+    if arity_matched.is_empty() {
+        return Ok(None);
+    }
+    resolve_call_signature(
+        &arity_matched,
+        args,
+        |expected, arg| ir_conversion_rank(expected, arg, env),
+        || context.to_string(),
+    )
+    .map(|signature| signature.cloned())
+}
+
+pub(super) fn explicit_generic_arity_error(
+    signatures: &[FunctionSignature],
+    generic_args: &[IrType],
+    context: &str,
+) -> String {
+    let supported = signatures
+        .iter()
+        .map(|signature| signature.generic_params.len())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|arity| arity.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let supported = if supported.is_empty() {
+        "no generic overloads".to_string()
+    } else {
+        format!("available generic arities: {supported}")
+    };
+    format!(
+        "{context} expects {} type argument(s); {supported}",
+        generic_args.len()
+    )
+}
+
 pub(super) fn signature_specificity(signature: &FunctionSignature) -> u16 {
     signature
         .params
@@ -926,6 +1243,11 @@ pub(super) fn function_signature(function: &Function, env: &TypeEnv, overloaded:
             .generic_params
             .iter()
             .map(|param| param.name.clone())
+            .collect(),
+        generic_constraints: function
+            .generic_params
+            .iter()
+            .map(|param| param.constraints.clone())
             .collect(),
         symbol: if overloaded {
             overloaded_function_symbol(&base_symbol, &params)

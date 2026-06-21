@@ -235,10 +235,12 @@ pub(crate) enum Expr {
     MethodCall {
         target: Box<Expr>,
         name: String,
+        generic_args: Vec<TypeSyntax>,
         args: Vec<Expr>,
     },
     FunctionCall {
         name: String,
+        generic_args: Vec<TypeSyntax>,
         args: Vec<Expr>,
     },
     Throw(Box<Expr>),

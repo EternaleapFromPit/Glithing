@@ -303,6 +303,7 @@ impl Parser {
                     expr = Expr::MethodCall {
                         target: Box::new(expr),
                         name: "Substring".to_string(),
+                        generic_args: Vec::new(),
                         args: vec![Expr::Int(0), end],
                     };
                 } else {
@@ -324,6 +325,7 @@ impl Parser {
                         expr = Expr::MethodCall {
                             target: Box::new(expr),
                             name: "Substring".to_string(),
+                            generic_args: Vec::new(),
                             args,
                         };
                     } else {
@@ -341,10 +343,11 @@ impl Parser {
                 }
                 let name = self.expect_ident()?;
                 let generic_checkpoint = self.pos;
+                let mut generic_args = Vec::new();
                 if self.at(&TokenKind::Less) {
-                    if self.parse_generic_type_args(&name).is_err() || !self.at(&TokenKind::LParen)
-                    {
-                        self.pos = generic_checkpoint;
+                    match self.parse_generic_type_args(&name) {
+                        Ok(args) if self.at(&TokenKind::LParen) => generic_args = args,
+                        _ => self.pos = generic_checkpoint,
                     }
                 }
                 if self.match_kind(&TokenKind::LParen) {
@@ -352,6 +355,7 @@ impl Parser {
                     expr = Expr::MethodCall {
                         target: Box::new(expr),
                         name,
+                        generic_args,
                         args,
                     };
                 } else {
@@ -367,20 +371,23 @@ impl Parser {
                 let name = self.expect_ident()?;
                 let generic_checkpoint = self.pos;
                 let access = if self.at(&TokenKind::Less) {
-                    if self.parse_generic_type_args(&name).is_err() || !self.at(&TokenKind::LParen)
-                    {
-                        self.pos = generic_checkpoint;
-                        Expr::Field {
-                            target: Box::new(base.clone()),
-                            name,
+                    match self.parse_generic_type_args(&name) {
+                        Ok(generic_args) if self.at(&TokenKind::LParen) => {
+                            self.expect(TokenKind::LParen)?;
+                            let args = self.parse_call_args_after_lparen()?;
+                            Expr::MethodCall {
+                                target: Box::new(base.clone()),
+                                name,
+                                generic_args,
+                                args,
+                            }
                         }
-                    } else {
-                        self.expect(TokenKind::LParen)?;
-                        let args = self.parse_call_args_after_lparen()?;
-                        Expr::MethodCall {
-                            target: Box::new(base.clone()),
-                            name,
-                            args,
+                        _ => {
+                            self.pos = generic_checkpoint;
+                            Expr::Field {
+                                target: Box::new(base.clone()),
+                                name,
+                            }
                         }
                     }
                 } else if self.match_kind(&TokenKind::LParen) {
@@ -388,6 +395,7 @@ impl Parser {
                     Expr::MethodCall {
                         target: Box::new(base.clone()),
                         name,
+                        generic_args: Vec::new(),
                         args,
                     }
                 } else {
@@ -497,15 +505,17 @@ impl Parser {
                     return Ok(type_object_expr(&ty));
                 }
                 let generic_checkpoint = self.pos;
+                let mut generic_args = Vec::new();
                 if self.at(&TokenKind::Less) {
-                    if self.parse_generic_type_args(&name).is_err() || !self.at(&TokenKind::LParen)
-                    {
-                        self.pos = generic_checkpoint;
+                    match self.parse_generic_type_args(&name) {
+                        Ok(args) if self.at(&TokenKind::LParen) => generic_args = args,
+                        _ => self.pos = generic_checkpoint,
                     }
                 }
                 if self.match_kind(&TokenKind::LParen) {
                     Ok(Expr::FunctionCall {
                         name,
+                        generic_args,
                         args: self.parse_call_args_after_lparen()?,
                     })
                 } else {
@@ -770,6 +780,7 @@ impl Parser {
                     Ok(Expr::MethodCall {
                         target: Box::new(Expr::Var("Enumerable".to_string())),
                         name: "ToList".to_string(),
+                        generic_args: Vec::new(),
                         args: vec![source],
                     })
                 } else {

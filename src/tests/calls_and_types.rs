@@ -668,6 +668,87 @@ fn validates_generic_constraints() {
 }
 
 #[test]
+fn explicit_generic_function_call_overrides_default_inference() {
+    let source = r#"
+            T Id<T>(T value) {
+                return value;
+            }
+
+            fn main() {
+                long value = Id<long>(1);
+                print(value);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("explicit generic function call should lower");
+
+    assert!(llvm_ir.contains("Id"));
+    assert!(llvm_ir.contains("i64"));
+}
+
+#[test]
+fn explicit_generic_instance_method_call_overrides_default_inference() {
+    let source = r#"
+            class Box {
+                T Echo<T>(T value) {
+                    return value;
+                }
+            }
+
+            fn main() {
+                Box box = new Box();
+                long value = box.Echo<long>(1);
+                print(value);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("explicit generic instance method call should lower");
+
+    assert!(llvm_ir.contains("Echo"));
+    assert!(llvm_ir.contains("i64"));
+}
+
+#[test]
+fn rejects_explicit_generic_call_wrong_arity() {
+    let source = r#"
+            T Id<T>(T value) {
+                return value;
+            }
+
+            fn main() {
+                int value = Id<int, int>(1);
+                print(value);
+            }
+        "#;
+
+    let error = compile_source_with_options(source, true, false)
+        .expect_err("wrong generic arity should fail");
+
+    assert!(error.contains("call to 'Id'"));
+    assert!(error.contains("no overload matches that arity") || error.contains("expects 2 type argument"));
+}
+
+#[test]
+fn rejects_explicit_generic_call_constraint_violation() {
+    let source = r#"
+            T KeepRef<T>() where T : class {
+                return null;
+            }
+
+            fn main() {
+                KeepRef<int>();
+            }
+        "#;
+
+    let error = compile_source_with_options(source, true, false)
+        .expect_err("constraint-violating explicit type argument should fail");
+
+    assert!(error.contains("call to 'KeepRef'"));
+    assert!(error.contains("does not satisfy constraint 'class'"));
+}
+
+#[test]
 fn applies_user_defined_implicit_conversion_for_overloads() {
     let source = r#"
             struct Meter {

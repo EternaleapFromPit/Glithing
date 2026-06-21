@@ -199,7 +199,7 @@ impl LlvmEmitter {
                 let when_false = self.cast_value(raw_false, &when_true.ty)?;
                 self.emit_select_value(condition, when_true, when_false)
             }
-            Expr::FunctionCall { name, args } => {
+            Expr::FunctionCall { name, args, .. } => {
                 let mut rendered_args = Vec::new();
                 for arg in args {
                     let value = self.emit_expr(arg)?;

@@ -50,6 +50,7 @@ pub(super) fn resolve_method_call(
     env: &TypeEnv,
     target: &TypedExpr,
     name: &str,
+    generic_args: &[IrType],
     args: &[TypedExpr],
 ) -> Result<(IrType, Ownership, String, CallResolution), String> {
     if matches!(
@@ -72,8 +73,16 @@ pub(super) fn resolve_method_call(
     }
     match (&target.ty, name) {
         (IrType::String, _) => {
+            let has_string_method_candidates = ["string", "String", "System.String"]
+                .iter()
+                .any(|string_type| !env.method_candidate_signatures(string_type, name).is_empty());
             for string_type in ["string", "String", "System.String"] {
-                if let Some(signature) = env.resolve_method_call(string_type, name, args)? {
+                let resolved = if generic_args.is_empty() {
+                    env.resolve_method_call(string_type, name, args)?
+                } else {
+                    env.resolve_method_call_with_generic_args(string_type, name, args, generic_args)?
+                };
+                if let Some(signature) = resolved {
                     if signature.is_static {
                         return Ok((
                             signature.return_type.clone(),
@@ -90,17 +99,30 @@ pub(super) fn resolve_method_call(
                     ));
                 }
             }
-            if let Some(signature) = env.resolve_function_call(name, args)? {
-                return Ok((
-                    signature.return_type.clone(),
-                    signature.return_ownership.clone(),
-                    signature.symbol.clone(),
-                    CallResolution::StaticFunction,
-                ));
+            if generic_args.is_empty() || !has_string_method_candidates {
+                let resolved = if generic_args.is_empty() {
+                    env.resolve_function_call(name, args)?.cloned()
+                } else {
+                    env.resolve_function_call_with_generic_args(name, args, generic_args)?
+                };
+                if let Some(signature) = resolved {
+                    return Ok((
+                        signature.return_type.clone(),
+                        signature.return_ownership.clone(),
+                        signature.symbol.clone(),
+                        CallResolution::StaticFunction,
+                    ));
+                }
             }
         }
         (IrType::Unknown(target_name) | IrType::Class(target_name), _) => {
-            if let Some(signature) = env.resolve_method_call(target_name, name, args)? {
+            let has_method_candidates = !env.method_candidate_signatures(target_name, name).is_empty();
+            let resolved = if generic_args.is_empty() {
+                env.resolve_method_call(target_name, name, args)?
+            } else {
+                env.resolve_method_call_with_generic_args(target_name, name, args, generic_args)?
+            };
+            if let Some(signature) = resolved {
                 if signature.is_static {
                     return Ok((
                         signature.return_type.clone(),
@@ -116,13 +138,20 @@ pub(super) fn resolve_method_call(
                     CallResolution::InstanceMethod,
                 ));
             }
-            if let Some(signature) = env.resolve_function_call(name, args)? {
-                return Ok((
-                    signature.return_type.clone(),
-                    signature.return_ownership.clone(),
-                    signature.symbol.clone(),
-                    CallResolution::StaticFunction,
-                ));
+            if generic_args.is_empty() || !has_method_candidates {
+                let resolved = if generic_args.is_empty() {
+                    env.resolve_function_call(name, args)?.cloned()
+                } else {
+                    env.resolve_function_call_with_generic_args(name, args, generic_args)?
+                };
+                if let Some(signature) = resolved {
+                    return Ok((
+                        signature.return_type.clone(),
+                        signature.return_ownership.clone(),
+                        signature.symbol.clone(),
+                        CallResolution::StaticFunction,
+                    ));
+                }
             }
         }
         _ => {}
@@ -155,16 +184,29 @@ pub(super) fn resolve_method_call(
                     ));
                 }
             }
-            if let Some(signature) = env.resolve_method_call(type_name, name, args)? {
+            let resolved_method = if generic_args.is_empty() {
+                env.resolve_method_call(type_name, name, args)?
+            } else {
+                env.resolve_method_call_with_generic_args(type_name, name, args, generic_args)?
+            };
+            if let Some(signature) = resolved_method {
                 Ok((
                     signature.return_type.clone(),
                     signature.return_ownership.clone(),
                     signature.symbol.clone(),
                     CallResolution::InstanceMethod,
                 ))
-            } else if let Some(signature) =
+            } else if let Some(signature) = if generic_args.is_empty() {
                 env.resolve_extension_method_call(type_name, name, target, args)?
-            {
+            } else {
+                env.resolve_extension_method_call_with_generic_args(
+                    type_name,
+                    name,
+                    target,
+                    args,
+                    generic_args,
+                )?
+            } {
                 Ok((
                     signature.return_type.clone(),
                     signature.return_ownership.clone(),

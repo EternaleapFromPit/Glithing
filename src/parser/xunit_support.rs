@@ -22,12 +22,14 @@ pub(super) fn synthesize_xunit_fact_tests(parser: &mut Parser, program: &Program
                         fields: Vec::new(),
                     }),
                     name: method.name.clone(),
+                    generic_args: Vec::new(),
                     args: Vec::new(),
                 };
                 let invoke = if is_task_like_type(&method.return_type) {
                     Expr::MethodCall {
                         target: Box::new(invoke),
                         name: "Wait".to_string(),
+                        generic_args: Vec::new(),
                         args: Vec::new(),
                     }
                 } else {
@@ -35,6 +37,7 @@ pub(super) fn synthesize_xunit_fact_tests(parser: &mut Parser, program: &Program
                 };
                 parser.test_registrations.push(Stmt::Expr(Expr::FunctionCall {
                     name: "XUnit_AddTest".to_string(),
+                    generic_args: Vec::new(),
                     args: vec![
                         Expr::String(class_name.clone()),
                         Expr::String(method.name.clone()),
@@ -125,12 +128,14 @@ pub(super) fn register_xunit_theory_case(
             fields: Vec::new(),
         }),
         name: method.name.clone(),
+        generic_args: Vec::new(),
         args,
     };
     let invoke = if is_task_like_type(&method.return_type) {
         Expr::MethodCall {
             target: Box::new(invoke),
             name: "Wait".to_string(),
+            generic_args: Vec::new(),
             args: Vec::new(),
         }
     } else {
@@ -138,6 +143,7 @@ pub(super) fn register_xunit_theory_case(
     };
     parser.test_registrations.push(Stmt::Expr(Expr::FunctionCall {
         name: "XUnit_AddTest".to_string(),
+        generic_args: Vec::new(),
         args: vec![
             Expr::String(class_name.to_string()),
             Expr::String(test_name.to_string()),

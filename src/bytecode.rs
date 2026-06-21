@@ -274,7 +274,7 @@ impl BytecodeEmitter {
                 self.out
                     .push_str(&format!("  is_pattern {} {:?}\n", type_name(ty), name));
             }
-            Expr::MethodCall { target, name, args } => {
+            Expr::MethodCall { target, name, args, .. } => {
                 self.emit_expr(target);
                 for arg in args {
                     self.emit_expr(arg);
@@ -282,7 +282,7 @@ impl BytecodeEmitter {
                 self.out
                     .push_str(&format!("  call_method {name} {}\n", args.len()));
             }
-            Expr::FunctionCall { name, args } => {
+            Expr::FunctionCall { name, args, .. } => {
                 for arg in args {
                     self.emit_expr(arg);
                 }

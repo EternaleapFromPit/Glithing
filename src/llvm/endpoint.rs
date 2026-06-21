@@ -632,7 +632,7 @@ impl LlvmEmitter {
         let object = self.object_layout(type_name).cloned().ok_or_else(|| {
             format!("LLVM TIR backend: result type '{type_name}' has no object layout")
         })?;
-        let llvm_name = llvm_object_name(type_name);
+        let llvm_name = llvm_object_name(&object.name);
         let mut fields = object.fields.iter().collect::<Vec<_>>();
         fields.sort_by_key(|(_, field)| field.index);
         let mut current = self.string_global("{");
@@ -749,7 +749,7 @@ impl LlvmEmitter {
             format!("LLVM TIR backend: body type '{type_name}' has no object layout")
         })?;
         let value = self.emit_endpoint_object_allocation(type_name, prefix)?;
-        let llvm_name = llvm_object_name(type_name);
+        let llvm_name = llvm_object_name(&object.name);
         for (field_name, field) in &object.fields {
             let token = self.string_global(&format!("\"{field_name}\""));
             let token_length = field_name.len() + 2;
@@ -928,7 +928,7 @@ impl LlvmEmitter {
         let object = self.object_layout(type_name).cloned().ok_or_else(|| {
             format!("LLVM TIR backend: dependency type '{type_name}' has no layout")
         })?;
-        let llvm_name = llvm_object_name(type_name);
+        let llvm_name = llvm_object_name(&object.name);
         let size_ptr = format!("%{prefix}_size_ptr");
         let size = format!("%{prefix}_size");
         let value = format!("%{prefix}");
@@ -940,7 +940,7 @@ impl LlvmEmitter {
             let drop_ptr = format!("%{prefix}_drop_ptr");
             self.body.push_str(&format!(
                 "  {rc_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 0\n  store i64 1, ptr {rc_ptr}\n  {drop_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 1\n  store ptr @{}, ptr {drop_ptr}\n",
-                destroy_symbol(type_name)
+                destroy_symbol(&object.name)
             ));
         }
         let mut dependencies = Vec::new();

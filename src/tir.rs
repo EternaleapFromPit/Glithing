@@ -389,6 +389,7 @@ struct FunctionSignature {
     package_id: Option<String>,
     visibility: Visibility,
     generic_params: Vec<String>,
+    generic_constraints: Vec<Vec<String>>,
     params: Vec<IrType>,
     param_ownerships: Vec<Ownership>,
     required_params: usize,

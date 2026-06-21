@@ -496,6 +496,40 @@ pub(super) fn pack_params_args(
     packed
 }
 
+fn lower_explicit_generic_args(args: &[TypeSyntax], env: &TypeEnv) -> Vec<IrType> {
+    args.iter().map(|arg| type_syntax_to_ir(arg, env)).collect()
+}
+
+fn specialize_call_candidates(
+    candidates: Vec<FunctionSignature>,
+    generic_args: &[IrType],
+    env: &TypeEnv,
+    context: &str,
+) -> Result<Vec<FunctionSignature>, String> {
+    if generic_args.is_empty() || candidates.is_empty() {
+        return Ok(candidates);
+    }
+    let mut specialized = Vec::new();
+    let mut saw_matching_arity = false;
+    for signature in candidates {
+        if signature.generic_params.len() != generic_args.len() {
+            continue;
+        }
+        saw_matching_arity = true;
+        specialized.push(specialize_signature_with_explicit_generic_args(
+            &signature,
+            generic_args,
+            env,
+            context,
+        )?);
+    }
+    if saw_matching_arity {
+        Ok(specialized)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 pub(super) fn lower_typed_expr(
     expr: &Expr,
     env: &TypeEnv,
@@ -848,8 +882,9 @@ pub(super) fn lower_typed_expr_with_expected(
                 IrType::Bool,
             )
         }
-        Expr::MethodCall { target, name, args } => {
+        Expr::MethodCall { target, name, generic_args: explicit_generic_types, args } => {
             let target = lower_typed_expr(target, env, scopes)?;
+            let explicit_generic_args = lower_explicit_generic_args(explicit_generic_types, env);
             let mut candidates = Vec::new();
             if let IrType::Class(type_name)
             | IrType::Struct(type_name)
@@ -881,9 +916,16 @@ pub(super) fn lower_typed_expr_with_expected(
                     candidates = sigs.clone();
                 }
             }
+            let candidates = specialize_call_candidates(
+                candidates,
+                &explicit_generic_args,
+                env,
+                &format!("call to '{name}'"),
+            )?;
             let expected_types = find_expected_types(&candidates, args);
             let args = lower_call_args(args, &expected_types, env, scopes)?;
-            let (ty, _ownership, symbol, resolution) = resolve_method_call(env, &target, name, &args)?;
+            let (ty, _ownership, symbol, resolution) =
+                resolve_method_call(env, &target, name, &explicit_generic_args, &args)?;
             let resolved_signature = candidates
                 .iter()
                 .find(|signature| signature.symbol == symbol)
@@ -893,21 +935,36 @@ pub(super) fn lower_typed_expr_with_expected(
                     | IrType::Struct(type_name)
                     | IrType::Interface(type_name)
                     | IrType::Unknown(type_name) => env
-                        .resolve_method_call(type_name, name, &args)
+                        .resolve_method_call_with_generic_args(type_name, name, &args, &explicit_generic_args)
                         .ok()
                         .flatten(),
                     IrType::String => ["string", "String", "System.String"]
                         .iter()
-                        .find_map(|string_type| env.resolve_method_call(string_type, name, &args).ok().flatten()),
+                        .find_map(|string_type| {
+                            env.resolve_method_call_with_generic_args(
+                                string_type,
+                                name,
+                                &args,
+                                &explicit_generic_args,
+                            )
+                            .ok()
+                            .flatten()
+                        }),
                     _ => None,
                 })
-                .or_else(|| env.resolve_function_call(name, &args).ok().flatten().cloned());
-            let generic_args = resolved_signature
-                .as_ref()
-                .map(|signature| {
+                .or_else(|| {
+                    env.resolve_function_call_with_generic_args(name, &args, &explicit_generic_args)
+                        .ok()
+                        .flatten()
+                });
+            let generic_args = if explicit_generic_args.is_empty() {
+                resolved_signature.as_ref().map(|signature| {
                     infer_generic_args_from_signature_with_expected(signature, &args, expected)
                 })
-                .unwrap_or_default();
+                .unwrap_or_default()
+            } else {
+                explicit_generic_args.clone()
+            };
             let ty = resolved_signature
                 .as_ref()
                 .map(|signature| {
@@ -939,7 +996,7 @@ pub(super) fn lower_typed_expr_with_expected(
                 ownership,
             )
         }
-        Expr::FunctionCall { name, args } => {
+        Expr::FunctionCall { name, generic_args: explicit_generic_types, args } => {
             if name == "sizeof" {
                 let type_name = if let Some(Expr::Var(tn)) = args.first() {
                     tn.clone()
@@ -965,23 +1022,45 @@ pub(super) fn lower_typed_expr_with_expected(
             if let Some(sigs) = env.functions.get(name) {
                 candidates = sigs.clone();
             }
+            let current_type = current_enclosing_type(scopes);
+            if let Some(current_type) = current_type.as_ref() {
+                if let Some(sigs) = env.methods.get(&(current_type.clone(), name.clone())) {
+                    candidates.extend(sigs.clone());
+                }
+            }
+            let explicit_generic_args = lower_explicit_generic_args(explicit_generic_types, env);
+            let candidates = specialize_call_candidates(
+                candidates,
+                &explicit_generic_args,
+                env,
+                &format!("call to '{name}'"),
+            )?;
             let expected_types = find_expected_types(&candidates, args);
             let args = lower_call_args(args, &expected_types, env, scopes)?;
-            let current_type = current_enclosing_type(scopes);
             let method_signature = current_type.as_ref().and_then(|current_type| {
-                env.resolve_method_call(current_type, name, &args).ok().flatten()
+                env.resolve_method_call_with_generic_args(
+                    current_type,
+                    name,
+                    &args,
+                    &explicit_generic_args,
+                )
+                .ok()
+                .flatten()
             });
             let function_signature = if method_signature.is_none() {
-                env.resolve_function_call(name, &args)?.cloned()
+                env.resolve_function_call_with_generic_args(name, &args, &explicit_generic_args)?
             } else {
                 None
             };
             let signature = method_signature.as_ref().or(function_signature.as_ref());
-            let generic_args = signature
-                .map(|signature| {
+            let generic_args = if explicit_generic_args.is_empty() {
+                signature.map(|signature| {
                     infer_generic_args_from_signature_with_expected(signature, &args, expected)
                 })
-                .unwrap_or_default();
+                .unwrap_or_default()
+            } else {
+                explicit_generic_args.clone()
+            };
             let args = if let Some(signature) = signature {
                 pack_params_args(signature, args)
             } else {
@@ -1547,12 +1626,13 @@ pub(super) fn lower_expr(
                 ownership: Ownership::Copy,
             }
         }
-        Expr::MethodCall { target, name, args } => {
+        Expr::MethodCall { target, name, generic_args, args } => {
             let target = lower_expr(target, env, scopes)?;
             let args = args
                 .iter()
                 .map(|arg| lower_expr(arg, env, scopes))
                 .collect::<Result<Vec<_>, _>>()?;
+            let explicit_generic_args = lower_explicit_generic_args(generic_args, env);
             let ty = match (&target.ty, name.as_str()) {
                 (IrType::Class(type_name), "MapGet" | "MapPost")
                     if type_name == "WebApplication" =>
@@ -1584,11 +1664,51 @@ pub(super) fn lower_expr(
             | IrType::Struct(type_name)
             | IrType::Interface(type_name) = &target.ty
             {
-                env.resolve_method(type_name, name, &args.iter().map(|arg| arg.ty.clone()).collect::<Vec<_>>())
+                env.resolve_method_call_with_generic_args(
+                    type_name,
+                    name,
+                    &args
+                        .iter()
+                        .map(|arg| TypedExpr {
+                            kind: TypedExprKind::Var(arg.name.clone()),
+                            ty: arg.ty.clone(),
+                            ownership: arg.ownership.clone(),
+                            drop_kind: arg.drop_kind(),
+                        })
+                        .collect::<Vec<_>>(),
+                    &explicit_generic_args,
+                )
+                    .ok()
+                    .flatten()
                     .map(|signature| signature.return_ownership.clone())
                     .unwrap_or_else(|| ownership_for_type(&ty))
             } else {
                 ownership_for_type(&ty)
+            };
+            let ty = if let IrType::Class(type_name)
+            | IrType::Struct(type_name)
+            | IrType::Interface(type_name) = &target.ty
+            {
+                env.resolve_method_call_with_generic_args(
+                    type_name,
+                    name,
+                    &args
+                        .iter()
+                        .map(|arg| TypedExpr {
+                            kind: TypedExprKind::Var(arg.name.clone()),
+                            ty: arg.ty.clone(),
+                            ownership: arg.ownership.clone(),
+                            drop_kind: arg.drop_kind(),
+                        })
+                        .collect::<Vec<_>>(),
+                    &explicit_generic_args,
+                )
+                .ok()
+                .flatten()
+                .map(|signature| signature.return_type.clone())
+                .unwrap_or(ty)
+            } else {
+                ty
             };
             TypedBinding {
                 name: "<expr>".to_string(),
@@ -1596,7 +1716,7 @@ pub(super) fn lower_expr(
                 ty,
             }
         }
-        Expr::FunctionCall { name, args } => {
+        Expr::FunctionCall { name, generic_args, args } => {
             if name == "sizeof" {
                 return Ok(TypedBinding {
                     name: "<expr>".to_string(),
@@ -1608,10 +1728,23 @@ pub(super) fn lower_expr(
                 .iter()
                 .map(|arg| lower_expr(arg, env, scopes))
                 .collect::<Result<Vec<_>, _>>()?;
-            let signature = env.resolve_function(
-                name,
-                &args.iter().map(|arg| arg.ty.clone()).collect::<Vec<_>>(),
-            );
+            let explicit_generic_args = lower_explicit_generic_args(generic_args, env);
+            let signature = env
+                .resolve_function_call_with_generic_args(
+                    name,
+                    &args
+                        .iter()
+                        .map(|arg| TypedExpr {
+                            kind: TypedExprKind::Var(arg.name.clone()),
+                            ty: arg.ty.clone(),
+                            ownership: arg.ownership.clone(),
+                            drop_kind: arg.drop_kind(),
+                        })
+                        .collect::<Vec<_>>(),
+                    &explicit_generic_args,
+                )
+                .ok()
+                .flatten();
             let ty = signature
                 .as_ref()
                 .map(|signature| signature.return_type.clone())
