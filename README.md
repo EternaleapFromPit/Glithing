@@ -30,6 +30,16 @@ Current command limitations:
 - `gl watch` is a polling watcher over project/source files, not an OS-native file notification backend.
 - `gl format` currently applies a conservative whitespace/indentation formatter for `.gl` / `.cs` sources, not a full Roslyn-equivalent formatter.
 - `gl sln` manages Glitching solution manifests in `.sln` files for the `gl` toolchain; it is not full MSBuild/Visual Studio solution parity.
+- `.csproj` metadata is now honored for the current native toolchain slice:
+  - `AssemblyName` drives artifact/package names
+  - `OutputType` distinguishes runnable executables from library-style builds; library projects build to LLVM bitcode (`.bc`) by default
+  - `TargetFramework` is validated as a Glitching target marker (`gl*`)
+  - `ProjectReference` participates in source loading
+  - `PackageReference` is carried into `gl restore`, `gl test`, and `gl store` package metadata
+  - `Compile Include/Remove` controls project source membership
+  - `Content Include` / `None Include` are copied by `gl publish` and packed by `gl store`
+  - `IsTestProject` controls whether `gl test` will execute the project
+- `RootNamespace` wraps project source files that do not already declare `namespace` or `package`, and `StartupObject` selects the emitted native entrypoint from a static `Main`/`main` method on the configured type.
 
 The language frontend is implemented directly in Rust compiler code under [src/lexer.rs](/D:/Repos/Glitching/src/lexer.rs) and [src/parser.rs](/D:/Repos/Glitching/src/parser.rs). There is no package-backed `System.CSharp` lexer/parser surface in the current compiler.
 
@@ -102,7 +112,7 @@ Current implemented subset:
 - default CLI output builds a native executable when no explicit output is requested
 - NuGet package emission produces LLVM-native assets and linked source metadata
 - source-level packages with `package Name;` and `native "C source";`
-- source directories and `.csproj` files can be used as compiler inputs; `.csproj` support is source-oriented, not full MSBuild parity
+- source directories and `.csproj` files can be used as compiler inputs; `.csproj` support now honors the current property/item slice above, but it is still not full MSBuild parity
 
 `var x = value;` is accepted as a conversion-friendly spelling for `let mut x = value;`.
 

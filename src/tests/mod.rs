@@ -17,7 +17,10 @@ fn emit_native_executable_from_source(stem: &str, source: &str) -> std::path::Pa
 
 fn emit_native_executable_from_path(stem: &str, input: &str) -> std::path::PathBuf {
     let source = read_input_source(input).expect("input source should be readable");
-    let compiled = run_on_large_stack(move || compile_source_with_options(&source, true, false))
+    let project_spec = load_project_spec_for_input(input).expect("project metadata should load");
+    let compiled = run_on_large_stack(move || {
+        compile_source_with_project(&source, true, project_spec.as_ref())
+    })
         .expect("input path should compile to LLVM IR");
     emit_native_executable_from_ir(stem, compiled.llvm_ir().expect("LLVM IR should be available"))
 }

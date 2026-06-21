@@ -374,7 +374,7 @@ fn debug_conduit_integration_tests_project_phases() {
     eprintln!("phase 6 borrow");
     BorrowChecker::check_program(&program).expect("borrow checking should succeed");
     eprintln!("phase 7 lower");
-    let typed = TypedProgram::lower(&program).expect("typed lowering should succeed");
+    let typed = TypedProgram::lower(&program, None).expect("typed lowering should succeed");
     eprintln!(
         "phase 8 typed functions={} types={}",
         typed.functions.len(),

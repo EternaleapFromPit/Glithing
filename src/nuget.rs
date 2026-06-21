@@ -1,3 +1,4 @@
+use crate::PackageReferenceSpec;
 use std::fs;
 use std::path::Path;
 
@@ -6,6 +7,8 @@ pub(crate) struct NugetPackageSpec<'a> {
     pub(crate) version: &'a str,
     pub(crate) linked_source: &'a str,
     pub(crate) llvm_ir: &'a str,
+    pub(crate) dependencies: &'a [PackageReferenceSpec],
+    pub(crate) content_files: &'a [(String, Vec<u8>)],
 }
 
 pub(crate) fn emit_nuget_package(
@@ -38,6 +41,12 @@ pub(crate) fn emit_nuget_package(
         format!("contentFiles/any/any/{}.gl", spec.package_id),
         spec.linked_source.as_bytes().to_vec(),
     ));
+    for (relative_path, bytes) in spec.content_files {
+        entries.push((
+            format!("contentFiles/any/any/{relative_path}"),
+            bytes.clone(),
+        ));
+    }
 
     let mut archive = Vec::new();
     write_zip(&mut archive, &entries)?;
@@ -46,6 +55,26 @@ pub(crate) fn emit_nuget_package(
 }
 
 fn render_nuspec(spec: &NugetPackageSpec<'_>) -> String {
+    let dependencies = if spec.dependencies.is_empty() {
+        String::new()
+    } else {
+        let mut rendered = String::from("    <dependencies>\n");
+        for dependency in spec.dependencies {
+            match dependency.version.as_deref().filter(|value| !value.is_empty()) {
+                Some(version) => rendered.push_str(&format!(
+                    "      <dependency id=\"{}\" version=\"{}\" />\n",
+                    xml_escape(&dependency.id),
+                    xml_escape(version)
+                )),
+                None => rendered.push_str(&format!(
+                    "      <dependency id=\"{}\" />\n",
+                    xml_escape(&dependency.id)
+                )),
+            }
+        }
+        rendered.push_str("    </dependencies>\n");
+        rendered
+    };
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
@@ -56,10 +85,13 @@ fn render_nuspec(spec: &NugetPackageSpec<'_>) -> String {
     <owners>Glitching</owners>
     <description>Native LLVM package emitted by Glitching.</description>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
+{}
   </metadata>
 </package>
 "#,
-        spec.package_id, spec.version
+        xml_escape(spec.package_id),
+        xml_escape(spec.version),
+        dependencies
     )
 }
 
@@ -73,6 +105,15 @@ fn render_content_types() -> String {
 </Types>
 "#
     .to_string()
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn render_rels(spec: &NugetPackageSpec<'_>) -> String {

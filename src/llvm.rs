@@ -6,6 +6,7 @@ use crate::ast::*;
 use crate::tir::*;
 
 mod delegates;
+mod entrypoints;
 mod endpoint;
 mod objects;
 mod freevars;
@@ -261,6 +262,7 @@ pub(crate) struct LlvmEmitter {
     async_suspend_index: usize,
     entry_insert_pos: Option<usize>,
     terminated: bool,
+    startup: Option<TypedStartup>,
 }
 
 impl LlvmEmitter {
@@ -301,6 +303,7 @@ impl LlvmEmitter {
             async_suspend_index: 0,
             entry_insert_pos: None,
             terminated: false,
+            startup: program.startup.clone(),
         };
         for ty in &program.types {
             emitter.register_object_type(ty);
@@ -506,24 +509,10 @@ impl LlvmEmitter {
                 emitter.emit_typed_function(function)?;
             }
         }
+        emitter.emit_startup_wrapper()?;
         emitter.emit_web_application_handle_wrapper(program)?;
         emitter.emit_endpoint_dispatch()?;
         emitter.finish_module()
-    }
-
-    fn register_function(&mut self, function: &TypedFunction) {
-        self.functions.insert(
-            function.symbol.clone(),
-            LlFunctionSig {
-                return_type: llvm_ir_type(&function.return_type),
-                params: function
-                    .params
-                    .iter()
-                    .map(|param| llvm_ir_type(&param.ty))
-                    .collect(),
-                required_params: function.required_params,
-            },
-        );
     }
 
     fn register_object_type(&mut self, ty: &TypedType) {
@@ -1222,6 +1211,7 @@ impl LlvmEmitter {
             async_suspend_index: 0,
             entry_insert_pos: None,
             terminated: false,
+            startup: None,
         };
         for function in &program.functions {
             emitter.functions.insert(
@@ -1276,20 +1266,6 @@ impl LlvmEmitter {
         ));
     }
 
-    fn emit_web_application_handle_wrapper(&mut self, program: &TypedProgram) -> Result<(), String> {
-        let Some(web_app) = program.types.iter().find(|ty| ty.name == "WebApplication") else {
-            return Ok(());
-        };
-        let Some(handle) = web_app.methods.iter().find(|method| method.name == "Handle") else {
-            return Ok(());
-        };
-        self.body.push_str(&format!(
-            "define ptr @WebApplication_Handle(ptr %self, ptr %method, ptr %path, ptr %body) {{\nentry:\n  %result = call ptr @{}(ptr %self, ptr %method, ptr %path, ptr %body)\n  ret ptr %result\n}}\n\n",
-            sanitize(&handle.symbol)
-        ));
-        Ok(())
-    }
-
     fn emit_typed_function(&mut self, function: &TypedFunction) -> Result<(), String> {
         if function.is_extern {
             return Ok(());
@@ -1308,7 +1284,10 @@ impl LlvmEmitter {
         self.current_unwind_label = "exception_unwind".to_string();
         self.async_state_pc_ptr = None;
         self.async_suspend_index = 0;
-        let is_main = function.name == "main";
+        let is_main = self
+            .startup
+            .as_ref()
+            .is_some_and(|startup| startup.symbol == function.symbol && function.symbol == "main");
         self.current_is_main = is_main;
         self.current_return = if is_main {
             LlType::I32
@@ -1349,11 +1328,15 @@ impl LlvmEmitter {
                 .push_str(&format!("  {ptr} = alloca {}\n", ty.as_ir()));
             if has_native_args && param.name == "args" {
                 let array = self.tmp();
+                let has_args = self.tmp();
+                let argc_minus_one = self.tmp();
                 let argc = self.tmp();
+                let argv = self.tmp();
                 let len_ptr = self.tmp();
+                let len = self.tmp();
                 let data_ptr = self.tmp();
                 self.body.push_str(&format!(
-                    "  {array} = alloca %glitch.array\n  {argc} = zext i32 %argc to i64\n  {len_ptr} = getelementptr inbounds %glitch.array, ptr {array}, i32 0, i32 0\n  store i64 {argc}, ptr {len_ptr}\n  {data_ptr} = getelementptr inbounds %glitch.array, ptr {array}, i32 0, i32 1\n  store ptr %argv, ptr {data_ptr}\n  store ptr {array}, ptr {ptr}\n"
+                    "  {array} = alloca %glitch.array\n  {has_args} = icmp ugt i32 %argc, 0\n  {argc_minus_one} = sub i32 %argc, 1\n  {argc} = select i1 {has_args}, i32 {argc_minus_one}, i32 0\n  {argv} = getelementptr inbounds ptr, ptr %argv, i64 1\n  {len_ptr} = getelementptr inbounds %glitch.array, ptr {array}, i32 0, i32 0\n  {len} = zext i32 {argc} to i64\n  store i64 {len}, ptr {len_ptr}\n  {data_ptr} = getelementptr inbounds %glitch.array, ptr {array}, i32 0, i32 1\n  store ptr {argv}, ptr {data_ptr}\n  store ptr {array}, ptr {ptr}\n"
                 ));
             } else {
                 self.body.push_str(&format!(

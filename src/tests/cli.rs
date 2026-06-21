@@ -1,5 +1,6 @@
 use super::*;
 use std::fs;
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -215,4 +216,171 @@ fn gl_watch_rebuilds_after_source_change() {
         .expect("watch build should succeed twice");
 
     assert!(project_dir.join("bin").join("Debug").join("DemoApp.exe").exists());
+}
+
+#[test]
+fn gl_build_uses_csproj_assembly_name_for_output() {
+    let cwd = temp_cli_dir("assembly-name");
+    let project_dir = cwd.join("DemoApp");
+    fs::create_dir_all(&project_dir).expect("project dir should be created");
+    fs::write(
+        project_dir.join("DemoApp.csproj"),
+        "<Project Sdk=\"Glitching\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>gl1.0</TargetFramework>\n    <AssemblyName>CustomHost</AssemblyName>\n  </PropertyGroup>\n</Project>\n",
+    )
+    .expect("project file should be written");
+    fs::write(
+        project_dir.join("Program.cs"),
+        "fn main() {\n    print(\"ok\");\n}\n",
+    )
+    .expect("program file should be written");
+
+    run_cli_with_args_from(vec!["build".to_string()], &project_dir)
+        .expect("gl build should use AssemblyName for output");
+
+    assert!(project_dir.join("bin").join("Debug").join("CustomHost.exe").exists());
+}
+
+#[test]
+fn gl_build_library_project_emits_bitcode_and_run_rejects_it() {
+    let cwd = temp_cli_dir("library-build");
+    run_cli_with_args_from(
+        vec!["new".to_string(), "classlib".to_string(), "DemoLib".to_string()],
+        &cwd,
+    )
+    .expect("gl new classlib should succeed");
+
+    let project_dir = cwd.join("DemoLib");
+    run_cli_with_args_from(vec!["build".to_string()], &project_dir)
+        .expect("gl build should emit bitcode for library projects");
+
+    assert!(project_dir.join("bin").join("Debug").join("DemoLib.bc").exists());
+    let error = run_cli_with_args_from(vec!["run".to_string()], &project_dir)
+        .expect_err("gl run should reject library projects");
+    assert!(error.contains("cannot run project"));
+}
+
+#[test]
+fn gl_build_honors_compile_remove_items() {
+    let cwd = temp_cli_dir("compile-remove");
+    let project_dir = cwd.join("DemoApp");
+    fs::create_dir_all(&project_dir).expect("project dir should be created");
+    fs::write(
+        project_dir.join("DemoApp.csproj"),
+        "<Project Sdk=\"Glitching\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>gl1.0</TargetFramework>\n  </PropertyGroup>\n  <ItemGroup>\n    <Compile Remove=\"Broken.cs\" />\n  </ItemGroup>\n</Project>\n",
+    )
+    .expect("project file should be written");
+    fs::write(
+        project_dir.join("Program.cs"),
+        "fn main() {\n    print(\"ok\");\n}\n",
+    )
+    .expect("program file should be written");
+    fs::write(project_dir.join("Broken.cs"), "this is not valid syntax\n")
+        .expect("broken file should be written");
+
+    run_cli_with_args_from(vec!["build".to_string()], &project_dir)
+        .expect("gl build should ignore removed compile items");
+
+    assert!(project_dir.join("bin").join("Debug").join("DemoApp.exe").exists());
+}
+
+#[test]
+fn gl_build_honors_root_namespace_and_startup_object() {
+    let cwd = temp_cli_dir("startup-object");
+    let project_dir = cwd.join("DemoApp");
+    fs::create_dir_all(&project_dir).expect("project dir should be created");
+    fs::write(
+        project_dir.join("DemoApp.csproj"),
+        "<Project Sdk=\"Glitching\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>gl1.0</TargetFramework>\n    <AssemblyName>DemoApp</AssemblyName>\n    <RootNamespace>Demo.App</RootNamespace>\n    <StartupObject>Demo.App.Program</StartupObject>\n  </PropertyGroup>\n</Project>\n",
+    )
+    .expect("project file should be written");
+    fs::write(
+        project_dir.join("Program.cs"),
+        "public class Program {\n    public static int Main(string[] args) {\n        print(args[0]);\n        return 7;\n    }\n}\n",
+    )
+    .expect("program file should be written");
+
+    run_cli_with_args_from(vec!["build".to_string()], &project_dir)
+        .expect("gl build should honor RootNamespace and StartupObject");
+
+    let output_exe = project_dir.join("bin").join("Debug").join("DemoApp.exe");
+    assert!(output_exe.exists());
+
+    let output = Command::new(&output_exe)
+        .arg("hello")
+        .output()
+        .expect("startup-object executable should run");
+    assert_eq!(output.status.code(), Some(7));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\r\n");
+}
+
+#[test]
+fn gl_publish_and_store_include_project_content_files() {
+    let cwd = temp_cli_dir("content-files");
+    let project_dir = cwd.join("DemoApp");
+    fs::create_dir_all(project_dir.join("assets")).expect("assets dir should be created");
+    fs::write(
+        project_dir.join("DemoApp.csproj"),
+        "<Project Sdk=\"Glitching\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>gl1.0</TargetFramework>\n    <AssemblyName>DemoApp</AssemblyName>\n  </PropertyGroup>\n  <ItemGroup>\n    <Content Include=\"assets\\seed.json\" />\n    <PackageReference Include=\"xunit\" Version=\"2.0.0\" />\n  </ItemGroup>\n</Project>\n",
+    )
+    .expect("project file should be written");
+    fs::write(
+        project_dir.join("Program.cs"),
+        "fn main() {\n    print(\"ok\");\n}\n",
+    )
+    .expect("program file should be written");
+    fs::write(project_dir.join("assets").join("seed.json"), "{\"ok\":true}\n")
+        .expect("content file should be written");
+
+    run_cli_with_args_from(vec!["publish".to_string()], &project_dir)
+        .expect("gl publish should copy content files");
+    assert!(project_dir
+        .join("bin")
+        .join("Release")
+        .join("publish")
+        .join("assets")
+        .join("seed.json")
+        .exists());
+
+    run_cli_with_args_from(vec!["store".to_string()], &project_dir)
+        .expect("gl store should include content files and dependencies");
+    let package_path = project_dir
+        .join(".gl")
+        .join("store")
+        .join("DemoApp")
+        .join("0.1.0")
+        .join("DemoApp.0.1.0.nupkg");
+    let package_text =
+        String::from_utf8_lossy(&fs::read(package_path).expect("package should be readable"))
+            .to_string();
+    assert!(package_text.contains("contentFiles/any/any/assets/seed.json"));
+    assert!(package_text.contains("dependency id=\"xunit\" version=\"2.0.0\""));
+}
+
+#[test]
+fn gl_test_honors_is_test_project_metadata() {
+    let cwd = temp_cli_dir("test-project");
+    run_cli_with_args_from(
+        vec!["new".to_string(), "xunit".to_string(), "DemoTests".to_string()],
+        &cwd,
+    )
+    .expect("gl new xunit should succeed");
+
+    let project_dir = cwd.join("DemoTests");
+    run_cli_with_args_from(vec!["test".to_string()], &project_dir)
+        .expect("gl test should run a project marked as IsTestProject");
+}
+
+#[test]
+fn gl_test_rejects_non_test_project_metadata() {
+    let cwd = temp_cli_dir("non-test-project");
+    run_cli_with_args_from(
+        vec!["new".to_string(), "console".to_string(), "DemoApp".to_string()],
+        &cwd,
+    )
+    .expect("gl new console should succeed");
+
+    let project_dir = cwd.join("DemoApp");
+    let error = run_cli_with_args_from(vec!["test".to_string()], &project_dir)
+        .expect_err("gl test should reject non-test projects");
+    assert!(error.contains("is not marked as a test project"));
 }

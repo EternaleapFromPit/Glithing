@@ -1,6 +1,11 @@
 /target/
 /target-codex/
 /.agents/
+/temp_*
+/tmp_*
+/debug_*.gl
+/glitch.ll
+/run_*.log
 /out.c
 /*.nupkg
 /*.c

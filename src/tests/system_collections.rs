@@ -252,6 +252,8 @@ fn emits_llvm_native_nuget_package_assets() {
             version: "0.1.0",
             linked_source: &output.linked_source,
             llvm_ir,
+            dependencies: &[],
+            content_files: &[],
         },
         package_path
             .to_str()
