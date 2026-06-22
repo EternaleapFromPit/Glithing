@@ -523,15 +523,18 @@ pub(super) fn ir_conversion_rank(expected: &IrType, arg: &TypedExpr, env: &TypeE
 
 fn lambda_body_is_void_compatible(arg: &TypedExpr) -> bool {
     match &arg.kind {
-        TypedExprKind::Lambda { body, .. } => matches!(
-            body.kind,
-            TypedExprKind::Assign { .. }
-                | TypedExprKind::Call(_)
-                | TypedExprKind::IncDec { .. }
-                | TypedExprKind::Await(_)
-                | TypedExprKind::NewObject { .. }
-                | TypedExprKind::Null
-        ),
+        TypedExprKind::Lambda { body, .. } => match body {
+            TypedLambdaBody::Expr(body) => matches!(
+                body.kind,
+                TypedExprKind::Assign { .. }
+                    | TypedExprKind::Call(_)
+                    | TypedExprKind::IncDec { .. }
+                    | TypedExprKind::Await(_)
+                    | TypedExprKind::NewObject { .. }
+                    | TypedExprKind::Null
+            ),
+            TypedLambdaBody::Block(_) => true,
+        },
         _ => false,
     }
 }

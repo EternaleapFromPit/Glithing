@@ -134,9 +134,12 @@ pub(super) fn summarize_typed_expr(expr: &TypedExpr, indent: &str, out: &mut Str
             summarize_typed_expr(target, indent, out);
             summarize_typed_expr(value, indent, out);
         }
-        TypedExprKind::Lambda { body, .. } => {
-            summarize_typed_expr(body, indent, out);
-        }
+        TypedExprKind::Lambda { body, .. } => match body {
+            TypedLambdaBody::Expr(body) => summarize_typed_expr(body, indent, out),
+            TypedLambdaBody::Block(stmts) => {
+                summarize_typed_stmts(stmts, indent, out);
+            }
+        },
         TypedExprKind::Conditional {
             condition,
             when_true,

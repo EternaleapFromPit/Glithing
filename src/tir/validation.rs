@@ -269,9 +269,16 @@ pub(super) fn validate_typed_expr_visibility(
             validate_typed_expr_visibility(left, env, caller_package, function_name)?;
             validate_typed_expr_visibility(right, env, caller_package, function_name)?;
         }
-        TypedExprKind::Lambda { body, .. } => {
-            validate_typed_expr_visibility(body, env, caller_package, function_name)?;
-        }
+        TypedExprKind::Lambda { body, .. } => match body {
+            TypedLambdaBody::Expr(body) => {
+                validate_typed_expr_visibility(body, env, caller_package, function_name)?;
+            }
+            TypedLambdaBody::Block(stmts) => {
+                for stmt in stmts {
+                    validate_typed_stmt_visibility(stmt, env, caller_package, function_name)?;
+                }
+            }
+        },
         TypedExprKind::FunctionSymbol(symbol) => {
             if let Some(signature) = env.lookup_signature_by_symbol(symbol) {
                 if !visibility_allows_access(signature.visibility, signature.package_id.as_deref(), caller_package) {
@@ -663,9 +670,15 @@ pub(super) fn validate_async_expr(
         TypedExprKind::IncDec { target, .. } => {
             validate_async_expr(function_name, target, after_uses, scope)
         }
-        TypedExprKind::Lambda { body, .. } => {
-            validate_async_expr(function_name, body, after_uses, scope)
-        }
+        TypedExprKind::Lambda { body, .. } => match body {
+            TypedLambdaBody::Expr(body) => {
+                validate_async_expr(function_name, body, after_uses, scope)
+            }
+            TypedLambdaBody::Block(stmts) => {
+                let mut nested_scope = scope.clone();
+                validate_async_stmts(function_name, stmts, after_uses, &mut nested_scope)
+            }
+        },
         TypedExprKind::NewCollection(_)
         | TypedExprKind::NewThread(_)
         | TypedExprKind::Int(_)
@@ -787,7 +800,10 @@ pub(super) fn expr_contains_await(expr: &TypedExpr) -> bool {
             expr_contains_await(left) || expr_contains_await(right)
         }
         TypedExprKind::IncDec { target, .. } => expr_contains_await(target),
-        TypedExprKind::Lambda { body, .. } => expr_contains_await(body),
+        TypedExprKind::Lambda { body, .. } => match body {
+            TypedLambdaBody::Expr(body) => expr_contains_await(body),
+            TypedLambdaBody::Block(stmts) => stmts.iter().any(stmt_contains_await),
+        },
         TypedExprKind::NewCollection(_)
         | TypedExprKind::NewThread(_)
         | TypedExprKind::Int(_)
@@ -946,7 +962,10 @@ pub(super) fn collect_used_bindings_expr(expr: &TypedExpr, out: &mut HashSet<Str
             collect_used_bindings_expr(right, out);
         }
         TypedExprKind::IncDec { target, .. } => collect_used_bindings_expr(target, out),
-        TypedExprKind::Lambda { body, .. } => collect_used_bindings_expr(body, out),
+        TypedExprKind::Lambda { body, .. } => match body {
+            TypedLambdaBody::Expr(body) => collect_used_bindings_expr(body, out),
+            TypedLambdaBody::Block(stmts) => collect_used_bindings_stmts(stmts, out),
+        },
         TypedExprKind::NewCollection(_)
         | TypedExprKind::NewThread(_)
         | TypedExprKind::Int(_)

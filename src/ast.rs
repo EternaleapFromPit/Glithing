@@ -258,7 +258,7 @@ pub(crate) enum Expr {
     Await(Box<Expr>),
     Lambda {
         params: Vec<String>,
-        body: Box<Expr>,
+        body: LambdaBody,
     },
     Conditional {
         condition: Box<Expr>,
@@ -291,6 +291,12 @@ pub(crate) enum Expr {
         modifier: ParamModifier,
         expr: Box<Expr>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum LambdaBody {
+    Expr(Box<Expr>),
+    Block(Vec<Stmt>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

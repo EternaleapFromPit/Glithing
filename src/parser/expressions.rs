@@ -25,14 +25,13 @@ impl Parser {
                 && self.match_kind(&TokenKind::Arrow)
             {
                 let body = if self.at(&TokenKind::LBrace) {
-                    let _stmts = self.parse_stmt_body()?;
-                    Expr::Null
+                    LambdaBody::Block(self.parse_stmt_body()?)
                 } else {
-                    self.parse_expr()?
+                    LambdaBody::Expr(Box::new(self.parse_expr()?))
                 };
                 return Ok(Expr::Lambda {
                     params,
-                    body: Box::new(body),
+                    body,
                 });
             }
             self.pos = checkpoint;
@@ -42,14 +41,13 @@ impl Parser {
                 self.advance();
                 self.expect(TokenKind::Arrow)?;
                 let body = if self.at(&TokenKind::LBrace) {
-                    let _stmts = self.parse_stmt_body()?;
-                    Expr::Null
+                    LambdaBody::Block(self.parse_stmt_body()?)
                 } else {
-                    self.parse_expr()?
+                    LambdaBody::Expr(Box::new(self.parse_expr()?))
                 };
                 return Ok(Expr::Lambda {
                     params: vec![name],
-                    body: Box::new(body),
+                    body,
                 });
             }
         }

@@ -4,6 +4,10 @@ using System.Collections.Generic;
 using Microsoft.Extensions.DependencyInjection;
 
 extern int GlitchRestHost_read_env_int(string name, int fallback);
+extern long GlitchRestHost_read_env_i64(string name, long fallback);
+extern bool GlitchRestHost_read_env_bool(string name, bool fallback);
+extern string GlitchRestHost_read_env_string(string name, string fallback);
+extern string GlitchRestHost_read_connection_string(string name, string fallback);
 
 native "
 #ifdef _WIN32
@@ -262,16 +266,35 @@ static void GlitchRestHost_Run(struct WebApplication *app, int port, int max_req
 ";
 
 public class ConfigurationManager {
+    public string Prefix;
+
+    public ConfigurationManager() {
+        this.Prefix = "";
+    }
+
+    public ConfigurationManager(string prefix) {
+        this.Prefix = prefix;
+    }
+
+    public string get_Item(string name) {
+        string fullName = this.Prefix + name;
+        string value = GlitchRestHost_read_env_string(fullName, "");
+        return value;
+    }
+
     string GetConnectionString(string name) {
-        return "";
+        return GlitchRestHost_read_connection_string(name, "");
     }
 
     ConfigurationManager GetSection(string name) {
-        return new ConfigurationManager();
+        string sectionPrefix = this.Prefix + name;
+        string fullPrefix = sectionPrefix + ":";
+        ConfigurationManager section = new ConfigurationManager(fullPrefix);
+        return section;
     }
 
     string Get(string name) {
-        return "";
+        return this.get_Item(name);
     }
 
     T Get<T>() {

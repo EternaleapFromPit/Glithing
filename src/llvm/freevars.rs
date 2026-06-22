@@ -33,7 +33,16 @@ pub(super) fn collect_free_vars_expr(
                 .chain(inner_params.iter())
                 .cloned()
                 .collect();
-            collect_free_vars_expr(body, &merged_params, scope, seen, out);
+            match body {
+                TypedLambdaBody::Expr(body) => {
+                    collect_free_vars_expr(body, &merged_params, scope, seen, out);
+                }
+                TypedLambdaBody::Block(stmts) => {
+                    for stmt in stmts {
+                        collect_free_vars_stmt(stmt, &merged_params, scope, seen, out);
+                    }
+                }
+            }
         }
         TypedExprKind::Field { target, .. } | TypedExprKind::Await(target) => {
             collect_free_vars_expr(target, lambda_params, scope, seen, out);
@@ -112,6 +121,107 @@ pub(super) fn collect_free_vars_expr(
         | TypedExprKind::FunctionSymbol(_)
         | TypedExprKind::NewCollection(_)
         | TypedExprKind::NewThread(_) => {}
+    }
+}
+
+pub(super) fn collect_free_vars_stmt(
+    stmt: &TypedStmt,
+    lambda_params: &[String],
+    scope: &HashMap<String, LlVar>,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<(String, LlVar)>,
+) {
+    match &stmt.kind {
+        TypedStmtKind::Let { expr, .. }
+        | TypedStmtKind::Assign { expr, .. }
+        | TypedStmtKind::Print(expr)
+        | TypedStmtKind::Expr(expr)
+        | TypedStmtKind::Return(Some(expr))
+        | TypedStmtKind::Throw(expr) => collect_free_vars_expr(expr, lambda_params, scope, seen, out),
+        TypedStmtKind::AssignTarget { target, expr } => {
+            collect_free_vars_expr(target, lambda_params, scope, seen, out);
+            collect_free_vars_expr(expr, lambda_params, scope, seen, out);
+        }
+        TypedStmtKind::Block(body) => {
+            for stmt in body {
+                collect_free_vars_stmt(stmt, lambda_params, scope, seen, out);
+            }
+        }
+        TypedStmtKind::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            collect_free_vars_expr(condition, lambda_params, scope, seen, out);
+            for stmt in then_body {
+                collect_free_vars_stmt(stmt, lambda_params, scope, seen, out);
+            }
+            for stmt in else_body {
+                collect_free_vars_stmt(stmt, lambda_params, scope, seen, out);
+            }
+        }
+        TypedStmtKind::Try {
+            try_body,
+            catch_body,
+            finally_body,
+            ..
+        } => {
+            for stmt in try_body {
+                collect_free_vars_stmt(stmt, lambda_params, scope, seen, out);
+            }
+            for stmt in catch_body {
+                collect_free_vars_stmt(stmt, lambda_params, scope, seen, out);
+            }
+            for stmt in finally_body {
+                collect_free_vars_stmt(stmt, lambda_params, scope, seen, out);
+            }
+        }
+        TypedStmtKind::Switch { expr, cases, default } => {
+            collect_free_vars_expr(expr, lambda_params, scope, seen, out);
+            for case in cases {
+                collect_free_vars_expr(&case.value, lambda_params, scope, seen, out);
+                for stmt in &case.body {
+                    collect_free_vars_stmt(stmt, lambda_params, scope, seen, out);
+                }
+            }
+            for stmt in default {
+                collect_free_vars_stmt(stmt, lambda_params, scope, seen, out);
+            }
+        }
+        TypedStmtKind::While { condition, body } => {
+            collect_free_vars_expr(condition, lambda_params, scope, seen, out);
+            for stmt in body {
+                collect_free_vars_stmt(stmt, lambda_params, scope, seen, out);
+            }
+        }
+        TypedStmtKind::For {
+            init,
+            condition,
+            increment,
+            body,
+        } => {
+            if let Some(init) = init {
+                collect_free_vars_stmt(init, lambda_params, scope, seen, out);
+            }
+            if let Some(condition) = condition {
+                collect_free_vars_expr(condition, lambda_params, scope, seen, out);
+            }
+            if let Some(increment) = increment {
+                collect_free_vars_stmt(increment, lambda_params, scope, seen, out);
+            }
+            for stmt in body {
+                collect_free_vars_stmt(stmt, lambda_params, scope, seen, out);
+            }
+        }
+        TypedStmtKind::ForEach { collection, body, .. } => {
+            collect_free_vars_expr(collection, lambda_params, scope, seen, out);
+            for stmt in body {
+                collect_free_vars_stmt(stmt, lambda_params, scope, seen, out);
+            }
+        }
+        TypedStmtKind::Return(None)
+        | TypedStmtKind::Break
+        | TypedStmtKind::Continue => {}
     }
 }
 

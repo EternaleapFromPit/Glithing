@@ -147,7 +147,7 @@ pub(super) fn lower_function(
                 },
             );
     }
-    let body = lower_typed_stmts(&function.body, env, &mut typed_scopes)?;
+    let body = lower_typed_stmts(&function.body, env, &mut typed_scopes, Some(&return_type))?;
     Ok(TypedFunction {
         package_id: function.package_id.clone(),
         visibility: function.visibility,
@@ -290,7 +290,7 @@ pub(super) fn find_expected_types(candidates: &[FunctionSignature], args: &[Expr
 
 pub(super) fn lower_lambda(
     params: &[String],
-    body: &Expr,
+    body: &LambdaBody,
     expected_type: Option<&IrType>,
     env: &TypeEnv,
     scopes: &[HashMap<String, TypedBinding>],
@@ -330,8 +330,35 @@ pub(super) fn lower_lambda(
         );
     }
     new_scopes.push(lambda_scope);
-    let typed_body = lower_typed_expr(&body, env, &new_scopes)?;
-    let return_type = typed_body.ty.clone();
+    let expected_return = expected_type.and_then(|ty| match ty {
+        IrType::Function { return_type, .. } => Some(return_type.as_ref().clone()),
+        _ => None,
+    });
+    let (typed_body, return_type) = match body {
+        LambdaBody::Expr(expr) => {
+            let typed_body = lower_typed_expr_with_expected(
+                expr,
+                env,
+                &new_scopes,
+                expected_return.as_ref(),
+            )?;
+            let return_type = typed_body.ty.clone();
+            (TypedLambdaBody::Expr(Box::new(typed_body)), return_type)
+        }
+        LambdaBody::Block(stmts) => {
+            let mut lambda_scopes = new_scopes.clone();
+            let typed_body = lower_typed_stmts(
+                stmts,
+                env,
+                &mut lambda_scopes,
+                expected_return.as_ref(),
+            )?;
+            (
+                TypedLambdaBody::Block(typed_body),
+                expected_return.unwrap_or(IrType::Void),
+            )
+        }
+    };
     let lambda_ty = IrType::Function {
         params: param_types,
         return_type: Box::new(return_type),
@@ -339,14 +366,25 @@ pub(super) fn lower_lambda(
     Ok(typed_expr_with_ownership(
         TypedExprKind::Lambda {
             params: params.to_vec(),
-            body: Box::new(typed_body),
+            body: typed_body,
         },
         lambda_ty,
         Ownership::Shared,
     ))
 }
 
-pub(super) fn collect_lambda_captures(expr: &Expr, params: &[String], out: &mut Vec<String>) {
+pub(super) fn collect_lambda_captures(body: &LambdaBody, params: &[String], out: &mut Vec<String>) {
+    match body {
+        LambdaBody::Expr(expr) => collect_lambda_captures_expr(expr, params, out),
+        LambdaBody::Block(stmts) => {
+            for stmt in stmts {
+                collect_lambda_captures_stmt(stmt, params, out);
+            }
+        }
+    }
+}
+
+fn collect_lambda_captures_expr(expr: &Expr, params: &[String], out: &mut Vec<String>) {
     match expr {
         Expr::Var(name) | Expr::Move(name) | Expr::Borrow { name, .. } => {
             if !params.contains(name) {
@@ -355,47 +393,47 @@ pub(super) fn collect_lambda_captures(expr: &Expr, params: &[String], out: &mut 
         }
         Expr::ArrayLiteral(values) => {
             for value in values {
-                collect_lambda_captures(value, params, out);
+                collect_lambda_captures_expr(value, params, out);
             }
         }
         Expr::NewArray { length, values, .. } => {
             if let Some(length) = length {
-                collect_lambda_captures(length, params, out);
+                collect_lambda_captures_expr(length, params, out);
             }
             for value in values {
-                collect_lambda_captures(value, params, out);
+                collect_lambda_captures_expr(value, params, out);
             }
         }
         Expr::Index { target, index } => {
-            collect_lambda_captures(target, params, out);
-            collect_lambda_captures(index, params, out);
+            collect_lambda_captures_expr(target, params, out);
+            collect_lambda_captures_expr(index, params, out);
         }
-        Expr::Field { target, .. } => collect_lambda_captures(target, params, out),
+        Expr::Field { target, .. } => collect_lambda_captures_expr(target, params, out),
         Expr::IsPattern { expr, .. } | Expr::Await(expr) | Expr::Unary { expr, .. } => {
-            collect_lambda_captures(expr, params, out)
+            collect_lambda_captures_expr(expr, params, out)
         }
-        Expr::Throw(expr) => collect_lambda_captures(expr, params, out),
+        Expr::Throw(expr) => collect_lambda_captures_expr(expr, params, out),
         Expr::Assign { target, value } => {
-            collect_lambda_captures(target, params, out);
-            collect_lambda_captures(value, params, out);
+            collect_lambda_captures_expr(target, params, out);
+            collect_lambda_captures_expr(value, params, out);
         }
         Expr::Conditional {
             condition,
             when_true,
             when_false,
         } => {
-            collect_lambda_captures(condition, params, out);
-            collect_lambda_captures(when_true, params, out);
-            collect_lambda_captures(when_false, params, out);
+            collect_lambda_captures_expr(condition, params, out);
+            collect_lambda_captures_expr(when_true, params, out);
+            collect_lambda_captures_expr(when_false, params, out);
         }
         Expr::Binary { left, right, .. } => {
-            collect_lambda_captures(left, params, out);
-            collect_lambda_captures(right, params, out);
+            collect_lambda_captures_expr(left, params, out);
+            collect_lambda_captures_expr(right, params, out);
         }
         Expr::MethodCall { target, args, .. } => {
-            collect_lambda_captures(target, params, out);
+            collect_lambda_captures_expr(target, params, out);
             for arg in args {
-                collect_lambda_captures(arg, params, out);
+                collect_lambda_captures_expr(arg, params, out);
             }
         }
         Expr::IncDec { name, .. } => {
@@ -405,15 +443,15 @@ pub(super) fn collect_lambda_captures(expr: &Expr, params: &[String], out: &mut 
         }
         Expr::FunctionCall { args, .. } => {
             for arg in args {
-                collect_lambda_captures(arg, params, out);
+                collect_lambda_captures_expr(arg, params, out);
             }
         }
         Expr::NewObject { args, fields, .. } => {
             for arg in args {
-                collect_lambda_captures(arg, params, out);
+                collect_lambda_captures_expr(arg, params, out);
             }
             for field in fields {
-                collect_lambda_captures(&field.expr, params, out);
+                collect_lambda_captures_expr(&field.expr, params, out);
             }
         }
         Expr::Lambda { params: inner_params, body } => {
@@ -430,8 +468,102 @@ pub(super) fn collect_lambda_captures(expr: &Expr, params: &[String], out: &mut 
         | Expr::NewThread(_)
         => {}
         Expr::NamedArg { expr, .. } | Expr::RefArg { expr, .. } => {
-            collect_lambda_captures(expr, params, out);
+            collect_lambda_captures_expr(expr, params, out);
         }
+    }
+}
+
+fn collect_lambda_captures_stmt(stmt: &Stmt, params: &[String], out: &mut Vec<String>) {
+    match stmt {
+        Stmt::Let { expr, .. }
+        | Stmt::Assign { expr, .. }
+        | Stmt::Print(expr)
+        | Stmt::Expr(expr)
+        | Stmt::Throw(expr) => collect_lambda_captures_expr(expr, params, out),
+        Stmt::AssignTarget { target, expr } => {
+            collect_lambda_captures_expr(target, params, out);
+            collect_lambda_captures_expr(expr, params, out);
+        }
+        Stmt::Block(body) => {
+            for stmt in body {
+                collect_lambda_captures_stmt(stmt, params, out);
+            }
+        }
+        Stmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            collect_lambda_captures_expr(condition, params, out);
+            for stmt in then_body {
+                collect_lambda_captures_stmt(stmt, params, out);
+            }
+            for stmt in else_body {
+                collect_lambda_captures_stmt(stmt, params, out);
+            }
+        }
+        Stmt::Try {
+            try_body,
+            catch,
+            finally_body,
+        } => {
+            for stmt in try_body {
+                collect_lambda_captures_stmt(stmt, params, out);
+            }
+            if let Some(catch) = catch {
+                for stmt in &catch.body {
+                    collect_lambda_captures_stmt(stmt, params, out);
+                }
+            }
+            for stmt in finally_body {
+                collect_lambda_captures_stmt(stmt, params, out);
+            }
+        }
+        Stmt::Switch { expr, cases, default } => {
+            collect_lambda_captures_expr(expr, params, out);
+            for case in cases {
+                collect_lambda_captures_expr(&case.value, params, out);
+                for stmt in &case.body {
+                    collect_lambda_captures_stmt(stmt, params, out);
+                }
+            }
+            for stmt in default {
+                collect_lambda_captures_stmt(stmt, params, out);
+            }
+        }
+        Stmt::While { condition, body } => {
+            collect_lambda_captures_expr(condition, params, out);
+            for stmt in body {
+                collect_lambda_captures_stmt(stmt, params, out);
+            }
+        }
+        Stmt::For {
+            init,
+            condition,
+            increment,
+            body,
+        } => {
+            if let Some(init) = init {
+                collect_lambda_captures_stmt(init, params, out);
+            }
+            if let Some(condition) = condition {
+                collect_lambda_captures_expr(condition, params, out);
+            }
+            if let Some(increment) = increment {
+                collect_lambda_captures_stmt(increment, params, out);
+            }
+            for stmt in body {
+                collect_lambda_captures_stmt(stmt, params, out);
+            }
+        }
+        Stmt::ForEach { collection, body, .. } => {
+            collect_lambda_captures_expr(collection, params, out);
+            for stmt in body {
+                collect_lambda_captures_stmt(stmt, params, out);
+            }
+        }
+        Stmt::Return(Some(expr)) => collect_lambda_captures_expr(expr, params, out),
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
     }
 }
 
@@ -720,6 +852,45 @@ pub(super) fn lower_typed_expr_with_expected(
         Expr::Index { target, index } => {
             let target = lower_typed_expr(target, env, scopes)?;
             let index = lower_typed_expr(index, env, scopes)?;
+            if let IrType::Class(type_name)
+            | IrType::Struct(type_name)
+            | IrType::Interface(type_name)
+            | IrType::Unknown(type_name) = &target.ty
+            {
+                let simple = base_type_name(type_name);
+                let index_args = vec![index.clone()];
+                let resolved = if matches!(simple, "string" | "String") {
+                    None
+                } else {
+                    env.resolve_method_call(type_name, "get_Item", &index_args)?
+                        .or_else(|| {
+                            env.resolve_extension_method_call(
+                                type_name,
+                                "get_Item",
+                                &target,
+                                &index_args,
+                            )
+                            .ok()
+                            .flatten()
+                        })
+                };
+                if let Some(signature) = resolved {
+                    return Ok(typed_expr_with_ownership(
+                        TypedExprKind::Call(TypedCall {
+                            kind: TypedCallKind::Method {
+                                target: Box::new(target),
+                                name: "get_Item".to_string(),
+                                symbol: signature.symbol.clone(),
+                                resolution: CallResolution::InstanceMethod,
+                            },
+                            args: index_args,
+                            generic_args: Vec::new(),
+                        }),
+                        signature.return_type.clone(),
+                        signature.return_ownership.clone(),
+                    ));
+                }
+            }
             let ty = match &target.ty {
                 IrType::List(inner) | IrType::Array(inner) | IrType::Enumerable(inner) => {
                     inner.as_ref().clone()
@@ -1838,7 +2009,16 @@ pub(super) fn lower_expr(
             typed_temp(IrType::Bool)
         }
         Expr::Lambda { body, .. } => {
-            lower_expr(body, env, scopes)?;
+            match body {
+                LambdaBody::Expr(body) => {
+                    lower_expr(body, env, scopes)?;
+                }
+                LambdaBody::Block(stmts) => {
+                    let mut lambda_scopes = scopes.to_vec();
+                    let mut lambda_locals = Vec::new();
+                    lower_stmts(stmts, env, &mut lambda_scopes, &mut lambda_locals)?;
+                }
+            }
             typed_temp(IrType::Unknown("lambda".to_string()))
         }
         Expr::Conditional {

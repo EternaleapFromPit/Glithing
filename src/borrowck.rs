@@ -524,7 +524,10 @@ impl BorrowChecker {
                 for param in params {
                     state.declare(param);
                 }
-                Self::check_expr(body, state)?;
+                match body {
+                    LambdaBody::Expr(body) => Self::check_expr(body, state)?,
+                    LambdaBody::Block(stmts) => Self::check_stmts(stmts, state)?,
+                }
                 state.pop_scope();
             }
             Expr::Conditional {

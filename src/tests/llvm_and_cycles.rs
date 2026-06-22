@@ -515,10 +515,14 @@ fn warns_for_configuration_manager_stub_members() {
     let source = r#"
             using Glitching.AspNetCore;
 
+            class DemoOptions {
+                public string Name;
+            }
+
             fn main() {
                 WebApplicationBuilder builder = CreateBuilder(new string[] { });
-                int port = builder.Configuration.GetValue<int>("port");
-                print(port);
+                DemoOptions options = builder.Configuration.Get<DemoOptions>();
+                print(options == null);
             }
         "#;
 
@@ -529,6 +533,40 @@ fn warns_for_configuration_manager_stub_members() {
     assert!(diagnostics.contains("warning GL3013"));
     assert!(diagnostics.contains("ConfigurationManager"));
     assert!(diagnostics.contains("compatibility stub"));
+}
+
+#[test]
+fn configuration_manager_value_and_section_surfaces_lower_without_stub_warning() {
+    let source = r#"
+            using Glitching.AspNetCore;
+
+            fn main() {
+                WebApplicationBuilder builder = CreateBuilder(new string[] { });
+                ConfigurationManager jwt = builder.Configuration.GetSection("Jwt");
+                string issuer = jwt["Issuer"];
+                int port = builder.Configuration.GetValue<int>("Port");
+                bool rebuild = builder.Configuration.GetValue<bool>("RebuildDataBase");
+                long maxItems = builder.Configuration.GetValue<long>("MaxItems");
+                string connection = builder.Configuration.GetConnectionString("Library");
+                print(issuer);
+                print(port);
+                print(rebuild);
+                print(maxItems);
+                print(connection);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("configuration manager value/section surfaces should compile");
+    let diagnostics = output.diagnostics.join("\n");
+    let llvm_ir = output.llvm_ir().expect("LLVM IR should be present");
+
+    assert!(!diagnostics.contains("ConfigurationManager"), "{diagnostics}");
+    assert!(llvm_ir.contains("GlitchRestHost_read_env_string"));
+    assert!(llvm_ir.contains("GlitchRestHost_read_env_int"));
+    assert!(llvm_ir.contains("GlitchRestHost_read_env_bool"));
+    assert!(llvm_ir.contains("GlitchRestHost_read_env_i64"));
+    assert!(llvm_ir.contains("GlitchRestHost_read_connection_string"));
 }
 
 #[test]
@@ -651,7 +689,7 @@ fn warns_for_noop_service_registration_markers() {
 }
 
 #[test]
-fn warns_for_authentication_configuration_markers() {
+fn authentication_builder_configuration_surfaces_lower_without_placeholder_warning() {
     let source = r#"
             using Microsoft.Extensions.DependencyInjection;
             using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -665,11 +703,45 @@ fn warns_for_authentication_configuration_markers() {
         "#;
 
     let output = compile_source_with_options(source, true, false)
-        .expect("authentication configuration markers should still compile with a warning");
+        .expect("authentication builder configuration surfaces should compile");
     let diagnostics = output.diagnostics.join("\n");
 
-    assert!(diagnostics.contains("warning GL3013"));
-    assert!(diagnostics.contains("authentication configuration call is still a compatibility surface"));
+    assert!(!diagnostics.contains("GL3013"), "{diagnostics}");
+}
+
+#[test]
+fn startup_configuration_delegate_surfaces_lower_without_placeholder_warning() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+            using Microsoft.AspNetCore.Authentication.JwtBearer;
+
+            class Marks {
+                public int A;
+                public int B;
+                public int C;
+                public int D;
+                public int E;
+                public int F;
+            }
+
+            fn main() {
+                Marks marks = new Marks();
+                ServiceCollection services = new ServiceCollection();
+                services.AddLocalization(x => marks.A = 11);
+                services.AddSwaggerGen(x => marks.B = 12);
+                services.AddCors(x => marks.C = 13);
+                services.AddMvc(opt => marks.D = 14).AddJsonOptions(opt => marks.E = 15);
+
+                AuthenticationBuilder auth = services.AddAuthentication();
+                auth.AddJwtBearer(options => marks.F = 16);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("startup configuration delegates should compile");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(!diagnostics.contains("GL3013"), "{diagnostics}");
 }
 
 #[test]

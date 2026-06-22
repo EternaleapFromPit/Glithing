@@ -309,7 +309,9 @@ impl LlvmEmitter {
             startup: program.startup.clone(),
         };
         for ty in &program.types {
-            emitter.register_object_type(ty);
+            if ty.generic_params.is_empty() {
+                emitter.register_object_type(ty);
+            }
         }
         emitter.register_rc_instantiations(program);
         emitter.register_generic_type_specializations(program)?;
@@ -470,6 +472,9 @@ impl LlvmEmitter {
             },
         );
         for ty in &program.types {
+            if !ty.generic_params.is_empty() {
+                continue;
+            }
             for constructor in &ty.constructors {
                 emitter.register_function(constructor);
             }
@@ -484,6 +489,9 @@ impl LlvmEmitter {
         emitter.emit_drop_glue();
         let mut emitted_symbols = HashSet::new();
         for ty in &program.types {
+            if !ty.generic_params.is_empty() {
+                continue;
+            }
             if ty.kind == TypeKind::Interface && ty.methods.iter().all(|method| method.body.is_empty()) {
                 continue;
             }
@@ -831,6 +839,24 @@ impl LlvmEmitter {
                 }
             }
         }
+        for function in self.specialized_functions.clone() {
+            let mut discovered = Vec::new();
+            collect_generic_instantiations_from_function(
+                &function,
+                &generic_symbols,
+                &self.specialized_instance_symbols,
+                &mut discovered,
+            );
+            for instantiation in discovered {
+                if !is_concrete_instantiation(&instantiation.args) {
+                    continue;
+                }
+                let key = (instantiation.name.clone(), instantiation.args.clone());
+                if queued.insert(key) {
+                    queue.push_back(instantiation);
+                }
+            }
+        }
 
         let mut pending = Vec::new();
         while let Some(instantiation) = queue.pop_front() {
@@ -878,6 +904,10 @@ impl LlvmEmitter {
                 subst.insert(name, ty);
             }
             let specialized = specialize_typed_function(definition, &subst, specialized_symbol);
+            let mut discovered_types = HashSet::new();
+            collect_generic_object_instantiations_function(&specialized, &mut discovered_types);
+            let previous_specialized_len = self.specialized_functions.len();
+            self.ensure_generic_type_specializations(program, discovered_types)?;
             let mut discovered = Vec::new();
             collect_generic_instantiations_from_function(
                 &specialized,
@@ -895,6 +925,25 @@ impl LlvmEmitter {
                 }
                 queue.push_back(next);
             }
+            for function in self.specialized_functions[previous_specialized_len..].iter() {
+                let mut nested = Vec::new();
+                collect_generic_instantiations_from_function(
+                    function,
+                    &generic_symbols,
+                    &self.specialized_instance_symbols,
+                    &mut nested,
+                );
+                for next in nested {
+                    if !is_concrete_instantiation(&next.args) {
+                        continue;
+                    }
+                    let next_key = (next.name.clone(), next.args.clone());
+                    if self.specialized_symbols.contains_key(&next_key) || !queued.insert(next_key) {
+                        continue;
+                    }
+                    queue.push_back(next);
+                }
+            }
             pending.push(specialized);
         }
         self.specialized_functions.extend(pending);
@@ -907,19 +956,40 @@ impl LlvmEmitter {
     ) -> Result<(), String> {
         let mut instantiations = HashSet::new();
         collect_generic_object_instantiations_program(program, &mut instantiations);
+        self.ensure_generic_type_specializations(program, instantiations)
+    }
+
+    fn ensure_generic_type_specializations<I>(
+        &mut self,
+        program: &TypedProgram,
+        instantiations: I,
+    ) -> Result<(), String>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let templates = program
+            .types
+            .iter()
+            .filter(|ty| !ty.generic_params.is_empty())
+            .map(|ty| ((ty.name.clone(), ty.generic_params.len()), ty))
+            .collect::<HashMap<_, _>>();
+        let mut queue = VecDeque::new();
+        let mut queued = HashSet::new();
         for type_name in instantiations {
+            if self.object_types.contains_key(&type_name) || !queued.insert(type_name.clone()) {
+                continue;
+            }
+            queue.push_back(type_name);
+        }
+        while let Some(type_name) = queue.pop_front() {
             if self.object_types.contains_key(&type_name) {
                 continue;
             }
             let Some((base_name, args)) = split_monomorphized_type(&type_name) else {
                 continue;
             };
-            let base_name = base_type_name(base_name);
-            let Some(template) = program.types.iter().find(|ty| {
-                ty.name == base_name
-                    && !ty.generic_params.is_empty()
-                    && ty.generic_params.len() == args.len()
-            }) else {
+            let base_name = base_type_name(base_name).to_string();
+            let Some(template) = templates.get(&(base_name.clone(), args.len())).copied() else {
                 continue;
             };
             let generic_args = args
@@ -931,6 +1001,9 @@ impl LlvmEmitter {
                         "LLVM TIR backend: could not parse generic type instantiation '{type_name}'"
                     )
                 })?;
+            if !is_concrete_instantiation(&generic_args) {
+                continue;
+            }
             let specialized = specialize_typed_type_owner(template, &type_name, &generic_args);
             for (template_constructor, constructor) in
                 template.constructors.iter().zip(specialized.constructors.iter())
@@ -957,6 +1030,28 @@ impl LlvmEmitter {
                 .extend(specialized.constructors.iter().cloned());
             self.specialized_functions
                 .extend(specialized.methods.iter().cloned());
+
+            let mut discovered = HashSet::new();
+            for base in &specialized.bases {
+                if base.contains('<') {
+                    discovered.insert(base.clone());
+                }
+            }
+            for field in &specialized.fields {
+                collect_generic_object_instantiation_type(&field.ty, &mut discovered);
+            }
+            for constructor in &specialized.constructors {
+                collect_generic_object_instantiations_function(constructor, &mut discovered);
+            }
+            for method in &specialized.methods {
+                collect_generic_object_instantiations_function(method, &mut discovered);
+            }
+            for next in discovered {
+                if self.object_types.contains_key(&next) || !queued.insert(next.clone()) {
+                    continue;
+                }
+                queue.push_back(next);
+            }
         }
         Ok(())
     }

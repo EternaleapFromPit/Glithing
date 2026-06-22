@@ -853,6 +853,45 @@ fn native_object_equals_compares_boxed_scalars_and_strings() {
 }
 
 #[test]
+fn native_return_of_local_owned_values_moves_without_leaking() {
+    let source = r#"
+            class Box {
+                public string Value;
+
+                public Box(string value) {
+                    this.Value = value;
+                }
+            }
+
+            string MakeText() {
+                string text = "abc";
+                return text;
+            }
+
+            Box MakeBox() {
+                string value = "boxed";
+                Box box = new Box(value);
+                return box;
+            }
+
+            fn main() {
+                string text = MakeText();
+                Box box = MakeBox();
+                print(text);
+                print(box.Value);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("owned-return-move-native", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines, vec!["abc", "boxed", "0"]);
+}
+
+#[test]
 fn lowers_nullable_value_types_without_the_old_warning() {
     let source = r#"
             struct Point {

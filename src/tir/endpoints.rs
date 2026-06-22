@@ -217,7 +217,10 @@ impl<'a> EndpointHandlerCollector<'a> {
             }
             Expr::Unary { expr, .. } => self.collect_expr(expr)?,
             Expr::IncDec { .. } => {}
-            Expr::Lambda { body, .. } => self.collect_expr(body)?,
+            Expr::Lambda { body, .. } => match body {
+                LambdaBody::Expr(body) => self.collect_expr(body)?,
+                LambdaBody::Block(stmts) => self.collect_stmts(stmts)?,
+            },
             Expr::Conditional {
                 condition,
                 when_true,

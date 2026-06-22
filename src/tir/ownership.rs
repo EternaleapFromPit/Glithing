@@ -1140,7 +1140,22 @@ impl OwnershipChecker {
                 }
             }
             Expr::Lambda { body, .. } => {
-                Self::check_expr(body, env, state)?;
+                match body {
+                    LambdaBody::Expr(body) => {
+                        Self::check_expr(body, env, state)?;
+                    }
+                    LambdaBody::Block(stmts) => {
+                        let mut nested_state = state.clone();
+                        Self::check_stmts(
+                            "lambda",
+                            stmts,
+                            env,
+                            &mut nested_state,
+                            &IrType::Void,
+                            Ownership::Copy,
+                        )?;
+                    }
+                }
                 CheckedExpr {
                     ty: IrType::Unknown("lambda".to_string()),
                     ownership: Ownership::Shared,

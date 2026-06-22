@@ -177,7 +177,14 @@ impl<'a> LeakAnalyzer<'a> {
             }
             Expr::Unary { expr, .. } => self.analyze_expr(context, expr),
             Expr::IncDec { .. } => {}
-            Expr::Lambda { body, .. } => self.analyze_expr(context, body),
+            Expr::Lambda { body, .. } => match body {
+                LambdaBody::Expr(body) => self.analyze_expr(context, body),
+                LambdaBody::Block(stmts) => {
+                    for stmt in stmts {
+                        self.analyze_stmt(context, stmt);
+                    }
+                }
+            },
             Expr::Conditional {
                 condition,
                 when_true,

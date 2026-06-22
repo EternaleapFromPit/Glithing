@@ -282,7 +282,7 @@ pub(crate) enum TypedExprKind {
     Await(Box<TypedExpr>),
     Lambda {
         params: Vec<String>,
-        body: Box<TypedExpr>,
+        body: TypedLambdaBody,
     },
     Conditional {
         condition: Box<TypedExpr>,
@@ -303,6 +303,12 @@ pub(crate) enum TypedExprKind {
         op: BinaryOp,
         right: Box<TypedExpr>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum TypedLambdaBody {
+    Expr(Box<TypedExpr>),
+    Block(Vec<TypedStmt>),
 }
 
 #[derive(Debug, Clone)]

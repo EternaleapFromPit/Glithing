@@ -1,6 +1,6 @@
 package Microsoft.Extensions.Localization;
 
-class LocalizedString {
+public class LocalizedString {
     public string Value;
 
     public LocalizedString() {
@@ -12,5 +12,14 @@ class LocalizedString {
     }
 }
 
-interface IStringLocalizer<T> {
+public interface IStringLocalizer<T> {
+    public LocalizedString get_Item(string name);
+}
+
+public class StringLocalizer<T> : IStringLocalizer<T> {
+    public StringLocalizer() {}
+
+    public LocalizedString get_Item(string name) {
+        return new LocalizedString(name);
+    }
 }

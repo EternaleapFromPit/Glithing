@@ -412,14 +412,24 @@ pub(super) fn collect_generic_call_instantiations_expr(
                 output,
             );
         }
-        TypedExprKind::Lambda { body, .. } => {
-            collect_generic_call_instantiations_expr(
-                body,
-                generic_symbols,
-                specialized_instance_symbols,
-                output,
-            );
-        }
+        TypedExprKind::Lambda { body, .. } => match body {
+            TypedLambdaBody::Expr(body) => {
+                collect_generic_call_instantiations_expr(
+                    body,
+                    generic_symbols,
+                    specialized_instance_symbols,
+                    output,
+                );
+            }
+            TypedLambdaBody::Block(stmts) => {
+                collect_generic_call_instantiations_stmts(
+                    stmts,
+                    generic_symbols,
+                    specialized_instance_symbols,
+                    output,
+                );
+            }
+        },
         TypedExprKind::Call(call) => {
             match &call.kind {
                 TypedCallKind::Function { symbol, .. } => {
@@ -760,7 +770,17 @@ pub(super) fn specialize_typed_expr(expr: TypedExpr, subst: &HashMap<String, IrT
         },
         TypedExprKind::Lambda { params, body } => TypedExprKind::Lambda {
             params,
-            body: Box::new(specialize_typed_expr(*body, subst)),
+            body: match body {
+                TypedLambdaBody::Expr(body) => {
+                    TypedLambdaBody::Expr(Box::new(specialize_typed_expr(*body, subst)))
+                }
+                TypedLambdaBody::Block(stmts) => TypedLambdaBody::Block(
+                    stmts
+                        .into_iter()
+                        .map(|stmt| specialize_typed_stmt(stmt, subst))
+                        .collect(),
+                ),
+            },
         },
         TypedExprKind::NullableSome(value) => {
             TypedExprKind::NullableSome(Box::new(specialize_typed_expr(*value, subst)))
@@ -978,7 +998,11 @@ pub(super) fn specialize_typed_type_owner(
         symbol_id: ty.symbol_id,
         is_extension: ty.is_extension,
         kind: ty.kind,
-        bases: ty.bases.clone(),
+        bases: ty
+            .bases
+            .iter()
+            .map(|base| substitute_object_ir_type_name(base, &subst).unwrap_or_else(|| base.clone()))
+            .collect(),
         fields: ty
             .fields
             .iter()
@@ -1223,9 +1247,10 @@ pub(super) fn collect_generic_object_instantiations_expr(expr: &TypedExpr, out: 
         | TypedExprKind::Var(_)
         | TypedExprKind::FunctionSymbol(_)
         | TypedExprKind::Move(_) => {}
-        TypedExprKind::Lambda { body, .. } => {
-            collect_generic_object_instantiations_expr(body, out);
-        }
+        TypedExprKind::Lambda { body, .. } => match body {
+            TypedLambdaBody::Expr(body) => collect_generic_object_instantiations_expr(body, out),
+            TypedLambdaBody::Block(stmts) => collect_generic_object_instantiations_stmts(stmts, out),
+        },
         TypedExprKind::Conditional {
             condition,
             when_true,
@@ -1249,18 +1274,56 @@ pub(super) fn collect_generic_object_instantiation_type(ty: &IrType, out: &mut H
         IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {
             if name.contains('<') {
                 out.insert(name.clone());
+                if base_type_name(name) == "IOptions" {
+                    let Some((_, args)) = split_monomorphized_type(name) else {
+                        return;
+                    };
+                    out.insert(format!("Options<{}>", args.join(",")));
+                }
+                if base_type_name(name) == "ILogger" {
+                    let Some((_, args)) = split_monomorphized_type(name) else {
+                        return;
+                    };
+                    out.insert(format!("ConsoleLogger<{}>", args.join(",")));
+                }
+                if base_type_name(name) == "IStringLocalizer" {
+                    let Some((_, args)) = split_monomorphized_type(name) else {
+                        return;
+                    };
+                    out.insert(format!("StringLocalizer<{}>", args.join(",")));
+                }
             }
         }
         IrType::Array(inner)
         | IrType::Ref(inner)
-        | IrType::List(inner)
         | IrType::Enumerable(inner)
         | IrType::Task(inner)
         | IrType::Nullable(inner)
         | IrType::Weak(inner) => collect_generic_object_instantiation_type(inner, out),
+        IrType::List(inner) => {
+            collect_generic_object_instantiation_type(inner, out);
+            if is_concrete_ir_type(inner) {
+                out.insert(format!(
+                    "ListEnumerator<{}>",
+                    render_substitutable_ir_type(inner)
+                ));
+            }
+        }
         IrType::Dictionary(key, value) => {
             collect_generic_object_instantiation_type(key, out);
             collect_generic_object_instantiation_type(value, out);
+            if is_concrete_ir_type(key) && is_concrete_ir_type(value) {
+                out.insert(format!(
+                    "KeyValuePair<{},{}>",
+                    render_substitutable_ir_type(key),
+                    render_substitutable_ir_type(value)
+                ));
+                out.insert(format!(
+                    "DictionaryEnumerator<{},{}>",
+                    render_substitutable_ir_type(key),
+                    render_substitutable_ir_type(value)
+                ));
+            }
         }
         IrType::Function { params, return_type } => {
             for param in params {
@@ -1448,7 +1511,10 @@ pub(super) fn collect_rc_expr(expr: &TypedExpr, out: &mut HashSet<String>) {
             collect_rc_expr(target, out);
             collect_rc_expr(value, out);
         }
-        TypedExprKind::Lambda { body, .. } => collect_rc_expr(body, out),
+        TypedExprKind::Lambda { body, .. } => match body {
+            TypedLambdaBody::Expr(body) => collect_rc_expr(body, out),
+            TypedLambdaBody::Block(stmts) => collect_rc_stmts(stmts, out),
+        },
         TypedExprKind::Conditional {
             condition,
             when_true,

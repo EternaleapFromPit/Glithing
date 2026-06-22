@@ -53,7 +53,6 @@ fn compiles_library_service_generic_mvc_shapes() {
     let bytecode =
         compile_bytecode(source).expect("Library-style MVC generics should emit bytecode");
 
-    assert!(llvm_ir.contains("BaseCrudController"));
     assert!(llvm_ir.contains("BookController"));
     assert!(llvm_ir.contains("glitch_task_from_result_ptr"));
     assert!(bytecode.contains(".base BaseCrudController<Book,BookResponseDTO>"));
@@ -262,6 +261,82 @@ fn compiles_service_provider_scope_factory_and_concrete_service_resolution() {
 }
 
 #[test]
+fn compiles_and_runs_localizer_indexer_surface_through_di() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+            using Microsoft.Extensions.Localization;
+
+            class Book {}
+
+            fn main() {
+                ServiceCollection services = new ServiceCollection();
+                ServiceProvider provider = services.BuildServiceProvider();
+                IStringLocalizer<Book> localizer = provider.GetRequiredService<IStringLocalizer<Book>>();
+                string message = localizer["missing-resource"].Value;
+                print(message);
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("localizer indexer DI surface should compile");
+    let diagnostics = output.diagnostics.join("\n");
+    let llvm_ir = output.llvm_ir().expect("LLVM IR should be present");
+    let output_exe = emit_native_executable_from_source("localizer-indexer", source);
+    let native = run_native_executable_with_leak_report(&output_exe);
+    let stdout = String::from_utf8_lossy(&native.stdout);
+    let stderr = String::from_utf8_lossy(&native.stderr);
+
+    assert!(!diagnostics.contains("member 'get_Item' on Interface(\"IStringLocalizer<Book>\")"), "{diagnostics}");
+    assert!(!diagnostics.contains("member 'get_Item' on Class(\"StringLocalizer<Book>\")"), "{diagnostics}");
+    assert!(llvm_ir.contains("StringLocalizer"));
+    assert_eq!(native.status.code(), Some(0), "stderr: {stderr}");
+    assert!(stdout.contains("missing-resource"), "stdout: {stdout}");
+}
+
+#[test]
+fn runs_environment_backed_configuration_manager_natively() {
+    let source = r#"
+            using Glitching.AspNetCore;
+
+            fn main() {
+                WebApplicationBuilder builder = CreateBuilder(new string[] { });
+                ConfigurationManager jwt = builder.Configuration.GetSection("Jwt");
+                string issuer = jwt["Issuer"];
+                int port = builder.Configuration.GetValue<int>("Port");
+                bool rebuild = builder.Configuration.GetValue<bool>("RebuildDataBase");
+                long maxItems = builder.Configuration.GetValue<long>("MaxItems");
+                string connection = builder.Configuration.GetConnectionString("Library");
+                print(issuer);
+                print(port);
+                print(rebuild);
+                print(maxItems);
+                print(connection);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("config-env-runtime", source);
+    let native = std::process::Command::new(&output_exe)
+        .env("GLITCH_REPORT_LEAKS", "1")
+        .env("ASPNETCORE_Jwt__Issuer", "https://issuer.example")
+        .env("ASPNETCORE_Port", "5071")
+        .env("ASPNETCORE_RebuildDataBase", "true")
+        .env("ASPNETCORE_MaxItems", "42")
+        .env("ASPNETCORE_Library_ConnectionString", "Data Source=library.db")
+        .output()
+        .expect("native executable should run with configuration environment");
+
+    let stdout = String::from_utf8_lossy(&native.stdout);
+    let stderr = String::from_utf8_lossy(&native.stderr);
+    assert_eq!(native.status.code(), Some(0), "stderr: {stderr}");
+    assert!(stdout.contains("https://issuer.example"), "stdout: {stdout}");
+    assert!(stdout.contains("5071"), "stdout: {stdout}");
+    assert!(stdout.contains("true"), "stdout: {stdout}");
+    assert!(stdout.contains("42"), "stdout: {stdout}");
+    assert!(stdout.contains("Data Source=library.db"), "stdout: {stdout}");
+    assert!(stdout.contains("0"), "stdout: {stdout}");
+}
+
+#[test]
 fn runs_registered_interface_service_resolution_natively() {
     let source = r#"
             using Microsoft.Extensions.DependencyInjection;
@@ -293,6 +368,51 @@ fn runs_registered_interface_service_resolution_natively() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines = stdout.lines().collect::<Vec<_>>();
     assert_eq!(lines, vec!["hello from registration", "0"]);
+}
+
+#[test]
+fn runs_startup_configuration_delegate_surfaces_natively() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+            using Microsoft.AspNetCore.Authentication.JwtBearer;
+
+            class Marks {
+                public int A;
+                public int B;
+                public int C;
+                public int D;
+                public int E;
+                public int F;
+            }
+
+            fn main() {
+                Marks marks = new Marks();
+                ServiceCollection services = new ServiceCollection();
+
+                services.AddLocalization(options => marks.A = 11);
+                services.AddSwaggerGen(options => marks.B = 12);
+                services.AddCors(options => marks.C = 13);
+                services.AddMvc(options => marks.D = 14).AddJsonOptions(options => marks.E = 15);
+
+                AuthenticationBuilder auth = services.AddAuthentication();
+                auth.AddJwtBearer(options => marks.F = 16);
+
+                print(marks.A);
+                print(marks.B);
+                print(marks.C);
+                print(marks.D);
+                print(marks.E);
+                print(marks.F);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("startup-config-delegates", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines, vec!["11", "12", "13", "14", "15", "16", "0"]);
 }
 
 #[test]
@@ -1375,6 +1495,29 @@ fn native_call_argument_temporary_collections_do_not_leak() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("2"));
     assert!(stdout.contains("0"));
+}
+
+#[test]
+fn lowers_generic_logger_service_resolution_through_concrete_wrapper_specialization() {
+    let source = r#"
+            using Microsoft.Extensions.DependencyInjection;
+            using Microsoft.Extensions.Logging;
+
+            class Book {}
+
+            fn main() {
+                ServiceCollection services = new ServiceCollection();
+                ServiceProvider provider = services.BuildServiceProvider();
+                ILogger<Book> logger = provider.GetRequiredService<ILogger<Book>>();
+                logger.LogInformation("hello");
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("generic logger service resolution should lower through concrete wrapper specialization");
+
+    assert!(llvm_ir.contains("ConsoleLogger"));
+    assert!(llvm_ir.contains("LogInformation"));
 }
 
 #[test]

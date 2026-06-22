@@ -887,6 +887,45 @@ impl LlvmEmitter {
         arg_count: usize,
     ) -> Option<String> {
         let implementation = self.resolve_interface_implementation(interface_name)?;
+        if implementation.contains('<') {
+            let method_fragment = format!("_{}", sanitize(method_name));
+            let mut specialized = self
+                .specialized_instance_symbols
+                .iter()
+                .filter(|((_, owner), symbol)| {
+                    owner == &implementation
+                        && symbol.contains(&method_fragment)
+                        && self
+                            .functions
+                            .get(*symbol)
+                            .is_some_and(|signature| signature.params.len() == arg_count + 1)
+                })
+                .map(|(_, symbol)| symbol.clone())
+                .collect::<Vec<_>>();
+            specialized.sort();
+            specialized.dedup();
+            if specialized.len() == 1 {
+                return specialized.pop();
+            }
+
+            let generic_owner_prefix = format!("{}_", sanitize(base_type_name(&implementation)));
+            let generic_method_fragment = format!("_{}__", sanitize(method_name));
+            let mut generic_candidates = self
+                .functions
+                .iter()
+                .filter(|(symbol, signature)| {
+                    symbol.starts_with(&generic_owner_prefix)
+                        && symbol.contains(&generic_method_fragment)
+                        && signature.params.len() == arg_count + 1
+                })
+                .map(|(symbol, _)| symbol.clone())
+                .collect::<Vec<_>>();
+            generic_candidates.sort();
+            generic_candidates.dedup();
+            if generic_candidates.len() == 1 {
+                return generic_candidates.pop();
+            }
+        }
         let prefix = format!("{}_{}", sanitize(&implementation), sanitize(method_name));
         let mut candidates = self
             .functions

@@ -16,10 +16,11 @@ pub(super) fn lower_typed_stmts(
     stmts: &[Stmt],
     env: &TypeEnv,
     scopes: &mut Vec<HashMap<String, TypedBinding>>,
+    return_type: Option<&IrType>,
 ) -> Result<Vec<TypedStmt>, String> {
     stmts
         .iter()
-        .map(|stmt| lower_typed_stmt(stmt, env, scopes))
+        .map(|stmt| lower_typed_stmt(stmt, env, scopes, return_type))
         .collect()
 }
 
@@ -27,6 +28,7 @@ fn lower_typed_stmt(
     stmt: &Stmt,
     env: &TypeEnv,
     scopes: &mut Vec<HashMap<String, TypedBinding>>,
+    return_type: Option<&IrType>,
 ) -> Result<TypedStmt, String> {
     let kind = match stmt {
         Stmt::Let {
@@ -99,7 +101,7 @@ fn lower_typed_stmt(
         }
         Stmt::Block(body) => {
             scopes.push(HashMap::new());
-            let body = lower_typed_stmts(body, env, scopes)?;
+            let body = lower_typed_stmts(body, env, scopes, return_type)?;
             scopes.pop();
             TypedStmtKind::Block(body)
         }
@@ -116,10 +118,10 @@ fn lower_typed_stmt(
                     .collect(),
             );
             let condition = lower_typed_expr(condition, env, scopes)?;
-            let then_body = lower_typed_stmts(then_body, env, scopes)?;
+            let then_body = lower_typed_stmts(then_body, env, scopes, return_type)?;
             scopes.pop();
             scopes.push(HashMap::new());
-            let else_body = lower_typed_stmts(else_body, env, scopes)?;
+            let else_body = lower_typed_stmts(else_body, env, scopes, return_type)?;
             scopes.pop();
             TypedStmtKind::If {
                 condition,
@@ -133,7 +135,7 @@ fn lower_typed_stmt(
             finally_body,
         } => {
             scopes.push(HashMap::new());
-            let try_body = lower_typed_stmts(try_body, env, scopes)?;
+            let try_body = lower_typed_stmts(try_body, env, scopes, return_type)?;
             scopes.pop();
             let (catch_name, catch_body) = if let Some(catch) = catch {
                 scopes.push(HashMap::new());
@@ -147,14 +149,14 @@ fn lower_typed_stmt(
                         },
                     );
                 }
-                let body = lower_typed_stmts(&catch.body, env, scopes)?;
+                let body = lower_typed_stmts(&catch.body, env, scopes, return_type)?;
                 scopes.pop();
                 (catch.name.clone(), body)
             } else {
                 (None, Vec::new())
             };
             scopes.push(HashMap::new());
-            let finally_body = lower_typed_stmts(finally_body, env, scopes)?;
+            let finally_body = lower_typed_stmts(finally_body, env, scopes, return_type)?;
             scopes.pop();
             TypedStmtKind::Try {
                 try_body,
@@ -188,12 +190,12 @@ fn lower_typed_stmt(
                         },
                     );
                 }
-                let body = lower_typed_stmts(&case.body, env, scopes)?;
+                let body = lower_typed_stmts(&case.body, env, scopes, return_type)?;
                 scopes.pop();
                 typed_cases.push(TypedSwitchCase { value, body });
             }
             scopes.push(HashMap::new());
-            let default = lower_typed_stmts(default, env, scopes)?;
+            let default = lower_typed_stmts(default, env, scopes, return_type)?;
             scopes.pop();
             TypedStmtKind::Switch {
                 expr,
@@ -204,7 +206,7 @@ fn lower_typed_stmt(
         Stmt::While { condition, body } => {
             let condition = lower_typed_expr(condition, env, scopes)?;
             scopes.push(HashMap::new());
-            let body = lower_typed_stmts(body, env, scopes)?;
+            let body = lower_typed_stmts(body, env, scopes, return_type)?;
             scopes.pop();
             TypedStmtKind::While { condition, body }
         }
@@ -217,16 +219,16 @@ fn lower_typed_stmt(
             scopes.push(HashMap::new());
             let init = init
                 .as_ref()
-                .map(|stmt| lower_typed_stmt(stmt, env, scopes).map(Box::new))
+                .map(|stmt| lower_typed_stmt(stmt, env, scopes, return_type).map(Box::new))
                 .transpose()?;
             let condition = condition
                 .as_ref()
                 .map(|expr| lower_typed_expr(expr, env, scopes))
                 .transpose()?;
-            let body = lower_typed_stmts(body, env, scopes)?;
+            let body = lower_typed_stmts(body, env, scopes, return_type)?;
             let increment = increment
                 .as_ref()
-                .map(|stmt| lower_typed_stmt(stmt, env, scopes).map(Box::new))
+                .map(|stmt| lower_typed_stmt(stmt, env, scopes, return_type).map(Box::new))
                 .transpose()?;
             scopes.pop();
             TypedStmtKind::For {
@@ -254,7 +256,7 @@ fn lower_typed_stmt(
                 .last_mut()
                 .unwrap()
                 .insert(item_name.clone(), item.clone());
-            let body = lower_typed_stmts(body, env, scopes)?;
+            let body = lower_typed_stmts(body, env, scopes, return_type)?;
             scopes.pop();
             TypedStmtKind::ForEach {
                 item,
@@ -264,9 +266,12 @@ fn lower_typed_stmt(
         }
         Stmt::Print(expr) => TypedStmtKind::Print(lower_typed_expr(expr, env, scopes)?),
         Stmt::Expr(expr) => TypedStmtKind::Expr(lower_typed_expr(expr, env, scopes)?),
-        Stmt::Return(Some(expr)) => {
-            TypedStmtKind::Return(Some(lower_typed_expr(expr, env, scopes)?))
-        }
+        Stmt::Return(Some(expr)) => TypedStmtKind::Return(Some(lower_typed_expr_with_expected(
+            expr,
+            env,
+            scopes,
+            return_type,
+        )?)),
         Stmt::Return(None) => TypedStmtKind::Return(None),
         Stmt::Throw(expr) => TypedStmtKind::Throw(lower_typed_expr(expr, env, scopes)?),
         Stmt::Break => TypedStmtKind::Break,

@@ -109,7 +109,7 @@ The current boundary is:
 - The ASP.NET helper surface now records model-state errors and exposes concrete `Ok` / `NotFound` results instead of null placeholders.
 - Missing-member diagnostics now give task-aware rewrite suggestions for async-style members instead of only a generic default-return hint.
 - `Task.WhenAll(Task<T>[])` is now accepted on the LLVM path as part of the supported task-array slice.
-- `ConfigurationManager.Get<T>()` / `GetValue<T>()` now return typed defaults, `ModelBuilder.Entity(string)` returns a builder object, and the EF `SaveChangesAsync()` helper now produces a real completed task.
+- `ConfigurationManager.GetValue<string|int|long|bool>(...)`, `GetSection(...)`, indexer lookups, and `GetConnectionString(...)` now lower through real environment-backed runtime helpers on the native LLVM path; `ConfigurationManager.Get<T>()` remains an explicit compatibility surface, `ModelBuilder.Entity(string)` returns a builder object, and the EF `SaveChangesAsync()` helper now produces a real completed task.
 - package-linker errors now include the source `using` line number that requested the missing package, which makes unresolved imports easier to localize.
 - package linking now uses exact namespace/package declarations instead of substring matches, which prevents `System.*` packages from accidentally shadowing `System`.
 - The README and this plan have been synchronized with the current compiler and package behavior.
@@ -120,7 +120,7 @@ The current boundary is:
 - Native `bool` printing on the LLVM executable path now emits `true` / `false` text through LLVM-side formatting instead of numeric `1` / `0`, while preserving output order with the existing `printf`-based runtime.
 - The Rust socket-host runtime now joins spawned request-worker threads before returning from the host loop, and a direct runtime unit test covers multi-request handling on the current host path.
 - Borrow/ownership loop-flow handling now distinguishes `break` from `continue` for `for` loops, so unreachable increment paths after `break` no longer poison state while `continue` still flows through the increment step.
-- Known package stubs now surface explicit `GL3013` diagnostics for the current `ConfigurationManager.Get*` and AutoMapper `Map(...)` placeholder surfaces instead of silently looking implemented just because a package method body exists.
+- Known package stubs now surface explicit `GL3013` diagnostics for the remaining `ConfigurationManager.Get<T>()` binder surface and AutoMapper `Map(...)` placeholder surfaces instead of silently looking implemented just because a package method body exists.
 - The LLVM task/runtime slice now lowers `Task.WhenAll(...)`, `Task.Wait()`, and task completion-status checks through explicit runtime helpers instead of package no-ops, and there is native execution coverage for the `WhenAll + Wait + IsCompletedSuccessfully` path with leak reporting enabled.
 - `Task.FromResult(...)` now retains pointer-backed lvalue payloads on the LLVM path before storing them into task results, which closes the obvious double-release/use-after-free edge for shared string/class-style sources in the current synchronous task model.
 - `Task.Run(...)` now uses a Rust worker-thread runtime for the supported zero-argument delegate slice instead of invoking delegates inline in the LLVM backend, and `await` / `GetResult()` / `Wait()` now join that task handle before reading the result slot.
@@ -145,12 +145,21 @@ The current boundary is:
 - Explicit DI registrations now affect LLVM-native service resolution for the current safe slice: `AddTransient<TService,TImplementation>()` and `AddScoped<TService,TImplementation>()` are tracked by the compiler, `GetRequiredService<T>()` prefers those registrations for interface lookup, and `GetService<T>()` now returns null/default for missing interface/class registrations instead of fabricating an object.
 - Singleton DI resolution now has a real reuse slice on the native LLVM path: `AddSingleton<T>(value)` reuses the same registered instance on repeated `GetRequiredService<T>()` calls when the singleton source is a stable local/field expression, and there is native regression coverage for identity-preserving lookup.
 - Singleton DI resolution now also accepts temporary constructor/object-initializer sources on the native LLVM path by hoisting them into hidden function-entry locals for deterministic reuse, and `WebApplicationBuilder.Build()` now propagates the builder's tracked service registrations into direct `app.Services.GetRequiredService<T>()` lookups.
+- Service-collection / builder configuration delegates now execute for the current safe lambda slice instead of only compiling as markers: `AddLocalization(...)`, `AddCors(...)`, `AddMvc(...).AddJsonOptions(...)`, `AddAuthentication()`, `AddJwtBearer(...)`, and `AddSwaggerGen(...)` all have native regression coverage through expression-bodied / assignment-bodied lambdas, while broader host/auth/logging behavior remains a separate compatibility/runtime concern.
 - The blocking async gate now accepts `await` inside `switch` bodies and keeps the existing borrowed/view-across-suspension rejection in place.
 - `.csproj` parsing no longer rejects ordinary `.NET` `TargetFramework` values like `net7.0`; Glitching now treats that metadata as informational instead of requiring a synthetic `gl*` target.
 - ASP.NET controller discovery no longer depends on `[ApiController]` alone: route-attributed MVC controllers and `Controller` / `ControllerBase`-derived classes now reach endpoint collection and route lowering on the LLVM path.
 - The native endpoint binder now handles nullable query primitives (`bool?`, `int?`, `long?`) and treats `CancellationToken` as a default request-scoped token handle on the current controller/runtime slice, with both LLVM and native regression coverage.
 - Void-compatible startup/configuration lambdas now resolve through delegate-typed package members on the LLVM path, including statement-bodied and assignment-bodied configuration lambdas used by `AddDbContext`, `AddLocalization`, `AddSwaggerGen`, `AddMvc`, `AddJsonOptions`, and `AddJwtBearer`.
 - C#-style static-class extension methods with `this` receivers are now parsed, registered, symbolized, and lowered consistently, including receiver-type dispatch through loaded package types such as `IServiceCollection` / `ServiceCollection`.
+- Explicit generic call type arguments now flow through parsing, TIR call resolution, and LLVM lowering, so calls like `Id<long>(1)` and `box.Echo<string>("Ada")` specialize against the requested type arguments instead of degrading to placeholder inference.
+- Generic owner layouts are now emitted only for concrete instantiations on the LLVM path; unspecialized template owners no longer leak into runtime emission as fake concrete types.
+- Generic owner specialization now walks transitively: concrete owners discovered inside specialized generic method bodies register their own layouts, constructor/method bodies, and nested helper owners before final LLVM emission.
+- Collection/runtime helper owners that are introduced by special lowering rather than package method bodies now get concrete layouts as well, including `ListEnumerator<T>`, `DictionaryEnumerator<K,V>`, `KeyValuePair<K,V>`, and the current DI/framework wrapper slices `IOptions<T> -> Options<T>` and `ILogger<T> -> ConsoleLogger<T>`.
+- Interface-typed object locals now release through the runtime header drop pointer when no concrete static layout is available at the use site, which fixes the native dictionary-enumerator leak path after generic template emission was removed.
+- Package-backed user-defined indexer lowering now exists for the current safe slice: `target[index]` rewrites to a real `get_Item(...)` method call when the target type exposes that member, generic interface dispatch resolves to concrete specialized implementations on the LLVM path, and temporary field receivers now retain/drop correctly after field loads.
+- `Microsoft.Extensions.Localization` now has a real `IStringLocalizer<T>` / `StringLocalizer<T>` package surface for the current compatibility slice, including native DI resolution plus `localizer["key"].Value` execution coverage without leaks.
+- LLVM return lowering now treats owned local returns as moves instead of implicit retains, which closes the leak path where helper/package methods returned local `string` or class values and then also skipped dropping the same local on function exit.
 
 ## Next work items
 
@@ -164,7 +173,10 @@ The current boundary is:
 7. Expand framework compatibility in small, test-driven slices where the runtime model already exists, and keep unsupported members on explicit diagnostics with rewrite guidance.
 8. Add additional sample/runtime acceptance work only where a concrete blocker remains after the current compile gates.
    - The next useful acceptance step is still a native ASP.NET-style host smoke path once the remaining async/runtime and package-helper gaps are closed.
-9. Add explicit generic method type-argument support in method-call lowering, so calls like `GetRequiredService<ILoggerFactory>()` specialize their return type instead of degrading to `Unknown("T")`.
+9. Expand generic type/layout specialization beyond the current owner/enumerator/options/logger slice:
+   - more framework helper owners introduced implicitly by lowering
+   - deeper nested generic field graphs
+   - more DI/runtime generic wrappers beyond the current `IOptions<T>` path
 
 ## C# Standard v7 Gap Analysis
 

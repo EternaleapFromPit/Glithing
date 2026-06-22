@@ -63,15 +63,34 @@ pub(super) fn emit_delegate_invoke(
 pub(super) fn emit_lambda_function(
     emitter: &mut LlvmEmitter,
     params: &[String],
-    body: &TypedExpr,
+    body: &TypedLambdaBody,
+    lambda_ty: &IrType,
 ) -> Result<LlValue, String> {
     let id = emitter.lambda_id;
     emitter.lambda_id += 1;
     let fn_name = format!("glitch_lambda_{id}");
 
+    let (param_types, return_ir_ty) = match lambda_ty {
+        IrType::Function { params, return_type } => (params.clone(), return_type.as_ref().clone()),
+        _ => (
+            vec![IrType::Unknown("lambda_param".to_string()); params.len()],
+            IrType::Unknown("lambda_return".to_string()),
+        ),
+    };
+    let return_llvm_ty = llvm_ir_type(&return_ir_ty);
+
     let mut free_vars: Vec<(String, LlVar)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    collect_free_vars_expr(body, params, &emitter.vars, &mut seen, &mut free_vars);
+    match body {
+        TypedLambdaBody::Expr(body) => {
+            collect_free_vars_expr(body, params, &emitter.vars, &mut seen, &mut free_vars)
+        }
+        TypedLambdaBody::Block(stmts) => {
+            for stmt in stmts {
+                collect_free_vars_stmt(stmt, params, &emitter.vars, &mut seen, &mut free_vars);
+            }
+        }
+    }
 
     let env_struct_name = format!("glitch.lambda.{id}.env");
     if !free_vars.is_empty() {
@@ -107,30 +126,34 @@ pub(super) fn emit_lambda_function(
     emitter.exception_handler = None;
     emitter.current_unwind_label = "exception_unwind".to_string();
     emitter.loop_targets.clear();
-    emitter.current_return = LlType::Ptr;
+    emitter.current_return = return_llvm_ty.clone();
 
     let mut param_decls = vec!["ptr %env".to_string()];
-    for p in params {
-        param_decls.push(format!("ptr %{}", sanitize(p)));
+    for (p, param_ty) in params.iter().zip(param_types.iter()) {
+        param_decls.push(format!("{} %{}", llvm_ir_type(param_ty).as_ir(), sanitize(p)));
     }
     emitter.body.push_str(&format!(
-        "define ptr @{fn_name}({}) {{\nentry:\n",
+        "define {} @{fn_name}({}) {{\nentry:\n",
+        return_llvm_ty.as_ir(),
         param_decls.join(", ")
     ));
 
-    for p in params {
+    for (p, param_ty) in params.iter().zip(param_types.iter()) {
+        let llvm_param_ty = llvm_ir_type(param_ty);
         let ptr = emitter.tmp();
         emitter.body.push_str(&format!(
-            "  {ptr} = alloca ptr\n  store ptr %{}, ptr {ptr}\n",
-            sanitize(p)
+            "  {ptr} = alloca {}\n  store {} %{}, ptr {ptr}\n",
+            llvm_param_ty.as_ir(),
+            llvm_param_ty.as_ir(),
+            sanitize(p),
         ));
         emitter.vars.insert(
             p.clone(),
             LlVar {
                 ptr,
-                ty: LlType::Ptr,
-                ir_ty: IrType::Unknown("lambda_param".to_string()),
-                drop_kind: DropKind::BorrowOnly,
+                ty: llvm_param_ty,
+                ir_ty: param_ty.clone(),
+                drop_kind: drop_kind_for_type(param_ty, &ownership_for_type(param_ty)),
             },
         );
     }
@@ -168,33 +191,49 @@ pub(super) fn emit_lambda_function(
         );
     }
 
-    let result = emitter.emit_typed_expr(body);
+    let result = match body {
+        TypedLambdaBody::Expr(body) => emitter.emit_typed_expr(body).map(Some),
+        TypedLambdaBody::Block(stmts) => {
+            emitter.emit_typed_stmts(stmts)?;
+            Ok(None)
+        }
+    };
     match result {
-        Ok(val) => {
+        Ok(Some(val)) => {
             if !emitter.terminated {
-                let ret_val = if val.ty == LlType::Ptr {
-                    val.value.clone()
+                if return_llvm_ty == LlType::Void {
+                    emitter.emit_temporary_drop(
+                        match body {
+                            TypedLambdaBody::Expr(body) => body,
+                            TypedLambdaBody::Block(_) => unreachable!(),
+                        },
+                        &val,
+                    );
+                    emitter.body.push_str("  ret void\n");
                 } else {
-                    let cast = emitter.tmp();
+                    let ret_val = emitter.cast_value(val, &return_llvm_ty)?;
                     emitter.body.push_str(&format!(
-                        "  {cast} = inttoptr {} {} to ptr\n",
-                        val.ty.as_ir(),
-                        val.value
+                        "  ret {} {}\n",
+                        return_llvm_ty.as_ir(),
+                        ret_val.value
                     ));
-                    cast
-                };
-                emitter.body.push_str(&format!("  ret ptr {ret_val}\n"));
+                }
+            }
+        }
+        Ok(None) => {
+            if !emitter.terminated {
+                emitter.emit_default_return();
             }
         }
         Err(_) => {
             if !emitter.terminated {
-                emitter.body.push_str("  ret ptr null\n");
+                emitter.emit_default_return();
             }
         }
     }
     emitter.body.push_str(&format!("{}:\n", emitter.current_unwind_label));
     emitter.terminated = false;
-    emitter.body.push_str("  ret ptr null\n");
+    emitter.emit_default_return();
     emitter.body.push_str("}\n\n");
 
     let lambda_func = std::mem::replace(&mut emitter.body, saved_body);

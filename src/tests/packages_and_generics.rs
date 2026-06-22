@@ -422,6 +422,80 @@ fn lowers_concrete_generic_box_layout_and_instance_methods_in_llvm() {
 }
 
 #[test]
+fn specializes_concrete_generic_owner_layouts_discovered_inside_generic_method_bodies() {
+    let source = r#"
+            class Box<T> {
+                public T Value;
+
+                public Box(T value) {
+                    this.Value = value;
+                }
+            }
+
+            class Holder<T> {
+                public Box<T> Inner;
+            }
+
+            class Factory {
+                public static void Fill<T>(Holder<T> holder, T value) {
+                    holder.Inner = new Box<T>(value);
+                }
+            }
+
+            fn main() {
+                Holder<int> holder = new Holder<int>();
+                Factory.Fill(holder, 42);
+                print(holder.Inner.Value);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("generic method body should register concrete owner layouts transitively");
+
+    assert!(llvm_ir.contains("%glitch.Holder_int___g0__t1 = type { i64, ptr, ptr }"));
+    assert!(llvm_ir.contains("%glitch.Box_int___g0__t0 = type { i64, ptr, i32 }"));
+}
+
+#[test]
+fn runs_nested_generic_field_graphs_natively_without_leaks() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            class Pair<T, U> {
+                public T Left;
+                public U Right;
+            }
+
+            class Wrapper<T> {
+                public Pair<List<T>, Dictionary<string, T>> Value;
+            }
+
+            fn main() {
+                Wrapper<int> wrapper = new Wrapper<int>();
+                wrapper.Value = new Pair<List<int>, Dictionary<string, int>> {
+                    Left = new List<int>(),
+                    Right = new Dictionary<string, int>()
+                };
+                wrapper.Value.Left.Add(1);
+                wrapper.Value.Right.Add("a", 2);
+                print(wrapper.Value.Left[0]);
+                print(wrapper.Value.Right["a"]);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("nested-generic-field-graphs", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "nested generic field graph sample should exit cleanly\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, "1\r\n2\r\n0\r\n");
+}
+
+#[test]
 fn warns_on_lambda_without_executable_closure_lowering_in_non_llvm_path() {
     let source = r#"
             class Runner {

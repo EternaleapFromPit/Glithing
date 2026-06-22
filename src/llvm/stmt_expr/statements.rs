@@ -210,20 +210,18 @@ impl LlvmEmitter {
                 if let Some(type_name) = object_type_name(&expr.ty) {
                     if !matches!(
                         expr.kind,
-                        TypedExprKind::NewObject { .. } | TypedExprKind::Move(_)
+                        TypedExprKind::NewObject { .. }
+                            | TypedExprKind::Move(_)
+                            | TypedExprKind::Var(_)
                     ) && self.object_types.contains_key(type_name)
                     {
                         self.emit_retain(type_name, &value.value);
                     }
                 } else if is_string_like_type(&expr.ty)
-                    && (matches!(
+                    && matches!(
                         expr.kind,
                         TypedExprKind::Field { .. } | TypedExprKind::Index { .. }
-                    ) || matches!(
-                        &expr.kind,
-                        TypedExprKind::Var(name)
-                            if self.vars.contains_key(name)
-                    ))
+                    )
                 {
                     self.body.push_str(&format!(
                         "  call void @glitch_string_retain(ptr {})\n",

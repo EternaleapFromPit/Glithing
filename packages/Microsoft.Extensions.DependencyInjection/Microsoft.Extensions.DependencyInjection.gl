@@ -96,8 +96,22 @@ public class MvcOptions {
 }
 
 public class AuthenticationBuilder {
+    public string DefaultScheme;
+    public JwtBearerOptions JwtBearerOptions;
+
+    public AuthenticationBuilder() {
+        this.DefaultScheme = "";
+        this.JwtBearerOptions = null;
+    }
+
     public AuthenticationBuilder AddJwtBearer(JwtBearerConfigure configure) {
-        return new AuthenticationBuilder();
+        JwtBearerOptions options = new JwtBearerOptions();
+        configure(options);
+        this.JwtBearerOptions = options;
+        AuthenticationBuilder builder = new AuthenticationBuilder();
+        builder.DefaultScheme = this.DefaultScheme;
+        builder.JwtBearerOptions = options;
+        return builder;
     }
 }
 
@@ -175,24 +189,61 @@ public class ServiceScope : IServiceScope {
 }
 
 public class MvcBuilder {
+    public MvcOptions Options;
+    public MvcJsonOptions JsonOptions;
+    public AuthenticationBuilder Authentication;
+
+    public MvcBuilder() {
+        this.Options = new MvcOptions();
+        this.JsonOptions = new MvcJsonOptions();
+        this.Authentication = new AuthenticationBuilder();
+    }
+
     public MvcBuilder AddJsonOptions(JsonOptionsConfigure configure) {
-        return new MvcBuilder();
+        MvcJsonOptions options = new MvcJsonOptions();
+        configure(options);
+        this.JsonOptions = options;
+        MvcBuilder builder = new MvcBuilder();
+        builder.Options = this.Options;
+        builder.JsonOptions = options;
+        builder.Authentication = this.Authentication;
+        return builder;
     }
 
     public MvcBuilder ConfigureApiBehaviorOptions(object configure) {
-        return new MvcBuilder();
+        MvcBuilder builder = new MvcBuilder();
+        builder.Options = this.Options;
+        builder.JsonOptions = this.JsonOptions;
+        builder.Authentication = this.Authentication;
+        return builder;
     }
 
     public MvcBuilder AddJwtBearer(JwtBearerConfigure configure) {
-        return new MvcBuilder();
+        this.Authentication.AddJwtBearer(configure);
+        MvcBuilder builder = new MvcBuilder();
+        builder.Options = this.Options;
+        builder.JsonOptions = this.JsonOptions;
+        builder.Authentication = this.Authentication;
+        return builder;
     }
 
     public MvcBuilder AddAuthentication() {
-        return new MvcBuilder();
+        this.Authentication = new AuthenticationBuilder();
+        MvcBuilder builder = new MvcBuilder();
+        builder.Options = this.Options;
+        builder.JsonOptions = this.JsonOptions;
+        builder.Authentication = this.Authentication;
+        return builder;
     }
 
     public MvcBuilder AddAuthentication(string scheme) {
-        return new MvcBuilder();
+        this.Authentication = new AuthenticationBuilder();
+        this.Authentication.DefaultScheme = scheme;
+        MvcBuilder builder = new MvcBuilder();
+        builder.Options = this.Options;
+        builder.JsonOptions = this.JsonOptions;
+        builder.Authentication = this.Authentication;
+        return builder;
     }
 }
 
@@ -221,7 +272,10 @@ public class IServiceCollection {
     public void Configure<T>(object configure) {}
     public void AddApiVersioning(object configure) {}
     public void AddVersionedApiExplorer(object configure) {}
-    public void AddSwaggerGen(SwaggerGenConfigure configure) {}
+    public void AddSwaggerGen(SwaggerGenConfigure configure) {
+        SwaggerGenOptions options = new SwaggerGenOptions();
+        configure(options);
+    }
     public void AddMemoryCache() {}
     public void AddHttpContextAccessor() {}
     public void AddEndpointsApiExplorer() {}
@@ -231,17 +285,30 @@ public class IServiceCollection {
     public void AddLogging() {}
     public void AddMediatR(MediatRConfigure configure) {}
     public void AddValidatorsFromAssemblyContaining<T>() {}
-    public void AddDbContext<T>(DbContextOptionsConfigure configure) {}
+    public void AddDbContext<T>(DbContextOptionsConfigure configure) {
+        DbContextOptionsBuilder options = new DbContextOptionsBuilder();
+        configure(options);
+    }
     public void AddDbContextPool<T>(object configure) {}
-    public void AddLocalization(LocalizationConfigure configure) {}
+    public void AddLocalization(LocalizationConfigure configure) {
+        LocalizationOptions options = new LocalizationOptions();
+        configure(options);
+    }
     public void AddCors() {}
-    public void AddCors(CorsConfigure configure) {}
+    public void AddCors(CorsConfigure configure) {
+        CorsPolicyBuilder options = new CorsPolicyBuilder();
+        configure(options);
+    }
     public void AddAutoMapper(AutoMapperConfigure marker) {}
     public void AddAutoMapper(MapperConfigurationExpression marker) {}
     public void AddRepositories() {}
     public void AddDataServices() {}
     public MvcBuilder AddMvc(MvcOptionsConfigure configure) {
-        return new MvcBuilder();
+        MvcBuilder builder = new MvcBuilder();
+        MvcOptions options = new MvcOptions();
+        configure(options);
+        builder.Options = options;
+        return builder;
     }
     public MvcBuilder AddControllers(object configure) {
         return new MvcBuilder();
@@ -250,7 +317,9 @@ public class IServiceCollection {
         return new AuthenticationBuilder();
     }
     public AuthenticationBuilder AddAuthentication(string scheme) {
-        return new AuthenticationBuilder();
+        AuthenticationBuilder builder = new AuthenticationBuilder();
+        builder.DefaultScheme = scheme;
+        return builder;
     }
 
     public ServiceProvider BuildServiceProvider() {
@@ -281,7 +350,10 @@ public class ServiceCollection : IServiceCollection {
     public void Configure<T>(object configure) {}
     public void AddApiVersioning(object configure) {}
     public void AddVersionedApiExplorer(object configure) {}
-    public void AddSwaggerGen(SwaggerGenConfigure configure) {}
+    public void AddSwaggerGen(SwaggerGenConfigure configure) {
+        SwaggerGenOptions options = new SwaggerGenOptions();
+        configure(options);
+    }
     public void AddMemoryCache() {}
     public void AddHttpContextAccessor() {}
     public void AddEndpointsApiExplorer() {}
@@ -291,17 +363,30 @@ public class ServiceCollection : IServiceCollection {
     public void AddLogging() {}
     public void AddMediatR(MediatRConfigure configure) {}
     public void AddValidatorsFromAssemblyContaining<T>() {}
-    public void AddDbContext<T>(DbContextOptionsConfigure configure) {}
+    public void AddDbContext<T>(DbContextOptionsConfigure configure) {
+        DbContextOptionsBuilder options = new DbContextOptionsBuilder();
+        configure(options);
+    }
     public void AddDbContextPool<T>(object configure) {}
-    public void AddLocalization(LocalizationConfigure configure) {}
+    public void AddLocalization(LocalizationConfigure configure) {
+        LocalizationOptions options = new LocalizationOptions();
+        configure(options);
+    }
     public void AddCors() {}
-    public void AddCors(CorsConfigure configure) {}
+    public void AddCors(CorsConfigure configure) {
+        CorsPolicyBuilder options = new CorsPolicyBuilder();
+        configure(options);
+    }
     public void AddAutoMapper(AutoMapperConfigure marker) {}
     public void AddAutoMapper(MapperConfigurationExpression marker) {}
     public void AddRepositories() {}
     public void AddDataServices() {}
     public MvcBuilder AddMvc(MvcOptionsConfigure configure) {
-        return new MvcBuilder();
+        MvcBuilder builder = new MvcBuilder();
+        MvcOptions options = new MvcOptions();
+        configure(options);
+        builder.Options = options;
+        return builder;
     }
     public MvcBuilder AddControllers(object configure) {
         return new MvcBuilder();
@@ -310,7 +395,9 @@ public class ServiceCollection : IServiceCollection {
         return new AuthenticationBuilder();
     }
     public AuthenticationBuilder AddAuthentication(string scheme) {
-        return new AuthenticationBuilder();
+        AuthenticationBuilder builder = new AuthenticationBuilder();
+        builder.DefaultScheme = scheme;
+        return builder;
     }
     public ServiceProvider BuildServiceProvider() {
         return new ServiceProvider {

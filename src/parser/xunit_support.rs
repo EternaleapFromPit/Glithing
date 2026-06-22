@@ -43,7 +43,7 @@ pub(super) fn synthesize_xunit_fact_tests(parser: &mut Parser, program: &Program
                         Expr::String(method.name.clone()),
                         Expr::Lambda {
                             params: Vec::new(),
-                            body: Box::new(invoke),
+                            body: LambdaBody::Expr(Box::new(invoke)),
                         },
                     ],
                 }));
@@ -149,7 +149,7 @@ pub(super) fn register_xunit_theory_case(
             Expr::String(test_name.to_string()),
             Expr::Lambda {
                 params: Vec::new(),
-                body: Box::new(invoke),
+                body: LambdaBody::Expr(Box::new(invoke)),
             },
         ],
     }));

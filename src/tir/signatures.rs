@@ -1954,9 +1954,14 @@ pub(super) fn collect_generic_call_instantiations_expr(
         | TypedExprKind::IncDec { target: inner, .. } => {
             collect_generic_call_instantiations_expr(inner, generic_symbols, output);
         }
-        TypedExprKind::Lambda { body, .. } => {
-            collect_generic_call_instantiations_expr(body, generic_symbols, output);
-        }
+        TypedExprKind::Lambda { body, .. } => match body {
+            TypedLambdaBody::Expr(body) => {
+                collect_generic_call_instantiations_expr(body, generic_symbols, output);
+            }
+            TypedLambdaBody::Block(stmts) => {
+                collect_generic_call_instantiations_stmts(stmts, generic_symbols, output);
+            }
+        },
         TypedExprKind::Call(call) => {
             match &call.kind {
                 TypedCallKind::Function { symbol, .. } => {

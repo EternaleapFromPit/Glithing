@@ -533,14 +533,46 @@ impl LlvmEmitter {
                         return self.default_typed_value(&expr.ty);
                     }
                 }
-                let ptr = self.emit_field_ptr(expr)?;
+                let TypedExprKind::Field { target, name } = &expr.kind else {
+                    unreachable!();
+                };
+                let type_name = object_type_name(&target.ty).ok_or_else(|| {
+                    format!(
+                        "LLVM TIR backend: field '{}' target has no object layout: {:?}",
+                        name, target.ty
+                    )
+                })?;
+                let object = self.object_types.get(type_name).cloned().ok_or_else(|| {
+                    format!("LLVM TIR backend: type '{type_name}' has no LLVM layout")
+                })?;
+                let field = object.fields.get(name).cloned().ok_or_else(|| {
+                    format!("LLVM TIR backend: type '{type_name}' has no field '{name}'")
+                })?;
+                let receiver = self.emit_typed_expr(target)?;
+                let ptr = self.tmp();
+                self.body.push_str(&format!(
+                    "  {ptr} = getelementptr inbounds %{}, ptr {}, i32 0, i32 {}\n",
+                    llvm_object_name(&object.name),
+                    receiver.value,
+                    field.index
+                ));
                 let ty = llvm_ir_type(&expr.ty);
                 let value = self.tmp();
                 self.body.push_str(&format!(
-                    "  {value} = load {}, ptr {}\n",
-                    ty.as_ir(),
-                    ptr.value
+                    "  {value} = load {}, ptr {ptr}\n",
+                    ty.as_ir()
                 ));
+                if !matches!(
+                    target.kind,
+                    TypedExprKind::Var(_)
+                        | TypedExprKind::Field { .. }
+                        | TypedExprKind::Index { .. }
+                        | TypedExprKind::Move(_)
+                        | TypedExprKind::Borrow { .. }
+                ) {
+                    self.retain_for_store(&expr.ty, expr, &value);
+                    self.emit_temporary_drop(target, &receiver);
+                }
                 Ok(LlValue { value, ty })
             }
             TypedExprKind::IsPattern {
@@ -727,7 +759,9 @@ impl LlvmEmitter {
                 delta,
                 prefix,
             } => self.emit_inc_dec_value(target, *delta, *prefix),
-            TypedExprKind::Lambda { params, body } => self.emit_lambda_function(params, body),
+            TypedExprKind::Lambda { params, body } => {
+                self.emit_lambda_function(params, body, &expr.ty)
+            }
             TypedExprKind::Conditional {
                 condition,
                 when_true,
@@ -996,6 +1030,11 @@ impl LlvmEmitter {
                         resolution,
                     } => match resolution {
                         CallResolution::InstanceMethod => {
+                            if is_configuration_manager_type(&target.ty) {
+                                if name == "GetValue" {
+                                    return self.emit_configuration_value_lookup(target, &call.args, &expr.ty);
+                                }
+                            }
                             if is_object_surface_type(&target.ty)
                                 && name == "Equals"
                                 && call.args.len() == 1
@@ -1048,10 +1087,31 @@ impl LlvmEmitter {
                                 | IrType::Interface(type_name)
                                     if type_name.contains('<') =>
                                 {
-                                    self.specialized_instance_symbols
+                                    if matches!(target.ty, IrType::Interface(_)) {
+                                        if let Some(resolved) = self.resolve_interface_method_symbol(
+                                            type_name,
+                                            name,
+                                            call.args.len(),
+                                        ) {
+                                            resolved
+                                        } else {
+                                            let specialized = self.specialized_instance_symbols
+                                                .get(&(symbol.clone(), type_name.clone()))
+                                                .cloned()
+                                                .unwrap_or_else(|| symbol.clone());
+                                            specialized
+                                        }
+                                    } else {
+                                        let specialized = self.specialized_instance_symbols
                                         .get(&(symbol.clone(), type_name.clone()))
                                         .cloned()
-                                        .unwrap_or_else(|| symbol.clone())
+                                        .unwrap_or_else(|| symbol.clone());
+                                        if self.functions.contains_key(&specialized) {
+                                            specialized
+                                        } else {
+                                            specialized
+                                        }
+                                    }
                                 }
                                 IrType::Interface(interface_name) => self
                                     .resolve_interface_method_symbol(
@@ -1062,7 +1122,9 @@ impl LlvmEmitter {
                                     .unwrap_or_else(|| symbol.clone()),
                                 _ => symbol.clone(),
                             };
-                            if self.functions.contains_key(&resolved_symbol) {
+                            if self.functions.contains_key(&resolved_symbol)
+                                || matches!(target.ty, IrType::Interface(_))
+                            {
                                 let receiver = self.emit_typed_expr(target)?;
                                 let result = self.emit_typed_call(
                                     &resolved_symbol,
@@ -1452,6 +1514,123 @@ impl LlvmEmitter {
         })
     }
 
+    pub(in crate::llvm) fn emit_configuration_value_lookup(
+        &mut self,
+        target: &TypedExpr,
+        args: &[TypedExpr],
+        result_ty: &IrType,
+    ) -> Result<LlValue, String> {
+        let [key_expr] = args else {
+            return Err(
+                "LLVM TIR backend: ConfigurationManager.GetValue expects one key argument"
+                    .to_string(),
+            );
+        };
+        let (receiver, full_key, key_value) =
+            self.emit_configuration_lookup_key(target, key_expr)?;
+        let result = match result_ty {
+            IrType::String => {
+                let value = self.tmp();
+                let empty = self.string_global("");
+                self.body.push_str(&format!(
+                    "  {value} = call ptr @GlitchRestHost_read_env_string(ptr {}, ptr {})\n",
+                    full_key, empty
+                ));
+                LlValue {
+                    value,
+                    ty: LlType::Ptr,
+                }
+            }
+            IrType::Int | IrType::UInt => {
+                let value = self.tmp();
+                self.body.push_str(&format!(
+                    "  {value} = call i32 @GlitchRestHost_read_env_int(ptr {}, i32 0)\n",
+                    full_key
+                ));
+                LlValue {
+                    value,
+                    ty: LlType::I32,
+                }
+            }
+            IrType::Long => {
+                let value = self.tmp();
+                self.body.push_str(&format!(
+                    "  {value} = call i64 @GlitchRestHost_read_env_i64(ptr {}, i64 0)\n",
+                    full_key
+                ));
+                LlValue {
+                    value,
+                    ty: LlType::I64,
+                }
+            }
+            IrType::Bool => {
+                let value = self.tmp();
+                self.body.push_str(&format!(
+                    "  {value} = call i1 @GlitchRestHost_read_env_bool(ptr {}, i1 false)\n",
+                    full_key
+                ));
+                LlValue {
+                    value,
+                    ty: LlType::I1,
+                }
+            }
+            other => {
+                self.body
+                    .push_str(&format!("  call void @glitch_string_release(ptr {full_key})\n"));
+                self.emit_temporary_drop(key_expr, &key_value);
+                self.emit_temporary_drop(target, &receiver);
+                return Err(format!(
+                    "LLVM TIR backend: ConfigurationManager.GetValue<{other:?}> is not supported yet; rewrite to string/int/long/bool lookup or bind the object explicitly"
+                ));
+            }
+        };
+        self.body
+            .push_str(&format!("  call void @glitch_string_release(ptr {full_key})\n"));
+        self.emit_temporary_drop(key_expr, &key_value);
+        self.emit_temporary_drop(target, &receiver);
+        Ok(result)
+    }
+
+    fn emit_configuration_lookup_key(
+        &mut self,
+        target: &TypedExpr,
+        key_expr: &TypedExpr,
+    ) -> Result<(LlValue, String, LlValue), String> {
+        let type_name = object_type_name(&target.ty).ok_or_else(|| {
+            format!(
+                "LLVM TIR backend: ConfigurationManager lookup target has no object layout: {:?}",
+                target.ty
+            )
+        })?;
+        let object = self.object_types.get(type_name).cloned().ok_or_else(|| {
+            format!("LLVM TIR backend: type '{type_name}' has no LLVM layout")
+        })?;
+        let prefix_field = object.fields.get("Prefix").cloned().ok_or_else(|| {
+            format!("LLVM TIR backend: type '{type_name}' is missing field 'Prefix'")
+        })?;
+        let receiver = self.emit_typed_expr(target)?;
+        let prefix_ptr = self.tmp();
+        let prefix = self.tmp();
+        self.body.push_str(&format!(
+            "  {prefix_ptr} = getelementptr inbounds %{}, ptr {}, i32 0, i32 {}\n  {prefix} = load ptr, ptr {prefix_ptr}\n",
+            llvm_object_name(&object.name),
+            receiver.value,
+            prefix_field.index
+        ));
+        let key_value = self.emit_typed_expr(key_expr)?;
+        let key_value = self.cast_value(key_value, &LlType::Ptr)?;
+        let full_key = self.tmp();
+        self.body.push_str(&format!(
+            "  {full_key} = call ptr @glitch_string_concat(ptr {prefix}, ptr {})\n",
+            key_value.value
+        ));
+        Ok((
+            receiver,
+            full_key,
+            key_value,
+        ))
+    }
+
     pub(in crate::llvm) fn emit_rest_host_run(&mut self, args: &[TypedExpr]) -> Result<LlValue, String> {
         let [app, port, max_requests] = args else {
             return Err(
@@ -1662,4 +1841,12 @@ impl LlvmEmitter {
         })
     }
 
+}
+
+fn is_configuration_manager_type(ty: &IrType) -> bool {
+    matches!(
+        ty,
+        IrType::Class(name) | IrType::Unknown(name) | IrType::Interface(name)
+            if base_type_name(name) == "ConfigurationManager"
+    )
 }

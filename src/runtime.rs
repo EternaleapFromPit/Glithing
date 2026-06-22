@@ -243,13 +243,85 @@ pub unsafe extern "C" fn GlitchRestHost_read_env_int(name: *const c_char, fallba
     let Ok(name) = CStr::from_ptr(name).to_str() else {
         return fallback;
     };
-    let Ok(value) = std::env::var(name) else {
+    let Some(value) = resolve_configuration_value(name) else {
         return fallback;
     };
     let Ok(parsed) = value.trim().parse::<i32>() else {
         return fallback;
     };
-    if parsed > 0 { parsed } else { fallback }
+    parsed
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchRestHost_read_env_i64(name: *const c_char, fallback: i64) -> i64 {
+    if name.is_null() {
+        return fallback;
+    }
+    let Ok(name) = CStr::from_ptr(name).to_str() else {
+        return fallback;
+    };
+    let Some(value) = resolve_configuration_value(name) else {
+        return fallback;
+    };
+    value.trim().parse::<i64>().unwrap_or(fallback)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchRestHost_read_env_bool(name: *const c_char, fallback: bool) -> bool {
+    if name.is_null() {
+        return fallback;
+    }
+    let Ok(name) = CStr::from_ptr(name).to_str() else {
+        return fallback;
+    };
+    let Some(value) = resolve_configuration_value(name) else {
+        return fallback;
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => true,
+        "false" | "0" | "no" | "off" => false,
+        _ => fallback,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchRestHost_read_env_string(
+    name: *const c_char,
+    fallback: *const c_char,
+) -> *mut c_char {
+    let fallback_text = if fallback.is_null() {
+        ""
+    } else {
+        CStr::from_ptr(fallback).to_str().unwrap_or_default()
+    };
+    if name.is_null() {
+        return allocate_glitch_string_from_str(fallback_text);
+    }
+    let Ok(name) = CStr::from_ptr(name).to_str() else {
+        return allocate_glitch_string_from_str(fallback_text);
+    };
+    let value = resolve_configuration_value(name).unwrap_or_else(|| fallback_text.to_string());
+    allocate_glitch_string_from_str(&value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchRestHost_read_connection_string(
+    name: *const c_char,
+    fallback: *const c_char,
+) -> *mut c_char {
+    let fallback_text = if fallback.is_null() {
+        ""
+    } else {
+        CStr::from_ptr(fallback).to_str().unwrap_or_default()
+    };
+    if name.is_null() {
+        return allocate_glitch_string_from_str(fallback_text);
+    }
+    let Ok(name) = CStr::from_ptr(name).to_str() else {
+        return allocate_glitch_string_from_str(fallback_text);
+    };
+    let value = resolve_connection_string(name).unwrap_or_else(|| fallback_text.to_string());
+    allocate_glitch_string_from_str(&value)
 }
 
 #[no_mangle]
@@ -621,6 +693,41 @@ fn allocate_glitch_string_from_bytes(bytes: &[u8]) -> *mut c_char {
 
 fn allocate_glitch_string_from_str(text: &str) -> *mut c_char {
     allocate_glitch_string_from_bytes(text.as_bytes())
+}
+
+fn resolve_configuration_value(name: &str) -> Option<String> {
+    configuration_key_candidates(name)
+        .into_iter()
+        .find_map(|candidate| std::env::var(candidate).ok())
+}
+
+fn resolve_connection_string(name: &str) -> Option<String> {
+    let mut candidates = vec![
+        format!("ConnectionStrings:{name}"),
+        format!("ConnectionStrings__{name}"),
+        format!("ASPNETCORE_ConnectionStrings__{name}"),
+        format!("ASPNETCORE_{name}_ConnectionString"),
+        format!("ASPNETCORE_{name}__ConnectionString"),
+        format!("GLITCH_{name}_ConnectionString"),
+    ];
+    candidates.extend(configuration_key_candidates(&format!("ConnectionStrings:{name}")));
+    candidates
+        .into_iter()
+        .find_map(|candidate| std::env::var(candidate).ok())
+}
+
+fn configuration_key_candidates(name: &str) -> Vec<String> {
+    let canonical = name.replace(':', "__");
+    let upper = canonical.to_ascii_uppercase();
+    vec![
+        name.to_string(),
+        canonical.clone(),
+        upper.clone(),
+        format!("ASPNETCORE_{canonical}"),
+        format!("ASPNETCORE_{upper}"),
+        format!("GLITCH_{canonical}"),
+        format!("GLITCH_{upper}"),
+    ]
 }
 
 fn allocate_glitch_string_array(values: &[*mut c_char]) -> *mut std::ffi::c_void {

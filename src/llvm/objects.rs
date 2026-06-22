@@ -2,6 +2,11 @@
 use super::helpers::*;
 
 impl LlvmEmitter {
+    pub(super) fn emit_dynamic_object_drop(&mut self, value: &str) {
+        self.body
+            .push_str(&format!("  call void @glitch_object_drop(ptr {value})\n"));
+    }
+
     pub(super) fn emit_equality(&mut self, ty: &IrType, left: &str, right: &str, result: &str) {
         if matches!(ty, IrType::String) {
             let cmp = self.tmp();
@@ -320,9 +325,10 @@ impl LlvmEmitter {
     pub(super) fn emit_lambda_function(
         &mut self,
         params: &[String],
-        body: &TypedExpr,
+        body: &TypedLambdaBody,
+        lambda_ty: &IrType,
     ) -> Result<LlValue, String> {
-        delegates::emit_lambda_function(self, params, body)
+        delegates::emit_lambda_function(self, params, body, lambda_ty)
     }
 
     pub(super) fn emit_temporary_drop(&mut self, expr: &TypedExpr, value: &LlValue) {
@@ -372,7 +378,11 @@ impl LlvmEmitter {
             }
             DropKind::DropClass | DropKind::DropStruct => {
                 if let Some(type_name) = object_type_name(&expr.ty) {
-                    self.emit_drop(type_name, &value.value);
+                    if self.object_types.contains_key(type_name) {
+                        self.emit_drop(type_name, &value.value);
+                    } else if matches!(expr.ty, IrType::Class(_) | IrType::Interface(_)) {
+                        self.emit_dynamic_object_drop(&value.value);
+                    }
                 }
             }
             DropKind::DropDelegate => {
@@ -463,9 +473,21 @@ impl LlvmEmitter {
             return;
         }
         let Some(type_name) = object_type_name(&var.ir_ty) else {
+            if matches!(var.ir_ty, IrType::Class(_) | IrType::Interface(_)) {
+                let value = self.tmp();
+                self.body
+                    .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
+                self.emit_dynamic_object_drop(&value);
+            }
             return;
         };
         if !self.object_types.contains_key(type_name) {
+            if matches!(var.ir_ty, IrType::Class(_) | IrType::Interface(_)) {
+                let value = self.tmp();
+                self.body
+                    .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
+                self.emit_dynamic_object_drop(&value);
+            }
             return;
         }
         let value = self.tmp();

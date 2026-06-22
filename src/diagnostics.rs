@@ -508,7 +508,12 @@ impl<'a> CompatibilityAnalyzer<'a> {
                         "for framework configuration, add the receiving API to a `.gl` package; for executable code, rewrite the lambda as a named function until closure lowering is available".to_string(),
                     );
                 }
-                self.visit_expr(body, emit_llvm);
+                match body {
+                    tir::TypedLambdaBody::Expr(body) => self.visit_expr(body, emit_llvm),
+                    tir::TypedLambdaBody::Block(stmts) => {
+                        self.visit_stmts(stmts, emit_llvm);
+                    }
+                }
             }
             tir::TypedExprKind::Conditional {
                 condition,
@@ -609,6 +614,10 @@ fn is_llvm_runtime_function(symbol: &str) -> bool {
         symbol,
         "GlitchRestHost_Run"
             | "GlitchRestHost_read_env_int"
+            | "GlitchRestHost_read_env_i64"
+            | "GlitchRestHost_read_env_bool"
+            | "GlitchRestHost_read_env_string"
+            | "GlitchRestHost_read_connection_string"
             | "GlitchMiddlewareHandlers_Apply"
             | "glitch_register_attribute_routes"
             | "GlitchEndpointHandlers_Contains"
@@ -802,10 +811,7 @@ fn placeholder_member_diagnostic(
     };
 
     match (type_name, name) {
-        ("ConfigurationManager", "Get")
-        | ("ConfigurationManager", "GetValue")
-        | ("ConfigurationManager", "GetSection")
-        | ("ConfigurationManager", "GetConnectionString") => Some((
+        ("ConfigurationManager", "Get") => Some((
             format!(
                 "member '{name}' on {type_name} is still a compatibility stub; the current package returns {}",
                 typed_default_description(return_type)
@@ -819,13 +825,7 @@ fn placeholder_member_diagnostic(
             "Entity Framework service registration is still only a compile-time surface; the current package does not build a real scoped DbContext graph".to_string(),
             "construct the DbContext explicitly for now, or add a real DI registration/runtime implementation before relying on AddDbContext-style activation".to_string(),
         )),
-        ("IServiceCollection", "AddLocalization")
-        | ("ServiceCollection", "AddLocalization")
-        | ("IServiceCollection", "AddCors")
-        | ("ServiceCollection", "AddCors")
-        | ("IServiceCollection", "AddMvc")
-        | ("ServiceCollection", "AddMvc")
-        | ("IServiceCollection", "AddEndpointsApiExplorer")
+        ("IServiceCollection", "AddEndpointsApiExplorer")
         | ("ServiceCollection", "AddEndpointsApiExplorer")
         | ("IServiceCollection", "AddMemoryCache")
         | ("ServiceCollection", "AddMemoryCache")
@@ -839,27 +839,20 @@ fn placeholder_member_diagnostic(
         | ("ServiceCollection", "AddApiVersioning")
         | ("IServiceCollection", "AddVersionedApiExplorer")
         | ("ServiceCollection", "AddVersionedApiExplorer")
-        | ("IServiceCollection", "AddSwaggerGen")
-        | ("ServiceCollection", "AddSwaggerGen")
         | ("IServiceCollection", "AddAutoMapper")
         | ("ServiceCollection", "AddAutoMapper")
         | ("IServiceCollection", "AddMediatR")
         | ("ServiceCollection", "AddMediatR")
         | ("IServiceCollection", "AddValidatorsFromAssemblyContaining")
         | ("ServiceCollection", "AddValidatorsFromAssemblyContaining")
-        | ("IServiceCollection", "AddAuthentication")
-        | ("ServiceCollection", "AddAuthentication")
         | ("IServiceCollection", "AddRepositories")
         | ("ServiceCollection", "AddRepositories")
         | ("IServiceCollection", "AddDataServices")
-        | ("ServiceCollection", "AddDataServices")
-        | ("MvcBuilder", "AddJsonOptions") => Some((
+        | ("ServiceCollection", "AddDataServices") => Some((
             "this service-registration/configuration call is still a compatibility surface; it compiles, but the underlying host/runtime behavior is not fully implemented".to_string(),
             "keep the call only as a marker, or add the corresponding DI/host/runtime implementation before depending on its behavior at runtime".to_string(),
         )),
-        ("AuthenticationBuilder", "AddJwtBearer")
-        | ("MvcBuilder", "AddJwtBearer")
-        | ("MvcBuilder", "AddAuthentication") => Some((
+        ("MvcBuilder", "AddAuthentication") => Some((
             "this authentication configuration call is still a compatibility surface; it compiles, but the current runtime does not build or enforce a real authentication pipeline".to_string(),
             "keep the call only as a marker, or add a real authentication/runtime implementation before depending on bearer-token or authentication behavior".to_string(),
         )),

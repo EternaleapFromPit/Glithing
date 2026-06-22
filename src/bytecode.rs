@@ -329,7 +329,10 @@ impl BytecodeEmitter {
                 self.out.push_str("  assign\n");
             }
             Expr::Lambda { params, body } => {
-                self.emit_expr(body);
+                match body {
+                    LambdaBody::Expr(body) => self.emit_expr(body),
+                    LambdaBody::Block(stmts) => self.emit_stmts(stmts),
+                }
                 self.out
                     .push_str(&format!("  lambda {}\n", params.join(",")));
             }

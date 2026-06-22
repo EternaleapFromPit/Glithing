@@ -64,6 +64,7 @@ Current implemented subset:
 - `List<int>` with `new List<int>()`, `.Add(value)`, and indexing
 - `List<T>.GetEnumerator()` on the supported list surface, plus `Dictionary<K,V>.GetEnumerator()` / dictionary `foreach` lowering on the current LLVM snapshot-enumerator path
 - `Dictionary<string, int>` with `new Dictionary<string, int>()`, `.Add(key, value)`, and indexing
+- package-backed user-defined indexer lowering for `target[index]` when the target exposes `get_Item(...)`, including the current `IStringLocalizer<T>` compatibility slice
 - `HashSet<string>` with `new HashSet<string>()`, `.Add(value)`, `.Contains(value)`, and `.Clear()`
 - `System.Collections.Generic.List<int>` and `System.Collections.Generic.Dictionary<string, int>`, including `using` aliases
 - C#-style `Thread` with `new Thread(worker)`, `.Start()`, and `.Join()`
@@ -108,11 +109,12 @@ Current implemented subset:
 - reference-counted dynamic LLVM strings with deterministic release
 - typed `try` / `catch` / `finally` exception propagation in LLVM
 - a small ASP.NET-style helper surface, including `ModelState.AddModelError`, `ControllerBase.Ok`, and `ControllerBase.NotFound`
-- simple configuration and model-builder defaults for the current ASP.NET / EF compatibility slice
+- simple configuration and model-builder support for the current ASP.NET / EF compatibility slice, including environment-backed `ConfigurationManager["key"]`, `GetSection(...)`, `GetValue<string|int|long|bool>(...)`, and `GetConnectionString(...)`
 - default CLI output builds a native executable when no explicit output is requested
 - NuGet package emission produces LLVM-native assets and linked source metadata
 - source-level packages with `package Name;` and `native "C source";`
 - source directories and `.csproj` files can be used as compiler inputs; `.csproj` support now honors the current property/item slice above, but it is still not full MSBuild parity
+- service-collection / builder configuration delegates such as `AddLocalization(...)`, `AddCors(...)`, `AddMvc(...).AddJsonOptions(...)`, `AddAuthentication()`, `AddJwtBearer(...)`, and `AddSwaggerGen(...)` now execute through the native LLVM path for the current expression-bodied / assignment-bodied lambda slice
 
 `var x = value;` is accepted as a conversion-friendly spelling for `let mut x = value;`.
 
@@ -125,8 +127,10 @@ Current async boundary:
 - owned/shared/copy values may cross `await`; borrowed/view values that stay live across suspension are rejected with rewrite guidance
 - suspension inside loops is still limited to the currently exercised shapes, and the gate remains intentionally blocking over worker threads rather than event-loop based
 - async route handlers now compile and run through typed endpoint thunks on the native host path for the current `Task<string>` / `Task<class>` slice
-- generic `UseMiddleware<T>()` and several ASP.NET/DI registration markers such as `AddEndpointsApiExplorer()`, `AddMemoryCache()`, `AddAuthentication()`, and related authentication/Swagger/logging option chains now emit explicit `GL3013` compatibility warnings instead of silently looking implemented
+- generic `UseMiddleware<T>()` and several ASP.NET/DI registration markers such as `AddEndpointsApiExplorer()`, `AddMemoryCache()`, plus direct host/logging/Swagger compatibility markers still emit explicit `GL3013` warnings instead of silently looking implemented
 - async socket/event-loop hosting, cancellation, `ConfigureAwait`, and `SynchronizationContext` semantics are not implemented yet
+
+Owned local returns now lower as moves on the LLVM path. Returning a local `string`, class, or other owned value no longer injects an extra retain before the callee drops its locals, which closes a leak edge in package/helper methods that return owned temporaries.
 
 Reference cycles over owned graphs are diagnosed with `GL3007` and rewrite guidance such as `Weak<T>`. The compiler can detect the cycle and point to the source field, but arbitrary cyclic ownership is not automatically leak-free in the current memory-safe model.
 
