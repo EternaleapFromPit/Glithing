@@ -32,8 +32,12 @@ pub(super) fn finish_module(emitter: &LlvmEmitter) -> Result<String, String> {
         out.push_str("declare void @GlitchTask_RunI64(ptr, ptr)\n");
         out.push_str("declare void @GlitchTask_RunDouble(ptr, ptr)\n");
         out.push_str("declare void @GlitchTask_RunPtr(ptr, ptr)\n");
+        out.push_str("declare void @GlitchTask_Retain(ptr)\n");
         out.push_str("declare void @GlitchTask_Wait(ptr)\n");
         out.push_str("declare i1 @GlitchTask_IsCompleted(ptr)\n");
+        out.push_str("declare i1 @GlitchTask_IsCompletedSuccessfully(ptr)\n");
+        out.push_str("declare i1 @GlitchTask_IsFaulted(ptr)\n");
+        out.push_str("declare ptr @GlitchTask_GetException(ptr)\n");
         out.push_str("declare void @GlitchTask_Destroy(ptr)\n");
         out.push_str("declare i32 @GlitchRestHost_read_env_int(ptr, i32)\n");
         out.push_str("declare ptr @GlitchString_Lock()\n");
@@ -51,18 +55,32 @@ call_drop:\n  call void %drop_ptr(ptr %value)\n  br label %done\n\
 done:\n  ret void\n}\n",
         );
         out.push_str(
-            "%glitch.task = type { i32, ptr, ptr }\n\
+            "%glitch.task_payload = type { i64, ptr }\n\
+            %glitch.task = type { i64, i32, ptr, ptr, ptr, ptr }\n\
+            define void @glitch_task_init(ptr %task, i32 %completed) {\n\
+            entry:\n\
+              %refs_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
+              store i64 1, ptr %refs_ptr\n\
+              %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
+              store i32 %completed, ptr %completed_ptr\n\
+              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
+              store ptr null, ptr %result_ptr\n\
+              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 3\n\
+              store ptr null, ptr %state_ptr\n\
+              %exception_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 4\n\
+              store ptr null, ptr %exception_ptr\n\
+              %payload_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 5\n\
+              store ptr null, ptr %payload_ptr\n\
+              ret void\n\
+            }\n\
             define ptr @glitch_task_from_result_ptr(ptr %result) {\n\
             entry:\n\
               %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
               %task_size = ptrtoint ptr %task_size_ptr to i64\n\
               %task = call ptr @glitch_calloc(i64 1, i64 %task_size)\n\
-              %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
-              store i32 1, ptr %completed_ptr\n\
-              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
+              call void @glitch_task_init(ptr %task, i32 1)\n\
+              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
               store ptr %result, ptr %result_ptr\n\
-              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
-              store ptr null, ptr %state_ptr\n\
               ret ptr %task\n\
             }\n\
             define ptr @glitch_task_completed() {\n\
@@ -75,12 +93,7 @@ done:\n  ret void\n}\n",
               %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
               %task_size = ptrtoint ptr %task_size_ptr to i64\n\
               %task = call ptr @glitch_calloc(i64 1, i64 %task_size)\n\
-              %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
-              store i32 0, ptr %completed_ptr\n\
-              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
-              store ptr null, ptr %result_ptr\n\
-              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
-              store ptr null, ptr %state_ptr\n\
+              call void @glitch_task_init(ptr %task, i32 0)\n\
               call void @GlitchTask_RunVoid(ptr %task, ptr %delegate)\n\
               ret ptr %task\n\
             }\n\
@@ -89,12 +102,7 @@ done:\n  ret void\n}\n",
               %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
               %task_size = ptrtoint ptr %task_size_ptr to i64\n\
               %task = call ptr @glitch_calloc(i64 1, i64 %task_size)\n\
-              %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
-              store i32 0, ptr %completed_ptr\n\
-              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
-              store ptr null, ptr %result_ptr\n\
-              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
-              store ptr null, ptr %state_ptr\n\
+              call void @glitch_task_init(ptr %task, i32 0)\n\
               call void @GlitchTask_RunI32(ptr %task, ptr %delegate)\n\
               ret ptr %task\n\
             }\n\
@@ -103,12 +111,7 @@ done:\n  ret void\n}\n",
               %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
               %task_size = ptrtoint ptr %task_size_ptr to i64\n\
               %task = call ptr @glitch_calloc(i64 1, i64 %task_size)\n\
-              %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
-              store i32 0, ptr %completed_ptr\n\
-              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
-              store ptr null, ptr %result_ptr\n\
-              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
-              store ptr null, ptr %state_ptr\n\
+              call void @glitch_task_init(ptr %task, i32 0)\n\
               call void @GlitchTask_RunBool(ptr %task, ptr %delegate)\n\
               ret ptr %task\n\
             }\n\
@@ -117,12 +120,7 @@ done:\n  ret void\n}\n",
               %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
               %task_size = ptrtoint ptr %task_size_ptr to i64\n\
               %task = call ptr @glitch_calloc(i64 1, i64 %task_size)\n\
-              %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
-              store i32 0, ptr %completed_ptr\n\
-              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
-              store ptr null, ptr %result_ptr\n\
-              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
-              store ptr null, ptr %state_ptr\n\
+              call void @glitch_task_init(ptr %task, i32 0)\n\
               call void @GlitchTask_RunI64(ptr %task, ptr %delegate)\n\
               ret ptr %task\n\
             }\n\
@@ -131,12 +129,7 @@ done:\n  ret void\n}\n",
               %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
               %task_size = ptrtoint ptr %task_size_ptr to i64\n\
               %task = call ptr @glitch_calloc(i64 1, i64 %task_size)\n\
-              %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
-              store i32 0, ptr %completed_ptr\n\
-              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
-              store ptr null, ptr %result_ptr\n\
-              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
-              store ptr null, ptr %state_ptr\n\
+              call void @glitch_task_init(ptr %task, i32 0)\n\
               call void @GlitchTask_RunDouble(ptr %task, ptr %delegate)\n\
               ret ptr %task\n\
             }\n\
@@ -145,12 +138,7 @@ done:\n  ret void\n}\n",
               %task_size_ptr = getelementptr %glitch.task, ptr null, i32 1\n\
               %task_size = ptrtoint ptr %task_size_ptr to i64\n\
               %task = call ptr @glitch_calloc(i64 1, i64 %task_size)\n\
-              %completed_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 0\n\
-              store i32 0, ptr %completed_ptr\n\
-              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
-              store ptr null, ptr %result_ptr\n\
-              %state_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
-              store ptr null, ptr %state_ptr\n\
+              call void @glitch_task_init(ptr %task, i32 0)\n\
               call void @GlitchTask_RunPtr(ptr %task, ptr %delegate)\n\
               ret ptr %task\n\
             }\n\
@@ -188,7 +176,16 @@ done:\n  ret void\n}\n",
               ret ptr null\n\
             normal_case:\n\
               call void @GlitchTask_Wait(ptr %task)\n\
-              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 1\n\
+              %exception_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 4\n\
+              %exception = load ptr, ptr %exception_ptr\n\
+              %has_exception = icmp ne ptr %exception, null\n\
+              br i1 %has_exception, label %exception_case, label %value_case\n\
+            exception_case:\n\
+              store ptr %exception, ptr @glitch_exception_pending\n\
+              store ptr null, ptr %exception_ptr\n\
+              ret ptr null\n\
+            value_case:\n\
+              %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
               %result = load ptr, ptr %result_ptr\n\
               ret ptr %result\n\
             }\n\
@@ -227,6 +224,21 @@ done:\n  ret void\n}\n",
             entry:\n\
               %completed = call i1 @GlitchTask_IsCompleted(ptr %task)\n\
               ret i1 %completed\n\
+            }\n\
+            define i1 @glitch_task_is_completed_successfully(ptr %task) {\n\
+            entry:\n\
+              %completed = call i1 @GlitchTask_IsCompletedSuccessfully(ptr %task)\n\
+              ret i1 %completed\n\
+            }\n\
+            define i1 @glitch_task_is_faulted(ptr %task) {\n\
+            entry:\n\
+              %faulted = call i1 @GlitchTask_IsFaulted(ptr %task)\n\
+              ret i1 %faulted\n\
+            }\n\
+            define ptr @glitch_task_get_exception(ptr %task) {\n\
+            entry:\n\
+              %exception = call ptr @GlitchTask_GetException(ptr %task)\n\
+              ret ptr %exception\n\
             }\n\
             define ptr @JsonSerializer_Serialize_Native(ptr %value) {\n\
             entry:\n\
@@ -278,15 +290,111 @@ done:\n  ret void\n}\n",
             }\n\
             define ptr @glitch_task_when_all2(ptr %left, ptr %right) {\n\
             entry:\n\
+              call void @GlitchTask_Retain(ptr %left)\n\
+              call void @GlitchTask_Retain(ptr %right)\n\
               call void @glitch_task_wait(ptr %left)\n\
               call void @glitch_task_wait(ptr %right)\n\
+              %payload = call ptr @glitch_calloc(i64 1, i64 16)\n\
+              %payload_tasks = call ptr @glitch_calloc(i64 2, i64 8)\n\
+              %payload_count_ptr = getelementptr inbounds %glitch.task_payload, ptr %payload, i32 0, i32 0\n\
+              store i64 2, ptr %payload_count_ptr\n\
+              %payload_tasks_ptr = getelementptr inbounds %glitch.task_payload, ptr %payload, i32 0, i32 1\n\
+              store ptr %payload_tasks, ptr %payload_tasks_ptr\n\
+              %left_slot = getelementptr inbounds ptr, ptr %payload_tasks, i64 0\n\
+              store ptr %left, ptr %left_slot\n\
+              %right_slot = getelementptr inbounds ptr, ptr %payload_tasks, i64 1\n\
+              store ptr %right, ptr %right_slot\n\
+              %left_faulted = call i1 @GlitchTask_IsFaulted(ptr %left)\n\
+              br i1 %left_faulted, label %left_fault, label %check_right\n\
+            left_fault:\n\
+              %left_exception = call ptr @GlitchTask_GetException(ptr %left)\n\
+              %left_task = call ptr @glitch_task_completed()\n\
+              %left_task_exception_ptr = getelementptr inbounds %glitch.task, ptr %left_task, i32 0, i32 4\n\
+              %left_task_payload_ptr = getelementptr inbounds %glitch.task, ptr %left_task, i32 0, i32 5\n\
+              store ptr %left_exception, ptr %left_task_exception_ptr\n\
+              store ptr %payload, ptr %left_task_payload_ptr\n\
+              ret ptr %left_task\n\
+            check_right:\n\
+              %right_faulted = call i1 @GlitchTask_IsFaulted(ptr %right)\n\
+              br i1 %right_faulted, label %right_fault, label %completed\n\
+            right_fault:\n\
+              %right_exception = call ptr @GlitchTask_GetException(ptr %right)\n\
+              %right_task = call ptr @glitch_task_completed()\n\
+              %right_task_exception_ptr = getelementptr inbounds %glitch.task, ptr %right_task, i32 0, i32 4\n\
+              %right_task_payload_ptr = getelementptr inbounds %glitch.task, ptr %right_task, i32 0, i32 5\n\
+              store ptr %right_exception, ptr %right_task_exception_ptr\n\
+              store ptr %payload, ptr %right_task_payload_ptr\n\
+              ret ptr %right_task\n\
+            completed:\n\
               %task = call ptr @glitch_task_completed()\n\
+              %task_payload_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 5\n\
+              store ptr %payload, ptr %task_payload_ptr\n\
               ret ptr %task\n\
             }\n\
             define ptr @glitch_task_when_all_array(ptr %tasks) {\n\
             entry:\n\
-              %task = call ptr @glitch_task_completed()\n\
-              ret ptr %task\n\
+              %is_null = icmp eq ptr %tasks, null\n\
+              br i1 %is_null, label %null_completed, label %init\n\
+            null_completed:\n\
+              %null_task = call ptr @glitch_task_completed()\n\
+              ret ptr %null_task\n\
+            init:\n\
+              %len_ptr = getelementptr inbounds %glitch.array, ptr %tasks, i32 0, i32 0\n\
+              %data_ptr = getelementptr inbounds %glitch.array, ptr %tasks, i32 0, i32 1\n\
+              %len = load i64, ptr %len_ptr\n\
+              %data = load ptr, ptr %data_ptr\n\
+              %payload = call ptr @glitch_calloc(i64 1, i64 16)\n\
+              %payload_tasks = call ptr @glitch_calloc(i64 %len, i64 8)\n\
+              %payload_count_ptr = getelementptr inbounds %glitch.task_payload, ptr %payload, i32 0, i32 0\n\
+              store i64 %len, ptr %payload_count_ptr\n\
+              %payload_tasks_ptr = getelementptr inbounds %glitch.task_payload, ptr %payload, i32 0, i32 1\n\
+              store ptr %payload_tasks, ptr %payload_tasks_ptr\n\
+              %index_ptr = alloca i64\n\
+              %fault_ptr = alloca ptr\n\
+              store i64 0, ptr %index_ptr\n\
+              store ptr null, ptr %fault_ptr\n\
+              br label %loop\n\
+            loop:\n\
+              %index = load i64, ptr %index_ptr\n\
+              %in_range = icmp ult i64 %index, %len\n\
+              br i1 %in_range, label %body, label %done\n\
+            body:\n\
+              %slot = getelementptr inbounds ptr, ptr %data, i64 %index\n\
+              %item = load ptr, ptr %slot\n\
+              call void @GlitchTask_Retain(ptr %item)\n\
+              %payload_slot = getelementptr inbounds ptr, ptr %payload_tasks, i64 %index\n\
+              store ptr %item, ptr %payload_slot\n\
+              call void @glitch_task_wait(ptr %item)\n\
+              %faulted = call i1 @GlitchTask_IsFaulted(ptr %item)\n\
+              br i1 %faulted, label %capture, label %advance\n\
+            capture:\n\
+              %existing = load ptr, ptr %fault_ptr\n\
+              %has_existing = icmp ne ptr %existing, null\n\
+              br i1 %has_existing, label %advance, label %capture_store\n\
+            capture_store:\n\
+              %exception = call ptr @GlitchTask_GetException(ptr %item)\n\
+              store ptr %exception, ptr %fault_ptr\n\
+              br label %advance\n\
+            advance:\n\
+              %next = add i64 %index, 1\n\
+              store i64 %next, ptr %index_ptr\n\
+              br label %loop\n\
+            done:\n\
+              %fault = load ptr, ptr %fault_ptr\n\
+              %has_fault = icmp ne ptr %fault, null\n\
+              br i1 %has_fault, label %faulted_case, label %completed\n\
+            faulted_case:\n\
+              %faulted_task = call ptr @glitch_task_completed()\n\
+              %faulted_task_exception_ptr = getelementptr inbounds %glitch.task, ptr %faulted_task, i32 0, i32 4\n\
+              %faulted_task_payload_ptr = getelementptr inbounds %glitch.task, ptr %faulted_task, i32 0, i32 5\n\
+              store ptr %fault, ptr %faulted_task_exception_ptr\n\
+              store ptr %payload, ptr %faulted_task_payload_ptr\n\
+              ret ptr %faulted_task\n\
+            completed:\n\
+              %completed_task = call ptr @glitch_task_completed()\n\
+              %completed_task_payload_ptr = getelementptr inbounds %glitch.task, ptr %completed_task, i32 0, i32 5\n\
+              store ptr %payload, ptr %completed_task_payload_ptr\n\
+              ret ptr %completed_task\n\
             }\n",
         );
         out.push_str(

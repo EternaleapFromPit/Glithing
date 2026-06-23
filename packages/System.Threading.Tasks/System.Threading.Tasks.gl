@@ -9,7 +9,19 @@ public class Task {
 
     public bool IsCompletedSuccessfully {
         get {
-            return this.IsCompleted;
+            return this.IsCompleted && !this.IsFaulted;
+        }
+    }
+
+    public bool IsFaulted {
+        get {
+            return false;
+        }
+    }
+
+    public Exception Exception {
+        get {
+            return null;
         }
     }
 
@@ -54,12 +66,28 @@ public class Task<T> {
 
     public bool IsCompletedSuccessfully {
         get {
-            return true;
+            return !this.IsFaulted;
+        }
+    }
+
+    public bool IsFaulted {
+        get {
+            return false;
+        }
+    }
+
+    public Exception Exception {
+        get {
+            return null;
         }
     }
 
     public static Task<T> FromResult(T value) {
         return new Task<T> { Result = value };
+    }
+
+    public static Task<T> FromException(Exception exception) {
+        return new Task<T>();
     }
 
     public void Wait() {}

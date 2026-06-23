@@ -14,6 +14,7 @@ pub(super) struct OwnershipSnapshot {
     vars: HashMap<String, CheckedVar>,
     exits_function: bool,
     exits_loop: bool,
+    exits_switch: bool,
 }
 
 pub(super) fn package_type_key(package_id: &str, type_name: &str) -> String {
@@ -24,6 +25,35 @@ pub(super) fn package_type_key(package_id: &str, type_name: &str) -> String {
 pub(super) enum LoopExitKind {
     Break,
     Continue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FlowContext {
+    pub(super) in_loop: bool,
+    pub(super) in_switch: bool,
+}
+
+impl FlowContext {
+    pub(super) const fn new() -> Self {
+        Self {
+            in_loop: false,
+            in_switch: false,
+        }
+    }
+
+    pub(super) const fn with_loop(self) -> Self {
+        Self {
+            in_loop: true,
+            in_switch: false,
+        }
+    }
+
+    pub(super) const fn with_switch(self) -> Self {
+        Self {
+            in_loop: self.in_loop,
+            in_switch: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +68,9 @@ pub(super) struct OwnershipState {
     vars: HashMap<String, CheckedVar>,
     exits_function: bool,
     exits_loop: bool,
+    exits_switch: bool,
     loop_exit_snapshots: Vec<LoopExitSnapshot>,
+    switch_exit_snapshots: Vec<OwnershipSnapshot>,
 }
 
 impl OwnershipState {
@@ -48,7 +80,9 @@ impl OwnershipState {
             vars: HashMap::new(),
             exits_function: false,
             exits_loop: false,
+            exits_switch: false,
             loop_exit_snapshots: Vec::new(),
+            switch_exit_snapshots: Vec::new(),
         };
         for param in params {
             state.declare(param.name, param.ty, param.ownership, None);
@@ -117,6 +151,7 @@ impl OwnershipState {
             vars: self.vars.clone(),
             exits_function: self.exits_function,
             exits_loop: self.exits_loop,
+            exits_switch: self.exits_switch,
         }
     }
 
@@ -126,7 +161,9 @@ impl OwnershipState {
             vars: snapshot.vars.clone(),
             exits_function: snapshot.exits_function,
             exits_loop: snapshot.exits_loop,
+            exits_switch: snapshot.exits_switch,
             loop_exit_snapshots: Vec::new(),
+            switch_exit_snapshots: Vec::new(),
         }
     }
 }
@@ -221,7 +258,7 @@ impl OwnershipChecker {
         return_ownership: Ownership,
     ) -> Result<(), String> {
         let mut state = OwnershipState::new(params);
-        Self::check_stmts(context, body, env, &mut state, return_type, return_ownership)
+        Self::check_stmts(context, body, env, &mut state, return_type, return_ownership, FlowContext::new())
     }
 
     pub(super) fn check_stmts(
@@ -231,10 +268,11 @@ impl OwnershipChecker {
         state: &mut OwnershipState,
         return_type: &IrType,
         return_ownership: Ownership,
+        flow: FlowContext,
     ) -> Result<(), String> {
         for stmt in stmts {
-            Self::check_stmt(context, stmt, env, state, return_type, return_ownership.clone())?;
-            if state.exits_function || state.exits_loop {
+            Self::check_stmt(context, stmt, env, state, return_type, return_ownership.clone(), flow)?;
+            if state.exits_function || state.exits_loop || state.exits_switch {
                 break;
             }
         }
@@ -248,6 +286,7 @@ impl OwnershipChecker {
         state: &OwnershipState,
         return_type: &IrType,
         return_ownership: Ownership,
+        flow: FlowContext,
     ) -> Result<OwnershipState, String> {
         let mut branch_state = state.clone();
         Self::check_stmts(
@@ -257,6 +296,7 @@ impl OwnershipChecker {
             &mut branch_state,
             return_type,
             return_ownership,
+            flow,
         )?;
         Ok(branch_state)
     }
@@ -268,11 +308,14 @@ impl OwnershipChecker {
         state: &OwnershipState,
         return_type: &IrType,
         return_ownership: Ownership,
+        flow: FlowContext,
     ) -> Result<OwnershipState, String> {
         let mut final_state = state.clone();
         let exited_function = final_state.exits_function;
         let exited_loop = final_state.exits_loop;
+        let exited_switch = final_state.exits_switch;
         let existing_snapshots = final_state.loop_exit_snapshots.clone();
+        let existing_switch_snapshots = final_state.switch_exit_snapshots.clone();
         final_state.push_scope();
         Self::check_stmts(
             context,
@@ -281,10 +324,12 @@ impl OwnershipChecker {
             &mut final_state,
             return_type,
             return_ownership.clone(),
+            flow,
         )?;
         final_state.pop_scope();
         final_state.exits_function |= exited_function;
         final_state.exits_loop |= exited_loop;
+        final_state.exits_switch |= exited_switch;
 
         let mut propagated_snapshots = Vec::new();
         for snapshot in existing_snapshots {
@@ -297,6 +342,7 @@ impl OwnershipChecker {
                 &mut snapshot_state,
                 return_type,
                 return_ownership.clone(),
+                flow,
             )?;
             snapshot_state.pop_scope();
             propagated_snapshots.push(LoopExitSnapshot {
@@ -305,6 +351,24 @@ impl OwnershipChecker {
             });
         }
         final_state.loop_exit_snapshots.extend(propagated_snapshots);
+
+        let mut propagated_switch_snapshots = Vec::new();
+        for snapshot in existing_switch_snapshots {
+            let mut snapshot_state = OwnershipState::from_snapshot(&snapshot);
+            snapshot_state.push_scope();
+            Self::check_stmts(
+                context,
+                finally_body,
+                env,
+                &mut snapshot_state,
+                return_type,
+                return_ownership.clone(),
+                flow,
+            )?;
+            snapshot_state.pop_scope();
+            propagated_switch_snapshots.push(snapshot_state.snapshot());
+        }
+        final_state.switch_exit_snapshots.extend(propagated_switch_snapshots);
         Ok(final_state)
     }
 
@@ -312,7 +376,7 @@ impl OwnershipChecker {
         let mut merged = base.clone();
         let live_branches: Vec<&OwnershipState> = branches
             .iter()
-            .filter(|branch| !branch.exits_function && !branch.exits_loop)
+            .filter(|branch| !branch.exits_function && !branch.exits_loop && !branch.exits_switch)
             .collect();
         let active_branches = if live_branches.is_empty() {
             branches.iter().collect::<Vec<_>>()
@@ -332,6 +396,13 @@ impl OwnershipChecker {
             .iter()
             .flat_map(|branch| branch.loop_exit_snapshots.iter().cloned())
             .collect();
+        merged.switch_exit_snapshots = branches
+            .iter()
+            .flat_map(|branch| branch.switch_exit_snapshots.iter().cloned())
+            .collect();
+        merged.exits_function = branches.iter().all(|branch| branch.exits_function);
+        merged.exits_loop = branches.iter().all(|branch| branch.exits_loop);
+        merged.exits_switch = branches.iter().all(|branch| branch.exits_switch);
         merged
     }
 
@@ -350,6 +421,13 @@ impl OwnershipChecker {
             .iter()
             .flat_map(|branch| branch.loop_exit_snapshots.iter().cloned())
             .collect();
+        merged.switch_exit_snapshots = branches
+            .iter()
+            .flat_map(|branch| branch.switch_exit_snapshots.iter().cloned())
+            .collect();
+        merged.exits_function = branches.iter().all(|branch| branch.exits_function);
+        merged.exits_loop = branches.iter().all(|branch| branch.exits_loop);
+        merged.exits_switch = branches.iter().all(|branch| branch.exits_switch);
         merged
     }
 
@@ -360,6 +438,7 @@ impl OwnershipChecker {
         state: &mut OwnershipState,
         return_type: &IrType,
         return_ownership: Ownership,
+        flow: FlowContext,
     ) -> Result<(), String> {
         match stmt {
             Stmt::Let {
@@ -415,7 +494,7 @@ impl OwnershipChecker {
             }
             Stmt::Block(body) => {
                 state.push_scope();
-                Self::check_stmts(context, body, env, state, return_type, return_ownership.clone())?;
+                Self::check_stmts(context, body, env, state, return_type, return_ownership.clone(), flow)?;
                 state.pop_scope();
             }
             Stmt::If {
@@ -432,6 +511,7 @@ impl OwnershipChecker {
                     &base,
                     return_type,
                     return_ownership.clone(),
+                    flow,
                 )?;
                 let else_state = Self::check_block_snapshot(
                     context,
@@ -440,6 +520,7 @@ impl OwnershipChecker {
                     &base,
                     return_type,
                     return_ownership.clone(),
+                    flow,
                 )?;
                 *state = Self::merge_branch_states(&base, &[then_state, else_state]);
             }
@@ -456,6 +537,7 @@ impl OwnershipChecker {
                     &base,
                     return_type,
                     return_ownership.clone(),
+                    flow,
                 )?;
                 let try_state = Self::apply_finally_to_state(
                     context,
@@ -464,6 +546,7 @@ impl OwnershipChecker {
                     &try_state,
                     return_type,
                     return_ownership.clone(),
+                    flow,
                 )?;
                 let mut branches = vec![try_state];
                 if let Some(catch) = catch {
@@ -484,6 +567,7 @@ impl OwnershipChecker {
                         &mut catch_state,
                         return_type,
                         return_ownership.clone(),
+                        flow,
                     )?;
                     catch_state.pop_scope();
                     let catch_state = Self::apply_finally_to_state(
@@ -493,6 +577,7 @@ impl OwnershipChecker {
                         &catch_state,
                         return_type,
                         return_ownership.clone(),
+                        flow,
                     )?;
                     branches.push(catch_state);
                 }
@@ -506,26 +591,48 @@ impl OwnershipChecker {
                 Self::check_expr(expr, env, state)?;
                 let base = state.clone();
                 let mut branches = Vec::new();
+                let mut loop_exit_snapshots = Vec::new();
+                let mut switch_exit_snapshots = Vec::new();
                 for case in cases {
                     Self::check_expr(&case.value, env, state)?;
-                    branches.push(Self::check_block_snapshot(
+                    let case_state = Self::check_block_snapshot(
                         context,
                         &case.body,
                         env,
                         &base,
                         return_type,
                         return_ownership.clone(),
-                    )?);
+                        flow.with_switch(),
+                    )?;
+                    loop_exit_snapshots.extend(case_state.loop_exit_snapshots.iter().cloned());
+                    switch_exit_snapshots.extend(case_state.switch_exit_snapshots.iter().cloned());
+                    if !case_state.exits_function && !case_state.exits_loop && !case_state.exits_switch {
+                        branches.push(case_state);
+                    }
                 }
-                branches.push(Self::check_block_snapshot(
+                let default_state = Self::check_block_snapshot(
                     context,
                     default,
                     env,
                     &base,
                     return_type,
                     return_ownership.clone(),
-                )?);
-                *state = Self::merge_branch_states(&base, &branches);
+                    flow.with_switch(),
+                )?;
+                loop_exit_snapshots.extend(default_state.loop_exit_snapshots.iter().cloned());
+                switch_exit_snapshots.extend(default_state.switch_exit_snapshots.iter().cloned());
+                if !default_state.exits_function && !default_state.exits_loop && !default_state.exits_switch {
+                    branches.push(default_state);
+                }
+                for snapshot in switch_exit_snapshots {
+                    let mut exit_state = OwnershipState::from_snapshot(&snapshot);
+                    exit_state.exits_switch = false;
+                    branches.push(exit_state);
+                }
+                let mut merged = Self::merge_branch_states(&base, &branches);
+                merged.loop_exit_snapshots.extend(loop_exit_snapshots);
+                merged.switch_exit_snapshots.clear();
+                *state = merged;
             }
             Stmt::While { condition, body } => {
                 Self::check_expr(condition, env, state)?;
@@ -537,6 +644,7 @@ impl OwnershipChecker {
                     &base,
                     return_type,
                     return_ownership.clone(),
+                    flow.with_loop(),
                 )?;
                 let mut loop_branches = vec![body_state.clone()];
                 loop_branches.extend(
@@ -555,7 +663,7 @@ impl OwnershipChecker {
             } => {
                 state.push_scope();
                 if let Some(init) = init {
-                    Self::check_stmt(context, init, env, state, return_type, return_ownership.clone())?;
+                    Self::check_stmt(context, init, env, state, return_type, return_ownership.clone(), flow)?;
                 }
                 if let Some(condition) = condition {
                     Self::check_expr(condition, env, state)?;
@@ -568,6 +676,7 @@ impl OwnershipChecker {
                     &base,
                     return_type,
                     return_ownership.clone(),
+                    flow.with_loop(),
                 )?;
                 let mut loop_branches = Vec::new();
                 if !body_state.exits_function && !body_state.exits_loop {
@@ -580,6 +689,7 @@ impl OwnershipChecker {
                             &mut steady_state,
                             return_type,
                             return_ownership.clone(),
+                            flow.with_loop(),
                         )?;
                     }
                     loop_branches.push(steady_state);
@@ -598,6 +708,7 @@ impl OwnershipChecker {
                                     &mut branch_state,
                                     return_type,
                                     return_ownership.clone(),
+                                    flow.with_loop(),
                                 )?;
                             }
                             loop_branches.push(branch_state);
@@ -633,6 +744,7 @@ impl OwnershipChecker {
                     &base,
                     return_type,
                     return_ownership.clone(),
+                    flow.with_loop(),
                 )?;
                 let mut loop_branches = vec![body_state.clone()];
                 loop_branches.extend(
@@ -685,11 +797,16 @@ impl OwnershipChecker {
                     Stmt::Continue => LoopExitKind::Continue,
                     _ => unreachable!(),
                 };
-                state.loop_exit_snapshots.push(LoopExitSnapshot {
-                    kind,
-                    snapshot: state.snapshot(),
-                });
-                state.exits_loop = true;
+                if matches!(stmt, Stmt::Break) && flow.in_switch {
+                    state.switch_exit_snapshots.push(state.snapshot());
+                    state.exits_switch = true;
+                } else {
+                    state.loop_exit_snapshots.push(LoopExitSnapshot {
+                        kind,
+                        snapshot: state.snapshot(),
+                    });
+                    state.exits_loop = true;
+                }
             }
         }
         Ok(())
@@ -839,11 +956,19 @@ impl OwnershipChecker {
                         ty: inner.as_ref().clone(),
                         ownership: ownership_for_type(inner),
                     }),
-                    (IrType::Task(_), "IsCompleted") | (IrType::Task(_), "IsCompletedSuccessfully") => Some(FieldSignature {
+                    (IrType::Task(_), "IsCompleted")
+                    | (IrType::Task(_), "IsCompletedSuccessfully")
+                    | (IrType::Task(_), "IsFaulted") => Some(FieldSignature {
                         package_id: None,
                         visibility: Visibility::Public,
                         ty: IrType::Bool,
                         ownership: Ownership::Copy,
+                    }),
+                    (IrType::Task(_), "Exception") => Some(FieldSignature {
+                        package_id: None,
+                        visibility: Visibility::Public,
+                        ty: IrType::Exception,
+                        ownership: Ownership::Owned,
                     }),
                     (IrType::Exception, "Message") => Some(FieldSignature {
                         package_id: None,
@@ -1153,6 +1278,7 @@ impl OwnershipChecker {
                             &mut nested_state,
                             &IrType::Void,
                             Ownership::Copy,
+                            FlowContext::new(),
                         )?;
                     }
                 }

@@ -570,6 +570,39 @@ fn compiles_mediatr_send_infers_response_from_request_contract() {
 }
 
 #[test]
+fn compiles_mediatr_send_dispatches_interface_typed_requests_by_runtime_type() {
+    let source = r#"
+            using MediatR;
+            using Microsoft.Extensions.DependencyInjection;
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            class DemoRequest : IRequest<string> {}
+
+            class DemoHandler : IRequestHandler<DemoRequest, string> {
+                Task<string> Handle(DemoRequest request, CancellationToken cancellationToken) {
+                    return new Task<string>();
+                }
+            }
+
+            class DemoApp {
+                Task<string> Run() {
+                    IRequest<string> request = new DemoRequest();
+                    var mediator = new Mediator(new ServiceCollection().BuildServiceProvider());
+                    return mediator.Send(request);
+                }
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("mediator Send should dispatch interface-typed requests at runtime");
+
+    assert!(llvm_ir.contains("glitch_drop_DemoRequest"));
+    assert!(llvm_ir.contains("icmp eq ptr"));
+    assert!(llvm_ir.contains("glitch_task_from_result_ptr") || llvm_ir.contains("glitch_task_completed"));
+}
+
+#[test]
 fn compiles_typeof_marker_for_package_startup_helpers() {
     let source = r#"
             using AutoMapper;
@@ -963,7 +996,6 @@ fn compiles_task_when_all_and_completed_task_surface() {
         "#;
 
     let llvm_ir = compile_llvm_ir(source).expect("Task.WhenAll and CompletedTask should compile on the LLVM path");
-
     assert!(!llvm_ir.is_empty());
     assert!(llvm_ir.contains("glitch_task_when_all2"));
     assert!(llvm_ir.contains("glitch_task_is_completed"));
@@ -1054,7 +1086,7 @@ fn compiles_task_wait_getawaiter_and_success_properties() {
 
     assert!(!llvm_ir.is_empty());
     assert!(llvm_ir.contains("glitch_task_wait"));
-    assert!(llvm_ir.contains("glitch_task_is_completed"));
+    assert!(llvm_ir.contains("glitch_task_is_completed_successfully"));
     assert!(llvm_ir.contains("glitch_task_get_result_i32"));
 }
 
@@ -1161,6 +1193,115 @@ fn native_task_when_all_wait_surface_releases_tasks() {
     assert!(stdout.contains("true"));
     assert!(stdout.contains("3"));
     assert!(stdout.contains("0"));
+}
+
+#[test]
+fn native_task_when_all_propagates_faulted_tasks() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int First() {
+                return 1;
+            }
+
+            int Boom() {
+                throw new Exception("boom");
+            }
+
+            fn main() {
+                Task<int> first = Task.Run(First);
+                Task<int> second = Task.Run(Boom);
+                Task merged = Task.WhenAll(first, second);
+                merged.Wait();
+                print(merged.IsFaulted);
+                print(merged.Exception != null);
+                print(first.Result);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("task-whenall-fault", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("true"));
+    assert!(stdout.contains("1"));
+}
+
+#[test]
+fn native_task_array_when_all_keeps_original_task_handles_alive() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int First() {
+                return 10;
+            }
+
+            int Second() {
+                return 20;
+            }
+
+            fn main() {
+                Task<int> first = Task.Run(First);
+                Task<int> second = Task.Run(Second);
+                Task<int>[] tasks = new Task<int>[] { first, second };
+                Task merged = Task.WhenAll(tasks);
+                merged.Wait();
+                print(merged.IsCompletedSuccessfully);
+                print(first.Result + second.Result);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("task-whenall-array-retain", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("true"));
+    assert!(stdout.contains("30"));
+}
+
+#[test]
+fn native_nested_task_payloads_are_retained_and_released() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            string MakeName() {
+                return "Ada";
+            }
+
+            fn main() {
+                Task<string> inner = Task.FromResult(MakeName());
+                Task<Task<string>> outer = Task.FromResult(inner);
+                Task<string> recovered = outer.Result;
+                print(recovered.Result);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("nested-task-payload", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Ada"));
 }
 
 #[test]

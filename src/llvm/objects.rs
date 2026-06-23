@@ -142,6 +142,7 @@ impl LlvmEmitter {
             let field_ty = llvm_ir_type(&field.ty);
             let field_value = self.cast_value(field_value, &field_ty)?;
             self.retain_for_store(&field.ty, &field_init.expr, &field_value.value);
+            self.move_raw_owned_source_after_store(&field.ty, &field_init.expr);
             let ptr = self.tmp();
             self.body.push_str(&format!(
                 "  {ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 {}\n  store {} {}, ptr {ptr}\n",
@@ -280,6 +281,19 @@ impl LlvmEmitter {
             }
             return;
         }
+        if matches!(ty, IrType::Task(_)) {
+            if matches!(
+                expr.kind,
+                TypedExprKind::Var(_)
+                    | TypedExprKind::Field { .. }
+                    | TypedExprKind::Index { .. }
+                    | TypedExprKind::Borrow { .. }
+            ) {
+                self.body
+                    .push_str(&format!("  call void @GlitchTask_Retain(ptr {value})\n"));
+            }
+            return;
+        }
         let Some(type_name) = object_type_name(ty) else {
             return;
         };
@@ -300,6 +314,34 @@ impl LlvmEmitter {
             return;
         }
         self.emit_retain(type_name, value);
+    }
+
+    pub(super) fn move_raw_owned_source_after_store(&mut self, ty: &IrType, expr: &TypedExpr) {
+        if !matches!(
+            ty,
+            IrType::Array(_)
+                | IrType::Struct(_)
+                | IrType::List(_)
+                | IrType::Dictionary(_, _)
+                | IrType::Exception
+        ) {
+            return;
+        }
+        let Some(name) = expr_source_name(expr) else {
+            return;
+        };
+        if !matches!(expr.kind, TypedExprKind::Var(_)) {
+            return;
+        }
+        let Some(var) = self.vars.get(name).cloned() else {
+            return;
+        };
+        self.body.push_str(&format!(
+            "  store {} {}, ptr {}\n",
+            var.ty.as_ir(),
+            var.ty.default_value(),
+            var.ptr
+        ));
     }
 
     pub(super) fn emit_retain(&mut self, type_name: &str, value: &str) {
@@ -335,10 +377,10 @@ impl LlvmEmitter {
         if matches!(
             expr.kind,
             TypedExprKind::Var(_)
-                | TypedExprKind::Field { .. }
-                | TypedExprKind::Index { .. }
                 | TypedExprKind::Move(_)
                 | TypedExprKind::Borrow { .. }
+                | TypedExprKind::Field { .. }
+                | TypedExprKind::Index { .. }
         ) {
             return;
         }
@@ -391,6 +433,12 @@ impl LlvmEmitter {
                     value.value
                 ));
             }
+            DropKind::DropException => {
+                self.body.push_str(&format!(
+                    "  call void @glitch_string_release(ptr {})\n",
+                    value.value
+                ));
+            }
             DropKind::DropTask => {
                 if let IrType::Task(inner) = &expr.ty {
                     self.emit_task_drop_value(&value.value, inner);
@@ -419,7 +467,9 @@ impl LlvmEmitter {
             ));
             return;
         }
-        if matches!(var.drop_kind, DropKind::Free) && matches!(var.ir_ty, IrType::Array(_)) {
+        if matches!(var.ir_ty, IrType::Array(_))
+            && !matches!(var.drop_kind, DropKind::BorrowOnly | DropKind::ViewOnly)
+        {
             let value = self.tmp();
             self.body
                 .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
@@ -451,6 +501,15 @@ impl LlvmEmitter {
                 .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
             self.body.push_str(&format!(
                 "  call void @glitch_delegate_release(ptr {value})\n"
+            ));
+            return;
+        }
+        if matches!(var.drop_kind, DropKind::DropException) {
+            let value = self.tmp();
+            self.body
+                .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
+            self.body.push_str(&format!(
+                "  call void @glitch_string_release(ptr {value})\n"
             ));
             return;
         }
@@ -571,14 +630,45 @@ impl LlvmEmitter {
         ));
     }
 
+    fn emit_owned_payload_drop_value(&mut self, ty: &IrType, value: &str) {
+        match ty {
+            IrType::Nullable(inner) => self.emit_owned_payload_drop_value(inner, value),
+            IrType::String => self.body.push_str(&format!(
+                "  call void @glitch_string_release(ptr {value})\n"
+            )),
+            IrType::Array(element) => self.emit_array_drop_value(value, element),
+            IrType::List(_) | IrType::Dictionary(_, _) => {
+                self.emit_collection_drop_value(ty, value)
+            }
+            IrType::Task(inner) => self.emit_task_drop_value(value, inner),
+            IrType::Unknown(name) if name == "object" => self.body.push_str(&format!(
+                "  call void @glitch_box_release(ptr {value})\n"
+            )),
+            _ => {
+                if let Some(type_name) = object_type_name(ty) {
+                    if self.object_types.contains_key(type_name) {
+                        self.emit_drop(type_name, value);
+                    } else if matches!(ty, IrType::Class(_) | IrType::Interface(_)) {
+                        self.emit_dynamic_object_drop(value);
+                    }
+                }
+            }
+        }
+    }
+
     pub(super) fn emit_buffer_element_drops(&mut self, element: &IrType, data: &str, len: &str) {
-        let drop_string = matches!(element, IrType::String);
-        let drop_collection = matches!(element, IrType::List(_) | IrType::Dictionary(_, _));
-        let drop_array = matches!(element, IrType::Array(_));
-        let object = object_type_name(element)
-            .filter(|name| self.object_types.contains_key(*name))
-            .map(str::to_string);
-        if !drop_string && !drop_collection && !drop_array && object.is_none() {
+        let needs_drop = matches!(
+            element,
+            IrType::String
+                | IrType::Array(_)
+                | IrType::List(_)
+                | IrType::Dictionary(_, _)
+                | IrType::Task(_)
+                | IrType::Nullable(_)
+        ) || object_type_name(element).is_some_and(|name| self.object_types.contains_key(name))
+            || matches!(element, IrType::Class(_) | IrType::Interface(_))
+            || matches!(element, IrType::Unknown(name) if name == "object");
+        if !needs_drop {
             return;
         }
         let index_ptr = self.tmp();
@@ -596,21 +686,7 @@ impl LlvmEmitter {
             element_type.as_ir(),
             element_type.as_ir()
         ));
-        if drop_string {
-            self.body
-                .push_str(&format!("  call void @glitch_string_release(ptr {item})\n"));
-        } else if drop_collection {
-            // Recursively drop inner collections (e.g. List<List<string>>).
-            self.emit_collection_drop_value(element, &item);
-        } else if drop_array {
-            if let IrType::Array(inner_el) = element {
-                self.emit_array_drop_value(&item, inner_el);
-            }
-        } else if let Some(type_name) = object {
-            self.emit_drop(&type_name, &item);
-        } else if let IrType::Task(inner) = element {
-            self.emit_task_drop_value(&item, inner);
-        }
+        self.emit_owned_payload_drop_value(element, &item);
         self.body.push_str(&format!(
             "  {next} = add i64 {index}, 1\n  store i64 {next}, ptr {index_ptr}\n  br label %{loop_label}\n{done_label}:\n"
         ));
@@ -623,26 +699,11 @@ impl LlvmEmitter {
         let result_ptr = self.tmp();
         let result = self.tmp();
         self.body.push_str(&format!(
-            "  {is_null} = icmp eq ptr {task_value}, null\n  br i1 {is_null}, label %{done_label}, label %{release_label}\n{release_label}:\n  call void @glitch_task_wait(ptr {task_value})\n  {result_ptr} = getelementptr inbounds %glitch.task, ptr {task_value}, i32 0, i32 1\n  {result} = load ptr, ptr {result_ptr}\n"
+            "  {is_null} = icmp eq ptr {task_value}, null\n  br i1 {is_null}, label %{done_label}, label %{release_label}\n{release_label}:\n  call void @glitch_task_wait(ptr {task_value})\n  {result_ptr} = getelementptr inbounds %glitch.task, ptr {task_value}, i32 0, i32 2\n  {result} = load ptr, ptr {result_ptr}\n"
         ));
-        match inner {
-            IrType::String => self.body.push_str(&format!(
-                "  call void @glitch_string_release(ptr {result})\n"
-            )),
-            IrType::Array(element) => self.emit_array_drop_value(&result, element),
-            IrType::List(_) | IrType::Dictionary(_, _) => {
-                self.emit_collection_drop_value(inner, &result)
-            }
-            _ => {
-                if let Some(type_name) = object_type_name(inner) {
-                    if self.object_types.contains_key(type_name) {
-                        self.emit_drop(type_name, &result);
-                    }
-                }
-            }
-        }
+        self.emit_owned_payload_drop_value(inner, &result);
         self.body.push_str(&format!(
-            "  call void @GlitchTask_Destroy(ptr {task_value})\n  call void @glitch_free(ptr {task_value})\n  br label %{done_label}\n{done_label}:\n"
+            "  call void @GlitchTask_Destroy(ptr {task_value})\n  br label %{done_label}\n{done_label}:\n"
         ));
     }
 

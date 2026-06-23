@@ -506,6 +506,72 @@ fn runs_native_collection_workload_without_leaks() {
 }
 
 #[test]
+fn runs_recursive_collection_task_graph_without_leaks() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+
+            string MakeName() {
+                return "Ada";
+            }
+
+            fn main() {
+                Dictionary<string, List<Task<string>>> graph = new Dictionary<string, List<Task<string>>>();
+                List<Task<string>> tasks = new List<Task<string>>();
+                tasks.Add(Task.FromResult(MakeName()));
+                graph.Add("names", tasks);
+                print(graph["names"][0].Result);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("recursive-collection-task-graph", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "recursive owned graph sample should exit cleanly\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("Ada"));
+}
+
+#[test]
+fn runs_nested_collection_field_assignment_without_leaks() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+
+            class Holder {
+                public List<Task<string>> Items = new List<Task<string>>();
+            }
+
+            string MakeName() {
+                return "Ada";
+            }
+
+            fn main() {
+                List<Task<string>> tasks = new List<Task<string>>();
+                tasks.Add(Task.FromResult(MakeName()));
+                Holder holder = new Holder();
+                holder.Items = tasks;
+                print(holder.Items[0].Result);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("nested-collection-field-assignment", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "nested collection field assignment sample should exit cleanly\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("Ada"));
+}
+
+#[test]
 fn preserves_namespace_and_attribute_metadata() {
     let source = r#"
             namespace Demo.Api {

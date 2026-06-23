@@ -80,9 +80,9 @@ pub(crate) fn emit_native_executable(
         configure_windows_linker_environment(&mut command)?;
         configure_windows_compiler_environment(&mut command)?;
         let result = run_command_with_fallback(command, &clang, &args, "clang");
-        let _ = fs::remove_file(&ll_path);
         let output = result?;
         if output.status.success() {
+            let _ = fs::remove_file(&ll_path);
             return Ok(());
         }
         return Err(format!(
@@ -90,9 +90,9 @@ pub(crate) fn emit_native_executable(
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let _ = fs::remove_file(&ll_path);
     let output = run_llvm_tool(&clang, &args, "clang")?;
     if output.status.success() {
+        let _ = fs::remove_file(&ll_path);
         Ok(())
     } else {
         Err(format!(

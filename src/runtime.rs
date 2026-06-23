@@ -12,6 +12,13 @@ unsafe extern "C" {
     fn calloc(count: usize, size: usize) -> *mut c_void;
 }
 
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "C" {
+    fn GetModuleHandleA(lpModuleName: *const u8) -> *mut c_void;
+    fn GetProcAddress(hModule: *mut c_void, lpProcName: *const u8) -> *mut c_void;
+}
+
 // ---------------------------------------------------------------------------
 // Thread-safe string-registry lock
 // ---------------------------------------------------------------------------
@@ -25,11 +32,15 @@ static LIVE_ALLOCATIONS: AtomicI64 = AtomicI64::new(0);
 
 #[no_mangle]
 pub extern "C" fn GlitchLiveAllocations_Add(delta: i64) -> i64 {
-    if delta >= 0 {
+    let new_value = if delta >= 0 {
         LIVE_ALLOCATIONS.fetch_add(delta, Ordering::SeqCst) + delta
     } else {
         LIVE_ALLOCATIONS.fetch_sub((-delta) as i64, Ordering::SeqCst) + delta
+    };
+    if std::env::var_os("GLITCH_DEBUG_TASKS").is_some() {
+        eprintln!("GlitchLiveAllocations_Add delta={} live={}", delta, new_value);
     }
+    new_value
 }
 
 #[no_mangle]
@@ -76,13 +87,27 @@ struct GlitchDelegate {
 
 #[repr(C)]
 struct GlitchTask {
+    refs: i64,
     completed: i32,
     result: *mut c_void,
     state: *mut GlitchTaskState,
+    exception: *mut c_char,
+    payload: *mut c_void,
+}
+
+#[repr(C)]
+struct GlitchTaskPayload {
+    count: i64,
+    tasks: *mut *mut GlitchTask,
+}
+
+enum TaskOutcome {
+    Value(u64),
+    Fault(String),
 }
 
 struct GlitchTaskState {
-    worker: Mutex<Option<JoinHandle<u64>>>,
+    worker: Mutex<Option<JoinHandle<TaskOutcome>>>,
     delegate: *mut GlitchDelegate,
 }
 
@@ -92,6 +117,12 @@ unsafe fn glitch_delegate_release_owned(delegate: *mut GlitchDelegate) {
     }
     let refs_ptr = std::ptr::addr_of_mut!((*delegate).refs).cast::<AtomicI64>();
     let old_refs = (*refs_ptr).fetch_sub(1, Ordering::SeqCst);
+    if std::env::var_os("GLITCH_DEBUG_TASKS").is_some() {
+        eprintln!(
+            "GlitchDelegate_ReleaseOwned delegate={:p} old_refs={}",
+            delegate, old_refs
+        );
+    }
     if old_refs != 1 {
         return;
     }
@@ -102,6 +133,70 @@ unsafe fn glitch_delegate_release_owned(delegate: *mut GlitchDelegate) {
     }
     free(delegate.cast::<c_void>());
     GlitchLiveAllocations_Add(-1);
+}
+
+unsafe fn release_glitch_string(value: *mut c_char) {
+    if value.is_null() {
+        return;
+    }
+    let node = value.cast::<u8>().sub(16);
+    let refs = *(node.cast::<i64>());
+    if refs >= 1_000_000 {
+        return;
+    }
+    free(node.cast::<c_void>());
+    GlitchLiveAllocations_Add(-1);
+}
+
+unsafe fn lookup_glitch_symbol(name: &[u8]) -> Option<*mut c_void> {
+    #[cfg(windows)]
+    {
+        let module = GetModuleHandleA(std::ptr::null());
+        if module.is_null() {
+            return None;
+        }
+        let proc = GetProcAddress(module, name.as_ptr());
+        if proc.is_null() {
+            None
+        } else {
+            Some(proc)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = name;
+        None
+    }
+}
+
+unsafe fn take_pending_exception_if_any() -> *mut c_void {
+    let Some(symbol) = lookup_glitch_symbol(b"glitch_take_pending_exception\0") else {
+        return std::ptr::null_mut();
+    };
+    let take: unsafe extern "C" fn() -> *mut c_void = std::mem::transmute(symbol);
+    take()
+}
+
+unsafe fn pending_exception_outcome() -> Option<TaskOutcome> {
+    let pending_exception = take_pending_exception_if_any();
+    if pending_exception.is_null() {
+        return None;
+    }
+    if std::env::var_os("GLITCH_DEBUG_TASKS").is_some() {
+        eprintln!(
+            "pending_exception_outcome pending={:p} live_before={}",
+            pending_exception,
+            GlitchLiveAllocations_Load()
+        );
+    }
+    release_glitch_string(pending_exception.cast::<c_char>());
+    if std::env::var_os("GLITCH_DEBUG_TASKS").is_some() {
+        eprintln!(
+            "pending_exception_outcome after_drop live={}",
+            GlitchLiveAllocations_Load()
+        );
+    }
+    Some(TaskOutcome::Fault("task worker faulted".to_string()))
 }
 
 unsafe fn task_state_finished(state: *mut GlitchTaskState) -> bool {
@@ -119,6 +214,7 @@ unsafe fn task_wait(task: *mut GlitchTask) {
     if task.is_null() || (*task).completed != 0 {
         return;
     }
+    let debug_tasks = std::env::var_os("GLITCH_DEBUG_TASKS").is_some();
     let state = (*task).state;
     if state.is_null() {
         (*task).completed = 1;
@@ -131,12 +227,43 @@ unsafe fn task_wait(task: *mut GlitchTask) {
         };
         guard.take()
     };
-    let result_bits = match handle {
-        Some(worker) => worker.join().unwrap_or_default(),
-        None => 0,
-    };
-    (*task).result = result_bits as usize as *mut c_void;
+    match handle {
+        Some(worker) => match worker.join() {
+            Ok(TaskOutcome::Value(result_bits)) => {
+                if std::env::var_os("GLITCH_DEBUG_TASKS").is_some() {
+                    eprintln!("GlitchTask_Wait joined task={:p} outcome=Value({result_bits})", task);
+                }
+                (*task).result = result_bits as usize as *mut c_void;
+            }
+            Ok(TaskOutcome::Fault(message)) => {
+                if std::env::var_os("GLITCH_DEBUG_TASKS").is_some() {
+                    eprintln!("GlitchTask_Wait joined task={:p} outcome=Fault({message})", task);
+                }
+                (*task).result = std::ptr::null_mut();
+                (*task).exception = allocate_glitch_string_from_str(&message);
+            }
+            Err(_) => {
+                if std::env::var_os("GLITCH_DEBUG_TASKS").is_some() {
+                    eprintln!("GlitchTask_Wait joined task={:p} outcome=panic", task);
+                }
+                (*task).result = std::ptr::null_mut();
+                (*task).exception = allocate_glitch_string_from_str("task worker panicked");
+            }
+        },
+        None => {
+            if std::env::var_os("GLITCH_DEBUG_TASKS").is_some() {
+                eprintln!("GlitchTask_Wait joined task={:p} outcome=already-completed", task);
+            }
+            (*task).result = std::ptr::null_mut();
+        }
+    }
     (*task).completed = 1;
+    if debug_tasks {
+        eprintln!(
+            "GlitchTask_Wait releasing state task={:p} state={:p} delegate={:p}",
+            task, state, (*state).delegate
+        );
+    }
     glitch_delegate_release_owned((*state).delegate);
     drop(Box::from_raw(state));
     (*task).state = std::ptr::null_mut();
@@ -145,14 +272,17 @@ unsafe fn task_wait(task: *mut GlitchTask) {
 
 unsafe fn task_spawn<F>(task: *mut GlitchTask, delegate: *mut GlitchDelegate, worker: F)
 where
-    F: FnOnce(*mut GlitchDelegate) -> u64 + Send + 'static,
+    F: FnOnce(*mut GlitchDelegate) -> TaskOutcome + Send + 'static,
 {
     if task.is_null() {
         glitch_delegate_release_owned(delegate);
         return;
     }
+    (*task).refs = 1;
     (*task).completed = 0;
     (*task).result = std::ptr::null_mut();
+    (*task).exception = std::ptr::null_mut();
+    (*task).payload = std::ptr::null_mut();
     let delegate_addr = delegate as usize;
     let handle = std::thread::spawn(move || worker(delegate_addr as *mut GlitchDelegate));
     let state = Box::new(GlitchTaskState {
@@ -167,10 +297,13 @@ where
 pub unsafe extern "C" fn GlitchTask_RunVoid(task: *mut c_void, delegate: *mut c_void) {
     let task = task as *mut GlitchTask;
     let delegate = delegate as *mut GlitchDelegate;
+    (*task).refs = 1;
     task_spawn(task, delegate, |delegate| {
         let invoke: unsafe extern "C" fn(*mut c_void) = std::mem::transmute((*delegate).invoke);
-        let _ = std::panic::catch_unwind(|| invoke((*delegate).env));
-        0
+        match std::panic::catch_unwind(|| invoke((*delegate).env)) {
+            Ok(_) => pending_exception_outcome().unwrap_or(TaskOutcome::Value(0)),
+            Err(payload) => TaskOutcome::Fault(panic_payload_to_string(payload)),
+        }
     });
 }
 
@@ -178,11 +311,14 @@ pub unsafe extern "C" fn GlitchTask_RunVoid(task: *mut c_void, delegate: *mut c_
 pub unsafe extern "C" fn GlitchTask_RunI32(task: *mut c_void, delegate: *mut c_void) {
     let task = task as *mut GlitchTask;
     let delegate = delegate as *mut GlitchDelegate;
+    (*task).refs = 1;
     task_spawn(task, delegate, |delegate| {
         let invoke: unsafe extern "C" fn(*mut c_void) -> i32 =
             std::mem::transmute((*delegate).invoke);
-        let value = std::panic::catch_unwind(|| invoke((*delegate).env)).unwrap_or_default();
-        value as u32 as u64
+        match std::panic::catch_unwind(|| invoke((*delegate).env)) {
+            Ok(value) => pending_exception_outcome().unwrap_or(TaskOutcome::Value(value as u32 as u64)),
+            Err(payload) => TaskOutcome::Fault(panic_payload_to_string(payload)),
+        }
     });
 }
 
@@ -190,11 +326,14 @@ pub unsafe extern "C" fn GlitchTask_RunI32(task: *mut c_void, delegate: *mut c_v
 pub unsafe extern "C" fn GlitchTask_RunBool(task: *mut c_void, delegate: *mut c_void) {
     let task = task as *mut GlitchTask;
     let delegate = delegate as *mut GlitchDelegate;
+    (*task).refs = 1;
     task_spawn(task, delegate, |delegate| {
         let invoke: unsafe extern "C" fn(*mut c_void) -> bool =
             std::mem::transmute((*delegate).invoke);
-        let value = std::panic::catch_unwind(|| invoke((*delegate).env)).unwrap_or_default();
-        value as u64
+        match std::panic::catch_unwind(|| invoke((*delegate).env)) {
+            Ok(value) => pending_exception_outcome().unwrap_or(TaskOutcome::Value(value as u64)),
+            Err(payload) => TaskOutcome::Fault(panic_payload_to_string(payload)),
+        }
     });
 }
 
@@ -202,11 +341,14 @@ pub unsafe extern "C" fn GlitchTask_RunBool(task: *mut c_void, delegate: *mut c_
 pub unsafe extern "C" fn GlitchTask_RunI64(task: *mut c_void, delegate: *mut c_void) {
     let task = task as *mut GlitchTask;
     let delegate = delegate as *mut GlitchDelegate;
+    (*task).refs = 1;
     task_spawn(task, delegate, |delegate| {
         let invoke: unsafe extern "C" fn(*mut c_void) -> i64 =
             std::mem::transmute((*delegate).invoke);
-        let value = std::panic::catch_unwind(|| invoke((*delegate).env)).unwrap_or_default();
-        value as u64
+        match std::panic::catch_unwind(|| invoke((*delegate).env)) {
+            Ok(value) => pending_exception_outcome().unwrap_or(TaskOutcome::Value(value as u64)),
+            Err(payload) => TaskOutcome::Fault(panic_payload_to_string(payload)),
+        }
     });
 }
 
@@ -214,11 +356,14 @@ pub unsafe extern "C" fn GlitchTask_RunI64(task: *mut c_void, delegate: *mut c_v
 pub unsafe extern "C" fn GlitchTask_RunDouble(task: *mut c_void, delegate: *mut c_void) {
     let task = task as *mut GlitchTask;
     let delegate = delegate as *mut GlitchDelegate;
+    (*task).refs = 1;
     task_spawn(task, delegate, |delegate| {
         let invoke: unsafe extern "C" fn(*mut c_void) -> f64 =
             std::mem::transmute((*delegate).invoke);
-        let value = std::panic::catch_unwind(|| invoke((*delegate).env)).unwrap_or_default();
-        value.to_bits()
+        match std::panic::catch_unwind(|| invoke((*delegate).env)) {
+            Ok(value) => pending_exception_outcome().unwrap_or(TaskOutcome::Value(value.to_bits())),
+            Err(payload) => TaskOutcome::Fault(panic_payload_to_string(payload)),
+        }
     });
 }
 
@@ -226,13 +371,25 @@ pub unsafe extern "C" fn GlitchTask_RunDouble(task: *mut c_void, delegate: *mut 
 pub unsafe extern "C" fn GlitchTask_RunPtr(task: *mut c_void, delegate: *mut c_void) {
     let task = task as *mut GlitchTask;
     let delegate = delegate as *mut GlitchDelegate;
+    (*task).refs = 1;
     task_spawn(task, delegate, |delegate| {
         let invoke: unsafe extern "C" fn(*mut c_void) -> *mut c_void =
             std::mem::transmute((*delegate).invoke);
-        let value = std::panic::catch_unwind(|| invoke((*delegate).env))
-            .unwrap_or(std::ptr::null_mut());
-        value as usize as u64
+        match std::panic::catch_unwind(|| invoke((*delegate).env)) {
+            Ok(value) => pending_exception_outcome().unwrap_or(TaskOutcome::Value(value as usize as u64)),
+            Err(payload) => TaskOutcome::Fault(panic_payload_to_string(payload)),
+        }
     });
+}
+
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        message.to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "task worker panicked".to_string()
+    }
 }
 
 #[no_mangle]
@@ -351,17 +508,131 @@ pub unsafe extern "C" fn GlitchTask_IsCompleted(task: *mut c_void) -> bool {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn GlitchTask_IsCompletedSuccessfully(task: *mut c_void) -> bool {
+    let task = task as *mut GlitchTask;
+    if task.is_null() {
+        return true;
+    }
+    if (*task).completed == 0 {
+        return false;
+    }
+    (*task).exception.is_null()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchTask_IsFaulted(task: *mut c_void) -> bool {
+    let task = task as *mut GlitchTask;
+    if task.is_null() {
+        return false;
+    }
+    if std::env::var_os("GLITCH_DEBUG_TASKS").is_some() {
+        eprintln!(
+            "GlitchTask_IsFaulted task={:p} completed={} exception={:p} result={:p}",
+            task,
+            (*task).completed,
+            (*task).exception,
+            (*task).result
+        );
+    }
+    !(*task).exception.is_null()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchTask_GetException(task: *mut c_void) -> *mut c_void {
+    let task = task as *mut GlitchTask;
+    if task.is_null() {
+        return std::ptr::null_mut();
+    }
+    task_wait(task);
+    let exception = (*task).exception;
+    if exception.is_null() {
+        return std::ptr::null_mut();
+    }
+    let message = CStr::from_ptr(exception).to_str().unwrap_or_default();
+    allocate_glitch_string_from_str(message).cast::<c_void>()
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn GlitchTask_Destroy(task: *mut c_void) {
     let task = task as *mut GlitchTask;
     if task.is_null() {
         return;
     }
-    task_wait(task);
-    if !(*task).state.is_null() {
-        drop(Box::from_raw((*task).state));
-        (*task).state = std::ptr::null_mut();
-        GlitchLiveAllocations_Add(-1);
+    let debug_tasks = std::env::var_os("GLITCH_DEBUG_TASKS").is_some();
+    let refs_ptr = std::ptr::addr_of_mut!((*task).refs).cast::<AtomicI64>();
+    let old_refs = (*refs_ptr).fetch_sub(1, Ordering::SeqCst);
+    if debug_tasks {
+        eprintln!(
+            "GlitchTask_Destroy task={:p} old_refs={} completed={} exception={:p} result={:p} payload={:p}",
+            task,
+            old_refs,
+            (*task).completed,
+            (*task).exception,
+            (*task).result,
+            (*task).payload
+        );
     }
+    if old_refs != 1 {
+        return;
+    }
+    task_wait(task);
+    if !(*task).exception.is_null() {
+        let exception = (*task).exception;
+        (*task).exception = std::ptr::null_mut();
+        if debug_tasks {
+            eprintln!("GlitchTask_Destroy releasing exception task={:p} exception={:p}", task, exception);
+        }
+        release_glitch_string(exception);
+    }
+    if !(*task).payload.is_null() {
+        let payload = (*task).payload as *mut GlitchTaskPayload;
+        let count = (*payload).count;
+        let tasks = (*payload).tasks;
+        if debug_tasks {
+            eprintln!(
+                "GlitchTask_Destroy payload task={:p} payload={:p} count={}",
+                task, payload, count
+            );
+        }
+        for index in 0..count {
+            let item = *tasks.add(index as usize);
+            if !item.is_null() {
+                GlitchTask_Destroy(item.cast::<c_void>());
+            }
+        }
+        free(tasks.cast::<c_void>());
+        GlitchLiveAllocations_Add(-1);
+        free(payload.cast::<c_void>());
+        GlitchLiveAllocations_Add(-1);
+        (*task).payload = std::ptr::null_mut();
+        if debug_tasks {
+            eprintln!("GlitchTask_Destroy payload freed task={:p}", task);
+        }
+    }
+    if debug_tasks {
+        eprintln!("GlitchTask_Destroy freeing task={:p}", task);
+    }
+    free(task.cast::<c_void>());
+    GlitchLiveAllocations_Add(-1);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchTask_Retain(task: *mut c_void) {
+    let task = task as *mut GlitchTask;
+    if task.is_null() {
+        return;
+    }
+    let refs_ptr = std::ptr::addr_of_mut!((*task).refs).cast::<AtomicI64>();
+    (*refs_ptr).fetch_add(1, Ordering::SeqCst);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchTask_SetPayload(task: *mut c_void, payload: *mut c_void) {
+    let task = task as *mut GlitchTask;
+    if task.is_null() {
+        return;
+    }
+    (*task).payload = payload;
 }
 
 type RequestHandler =
@@ -1105,9 +1376,12 @@ mod tests {
         TASK_STARTED.store(false, AtomicOrdering::SeqCst);
 
         let mut task = GlitchTask {
+            refs: 0,
             completed: 0,
             result: std::ptr::null_mut(),
             state: std::ptr::null_mut(),
+            exception: std::ptr::null_mut(),
+            payload: std::ptr::null_mut(),
         };
         let delegate = unsafe { calloc(1, std::mem::size_of::<GlitchDelegate>()) as *mut GlitchDelegate };
         assert!(!delegate.is_null());

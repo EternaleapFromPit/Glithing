@@ -476,6 +476,15 @@ pub(super) fn validate_async_stmt(
             finally_body,
             ..
         } => {
+            if try_body.iter().any(stmt_contains_await)
+                || catch_body.iter().any(stmt_contains_await)
+                || finally_body.iter().any(stmt_contains_await)
+            {
+                return Err(format!(
+                    "async lowering: suspension inside try/catch/finally is not supported yet in '{}'; move the await outside the protected region or split the method into smaller owned steps",
+                    function_name
+                ));
+            }
             let mut try_after = after_uses.clone();
             collect_used_bindings_stmts(catch_body, &mut try_after);
             collect_used_bindings_stmts(finally_body, &mut try_after);

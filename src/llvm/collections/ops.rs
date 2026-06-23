@@ -365,6 +365,7 @@ impl LlvmEmitter {
             "  store {} {value}, ptr {slot}\n  {next_len} = add i64 {len}, 1\n  store i64 {next_len}, ptr {len_ptr}\n",
             llvm_ir_type(element).as_ir()
         ));
+        self.move_raw_owned_source_after_store(element, source);
     }
 
     pub(in crate::llvm) fn emit_dict_add(
@@ -415,6 +416,7 @@ impl LlvmEmitter {
             "  store {} {value}, ptr {value_slot}\n  {next_len} = add i64 {len}, 1\n  store i64 {next_len}, ptr {len_ptr}\n",
             llvm_ir_type(value_ty).as_ir()
         ));
+        self.move_raw_owned_source_after_store(value_ty, source);
     }
 
     pub(in crate::llvm) fn emit_list_contains(
@@ -463,7 +465,6 @@ impl LlvmEmitter {
             IrType::Array(_)
                 | IrType::List(_)
                 | IrType::Dictionary(_, _)
-                | IrType::Task(_)
                 | IrType::Enumerable(_)
         ) {
             return Err(
@@ -764,6 +765,7 @@ impl LlvmEmitter {
                 let value = self.emit_typed_expr(source)?;
                 let value = self.cast_value(value, &element_ty)?;
                 self.retain_for_store(element, source, &value.value);
+                self.move_raw_owned_source_after_store(element, source);
                 if let Some(type_name) = object_type_name(element) {
                     if self.object_types.contains_key(type_name) {
                         let old = self.tmp();
@@ -784,6 +786,7 @@ impl LlvmEmitter {
                     element_ty.as_ir(),
                     value.value
                 ));
+                self.move_raw_owned_source_after_store(element, source);
                 Ok(())
             }
             IrType::Dictionary(key_ty, value_ty) => {

@@ -21,7 +21,7 @@ fn resolves_generic_delegate_declarations_to_callable_function_types() {
 
     let diagnostics = output.diagnostics.join("\n");
     assert!(!diagnostics.contains("warning GL3005"));
-    assert!(llvm_ir.contains("define ptr @glitch_lambda_0"));
+    assert!(llvm_ir.contains("define i32 @glitch_lambda_0"));
     assert!(llvm_ir.contains("%glitch.delegate = type { i64, ptr, ptr, ptr }"));
 }
 
@@ -48,7 +48,7 @@ fn resolves_namespace_qualified_delegate_declarations() {
 
     let diagnostics = output.diagnostics.join("\n");
     assert!(!diagnostics.contains("warning GL3005"));
-    assert!(llvm_ir.contains("define ptr @glitch_lambda_0"));
+    assert!(llvm_ir.contains("define i32 @glitch_lambda_0"));
 }
 
 #[test]

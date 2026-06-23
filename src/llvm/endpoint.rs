@@ -1102,6 +1102,15 @@ impl LlvmEmitter {
             mediator_value.value
         ));
 
+        let request_value = self.emit_typed_expr(request)?;
+        let request_drop_ptr = self.tmp();
+        let request_drop = self.tmp();
+        self.body.push_str(&format!(
+            "  {request_drop_ptr} = getelementptr inbounds {{ i64, ptr }}, ptr {}, i32 0, i32 1\n  {request_drop} = load ptr, ptr {request_drop_ptr}\n",
+            request_value.value
+        ));
+        let effective_response_ty = self.mediator_expected_response_type(request, response_ty);
+
         let request_name = object_type_name(&request.ty)
             .or_else(|| match &request.ty {
                 IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {
@@ -1135,31 +1144,230 @@ impl LlvmEmitter {
                         }
                     })
             })
-            .cloned()
+            .cloned();
+
+        if let Some(handler) = handler {
+            return self.emit_mediator_handler_invocation(
+                &handler,
+                provider.as_str(),
+                &request_value,
+                &effective_response_ty,
+            );
+        }
+
+        if base_type_name(request_name) == "IRequest" {
+            return self.emit_mediator_runtime_dispatch(
+                provider.as_str(),
+                &request_value,
+                request_drop.as_str(),
+                &effective_response_ty,
+            );
+        }
+
+        Err(format!(
+            "LLVM TIR backend: no IRequestHandler<{request_name}, _> implementation found"
+        ))
+    }
+
+    fn emit_mediator_runtime_dispatch(
+        &mut self,
+        provider: &str,
+        request_value: &LlValue,
+        request_drop: &str,
+        response_ty: &IrType,
+    ) -> Result<LlValue, String> {
+        let response_is_wildcard = matches!(response_ty, IrType::Void | IrType::Unknown(_));
+        let mut candidates = self
+            .object_types
+            .values()
+            .filter_map(|handler| {
+                self.mediator_handler_request_and_response(handler).and_then(
+                    |(request_name, handler_response_ty, base)| {
+                        if response_is_wildcard
+                            || ir_type_loosely_matches(&handler_response_ty, response_ty)
+                        {
+                            let request_object_name = self
+                                .object_layout(&request_name)
+                                .map(|object| object.name.clone())
+                                .unwrap_or(request_name.clone());
+                            Some((
+                                request_name,
+                                request_object_name,
+                                handler_response_ty,
+                                base,
+                                handler.clone(),
+                            ))
+                        } else {
+                            None
+                        }
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|a, b| a.3.cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
+
+        if candidates.is_empty() {
+            return Err(format!(
+                "LLVM TIR backend: no IRequestHandler implementations found for interface-typed request '{:?}'",
+                request_value.ty
+            ));
+        }
+
+        let result_response_ty = if response_is_wildcard {
+            candidates
+                .first()
+                .map(|candidate| candidate.2.clone())
+                .unwrap_or_else(|| response_ty.clone())
+        } else {
+            response_ty.clone()
+        };
+        let result_ty = llvm_ir_type(&IrType::Task(Box::new(result_response_ty.clone())));
+        let result_slot = self.tmp();
+        self.body
+            .push_str(&format!("  {result_slot} = alloca ptr\n"));
+        let end_label = self.next_label("mediator_dispatch_end");
+        let no_match_label = self.next_label("mediator_dispatch_nomatch");
+
+        for (index, (_request_name, request_object_name, _handler_response_ty, _base, handler)) in candidates.iter().enumerate() {
+            let drop_name = drop_symbol(request_object_name);
+            let compare = self.tmp();
+            let match_label = self.next_label(&format!("mediator_dispatch_match_{index}"));
+            let next_label = if index + 1 == candidates.len() {
+                no_match_label.clone()
+            } else {
+                self.next_label(&format!("mediator_dispatch_next_{index}"))
+            };
+            self.body.push_str(&format!(
+                "  {compare} = icmp eq ptr {request_drop}, @{drop_name}\n  br i1 {compare}, label %{match_label}, label %{next_label}\n{match_label}:\n"
+            ));
+            let dispatched = self.emit_mediator_handler_invocation(
+                handler,
+                provider,
+                request_value,
+                &result_response_ty,
+            )?;
+            self.body.push_str(&format!(
+                "  store ptr {}, ptr {result_slot}\n  br label %{end_label}\n",
+                dispatched.value
+            ));
+            if index + 1 != candidates.len() {
+                self.body.push_str(&format!("{next_label}:\n"));
+            }
+        }
+
+        self.body.push_str(&format!("{no_match_label}:\n"));
+        if matches!(response_ty, IrType::Void) {
+            let task_ptr = self.tmp();
+            let loaded = self.tmp();
+            self.body.push_str(&format!(
+                "  {task_ptr} = call ptr @glitch_task_completed()\n  store ptr {task_ptr}, ptr {result_slot}\n  br label %{end_label}\n{end_label}:\n  {loaded} = load ptr, ptr {result_slot}\n"
+            ));
+            return Ok(LlValue { value: loaded, ty: result_ty });
+        }
+
+        let default_result = self.default_typed_value(&result_response_ty)?;
+        let helper_name = match &result_response_ty {
+            IrType::Bool => "glitch_task_from_result_bool",
+            IrType::Int | IrType::UInt => "glitch_task_from_result_i32",
+            IrType::Long => "glitch_task_from_result_i64",
+            IrType::Double | IrType::Decimal => "glitch_task_from_result_double",
+            _ => "glitch_task_from_result_ptr",
+        };
+        let helper_arg = if helper_name == "glitch_task_from_result_ptr"
+            && default_result.ty != LlType::Ptr
+        {
+            let casted = self.tmp();
+            match default_result.ty {
+                LlType::I1 => self.body.push_str(&format!(
+                    "  {casted}_i64 = zext i1 {} to i64\n  {casted} = inttoptr i64 {casted}_i64 to ptr\n",
+                    default_result.value
+                )),
+                LlType::I8 | LlType::I16 | LlType::I32 | LlType::I64 => self.body.push_str(&format!(
+                    "  {casted} = inttoptr {} {} to ptr\n",
+                    default_result.ty.as_ir(),
+                    default_result.value
+                )),
+                LlType::Double => self.body.push_str(&format!(
+                    "  {casted}_bits = bitcast double {} to i64\n  {casted} = inttoptr i64 {casted}_bits to ptr\n",
+                    default_result.value
+                )),
+                LlType::Void | LlType::Ptr => {}
+            }
+            casted
+        } else {
+            default_result.value.clone()
+        };
+        let task_ptr = self.tmp();
+        let loaded = self.tmp();
+        self.body.push_str(&format!(
+            "  {task_ptr} = call ptr @{}({} {})\n  store ptr {task_ptr}, ptr {result_slot}\n  br label %{end_label}\n{end_label}:\n  {loaded} = load ptr, ptr {result_slot}\n",
+            helper_name,
+            if helper_name == "glitch_task_from_result_ptr" {
+                LlType::Ptr.as_ir()
+            } else {
+                default_result.ty.as_ir()
+            },
+            helper_arg,
+            loaded = loaded
+        ));
+        Ok(LlValue { value: loaded, ty: result_ty })
+    }
+
+    fn mediator_expected_response_type(
+        &self,
+        request: &TypedExpr,
+        fallback: &IrType,
+    ) -> IrType {
+        if !matches!(fallback, IrType::Void | IrType::Unknown(_)) {
+            return fallback.clone();
+        }
+        let Some(request_name) = object_type_name(&request.ty).or_else(|| match &request.ty {
+            IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) | IrType::Unknown(name) => {
+                Some(name.as_str())
+            }
+            _ => None,
+        }) else {
+            return fallback.clone();
+        };
+        if base_type_name(request_name) != "IRequest" {
+            return fallback.clone();
+        }
+        let Some((_, args)) = split_monomorphized_type(request_name) else {
+            return fallback.clone();
+        };
+        let Some(response_name) = args.first() else {
+            return IrType::Void;
+        };
+        parse_monomorphized_rc_inner_type(response_name, &self.object_types).unwrap_or_else(|| fallback.clone())
+    }
+
+    fn emit_mediator_handler_invocation(
+        &mut self,
+        handler: &LlObjectType,
+        provider: &str,
+        request_value: &LlValue,
+        response_ty: &IrType,
+    ) -> Result<LlValue, String> {
+        let (_request_name, inferred_response_ty, _) = self
+            .mediator_handler_request_and_response(handler)
             .ok_or_else(|| {
                 format!(
-                    "LLVM TIR backend: no IRequestHandler<{request_name}, _> implementation found"
+                    "LLVM TIR backend: no IRequestHandler contract found for mediator handler '{}'",
+                    handler.name
                 )
             })?;
-
-        let inferred_response_ty = handler
-            .bases
-            .iter()
-            .find_map(|base| {
-                let base_name = base_type_name(base);
-                if base_name != "IRequestHandler" {
-                    return None;
-                }
-                let (_, args) = split_monomorphized_type(base)?;
-                match args.as_slice() {
-                    [request, response] if request_type_matches(request, request_name) => {
-                        parse_monomorphized_rc_inner_type(response, &self.object_types)
-                    }
-                    [request] if request_type_matches(request, request_name) => Some(IrType::Void),
-                    _ => None,
-                }
-            })
-            .unwrap_or_else(|| response_ty.clone());
+        let response_is_wildcard = matches!(response_ty, IrType::Void | IrType::Unknown(_));
+        if !response_is_wildcard && !ir_type_loosely_matches(&inferred_response_ty, response_ty) {
+            return Err(format!(
+                "LLVM TIR backend: IRequestHandler response {:?} does not match Send<TResponse> {:?} for '{}'",
+                inferred_response_ty, response_ty, handler.name
+            ));
+        }
+        let result_response_ty = if response_is_wildcard {
+            inferred_response_ty.clone()
+        } else {
+            response_ty.clone()
+        };
 
         let handler_ptr = self.tmp();
         let handler_size_ptr = self.tmp();
@@ -1215,7 +1423,6 @@ impl LlvmEmitter {
                     &format!("mediator_dependency_{index}"),
                 )?
             };
-            let _ = index;
             ctor_args.push(format!("ptr {dependency_value}"));
         }
 
@@ -1242,12 +1449,11 @@ impl LlvmEmitter {
                 )
             })?;
 
-        let request_value = self.emit_typed_expr(request)?;
         let token = "null".to_string();
         let result = self.tmp();
         self.body.push_str(&format!(
             "  {result} = call {} @{}(ptr {handler_ptr}, {} {}, ptr {token})\n",
-            llvm_ir_type(&IrType::Task(Box::new(response_ty.clone()))).as_ir(),
+            llvm_ir_type(&IrType::Task(Box::new(result_response_ty))).as_ir(),
             sanitize(&handle_symbol),
             request_value.ty.as_ir(),
             request_value.value
@@ -1255,6 +1461,28 @@ impl LlvmEmitter {
         Ok(LlValue {
             value: result,
             ty: llvm_ir_type(&IrType::Task(Box::new(inferred_response_ty))),
+        })
+    }
+
+    fn mediator_handler_request_and_response(
+        &self,
+        handler: &LlObjectType,
+    ) -> Option<(String, IrType, String)> {
+        handler.bases.iter().find_map(|base| {
+            let base_name = base_type_name(base);
+            if base_name != "IRequestHandler" {
+                return None;
+            }
+            let (_, args) = split_monomorphized_type(base)?;
+            match args.as_slice() {
+                [request, response] => {
+                    let response_ty =
+                        parse_monomorphized_rc_inner_type(response, &self.object_types)?;
+                    Some((request.clone(), response_ty, base.clone()))
+                }
+                [request] => Some((request.clone(), IrType::Void, base.clone())),
+                _ => None,
+            }
         })
     }
 
@@ -1359,6 +1587,48 @@ fn is_cancellation_token_type_name(type_name: &str) -> bool {
         base_type_name(type_name),
         "CancellationToken"
     )
+}
+
+fn ir_type_loosely_matches(left: &IrType, right: &IrType) -> bool {
+    if left == right {
+        return true;
+    }
+    if matches!(left, IrType::Unknown(_)) || matches!(right, IrType::Unknown(_)) {
+        return true;
+    }
+    match (left, right) {
+        (IrType::String, IrType::String)
+        | (IrType::Bool, IrType::Bool)
+        | (IrType::Byte, IrType::Byte)
+        | (IrType::Short, IrType::Short)
+        | (IrType::Int, IrType::Int)
+        | (IrType::Long, IrType::Long)
+        | (IrType::UInt, IrType::UInt)
+        | (IrType::Double, IrType::Double)
+        | (IrType::Decimal, IrType::Decimal)
+        | (IrType::Void, IrType::Void) => true,
+        (IrType::Nullable(left), IrType::Nullable(right))
+        | (IrType::Task(left), IrType::Task(right))
+        | (IrType::List(left), IrType::List(right))
+        | (IrType::Enumerable(left), IrType::Enumerable(right))
+        | (IrType::Weak(left), IrType::Weak(right))
+        | (IrType::Array(left), IrType::Array(right)) => ir_type_loosely_matches(left, right),
+        (IrType::Dictionary(left_key, left_value), IrType::Dictionary(right_key, right_value)) => {
+            ir_type_loosely_matches(left_key, right_key)
+                && ir_type_loosely_matches(left_value, right_value)
+        }
+        (
+            IrType::Class(left_name)
+            | IrType::Struct(left_name)
+            | IrType::Interface(left_name)
+            | IrType::Unknown(left_name),
+            IrType::Class(right_name)
+            | IrType::Struct(right_name)
+            | IrType::Interface(right_name)
+            | IrType::Unknown(right_name),
+        ) => left_name == right_name || base_type_name(left_name) == base_type_name(right_name),
+        _ => false,
+    }
 }
 
 fn request_type_matches(object_name: &str, request_name: &str) -> bool {

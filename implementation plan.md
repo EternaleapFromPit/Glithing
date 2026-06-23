@@ -11,7 +11,6 @@ The analysis is broadly useful as a roadmap, but some of its claims are now stal
 - branch-state merging in the borrow checker
 - safer and more complete runtime handling for shared data
 - package linking with better source mapping than naive concatenation
-- NuGet/package emission that is structurally correct, not just C output with a package extension
 - parser error recovery
 - type aliases
 - `static` semantics where they are expected to have real meaning
@@ -113,18 +112,24 @@ The current boundary is:
 - package-linker errors now include the source `using` line number that requested the missing package, which makes unresolved imports easier to localize.
 - package linking now uses exact namespace/package declarations instead of substring matches, which prevents `System.*` packages from accidentally shadowing `System`.
 - The README and this plan have been synchronized with the current compiler and package behavior.
+- Raw-owned collection values inserted into other collection owners are now consumed as moves for the current safe slice instead of being blindly copied, which fixes the nested dictionary/list/task graph leak path and adds regression coverage for a `Dictionary<string, List<Task<string>>>` native run.
+- The same raw-owned move behavior now also applies to local assignment, field assignment, and indexed collection writes, which closes the remaining nested-collection copy path for the current safe slice and adds a field-assignment regression for `List<Task<string>>`.
 - Native xUnit execution is now part of the example acceptance path for the stable sorting fixture, and the broader runtime-surface fixture is kept as a `.gl` source-level LLVM gate until the remaining task/runtime-accounting gaps are closed.
 - The testing split is now explicit: Rust tests keep the compiler/product gates (`.csproj`, package linking, LLVM/native output, diagnostics), while broader semantic coverage moves into `.gl` / `.cs` fixtures that the compiler can compile directly and, where the runtime slice is stable, execute natively.
 - Generic method inference now treats C#-style integer literals as `int` when they fit and `long` when they do not, which keeps concrete LLVM specializations aligned with default numeric literal behavior without retyping the whole expression pipeline.
 - The supported collection runtime slice now has native execution coverage, including a direct `List`/`Dictionary` example and a larger collection workload that runs through the LLVM-native path with leak reporting enabled.
 - Native `bool` printing on the LLVM executable path now emits `true` / `false` text through LLVM-side formatting instead of numeric `1` / `0`, while preserving output order with the existing `printf`-based runtime.
+- Async/runtime coverage now includes a combined `Task.WhenAll` + `await` regression for `List<Task<string>>` so nested task payload cleanup is exercised at both the LLVM and native levels.
+- `List<Task<T>>.ToArray()` now participates in the async bridge, which lets `Task.WhenAll(tasks.ToArray())` lower through the current task/runtime slice while keeping deeper nested owned collections on explicit diagnostics.
 - The Rust socket-host runtime now joins spawned request-worker threads before returning from the host loop, and a direct runtime unit test covers multi-request handling on the current host path.
 - Borrow/ownership loop-flow handling now distinguishes `break` from `continue` for `for` loops, so unreachable increment paths after `break` no longer poison state while `continue` still flows through the increment step.
+- Borrow-check joins now also distinguish `break` inside `switch` from loop exits, so post-`switch` code no longer loses moved state at control-flow merges when one case breaks and another continues execution.
 - Known package stubs now surface explicit `GL3013` diagnostics for the remaining `ConfigurationManager.Get<T>()` binder surface and AutoMapper `Map(...)` placeholder surfaces instead of silently looking implemented just because a package method body exists.
 - The LLVM task/runtime slice now lowers `Task.WhenAll(...)`, `Task.Wait()`, and task completion-status checks through explicit runtime helpers instead of package no-ops, and there is native execution coverage for the `WhenAll + Wait + IsCompletedSuccessfully` path with leak reporting enabled.
 - `Task.FromResult(...)` now retains pointer-backed lvalue payloads on the LLVM path before storing them into task results, which closes the obvious double-release/use-after-free edge for shared string/class-style sources in the current synchronous task model.
 - `Task.Run(...)` now uses a Rust worker-thread runtime for the supported zero-argument delegate slice instead of invoking delegates inline in the LLVM backend, and `await` / `GetResult()` / `Wait()` now join that task handle before reading the result slot.
 - The task runtime now owns delegate lifetimes across worker threads and destroys captured lambda environments after completion, with direct runtime coverage for background execution plus native compiler tests for delegate cleanup and leak reporting.
+- `ValueTask<T>.AsTask()` now lowers to a fresh completed task wrapper with retained pointer-backed payloads instead of aliasing the source task handle, which removes the native heap-corruption path seen on owned string results.
 - ASP.NET-style endpoint thunks now unwrap `Task<string>` and `Task<class>` handler results through the native task runtime instead of treating route handlers as synchronous pointer returns only.
 - The `Glitching.AspNetCore` package surface now accepts delegate-style `MapGet<T>` / `MapPost<T>` registrations for the current zero-argument handler slice, which lets async route handlers reach typed endpoint lowering.
 - There is direct LLVM regression coverage for async route handlers, including `app.MapGet("/health", HealthAsync)` lowering through `glitch_task_get_result_ptr(...)`.

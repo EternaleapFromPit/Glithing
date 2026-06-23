@@ -28,6 +28,7 @@ impl LlvmEmitter {
                 let ty = llvm_ir_type(&binding.ty);
                 let stored = self.cast_value(value, &ty)?;
                 self.retain_for_store(&binding.ty, expr, &stored.value);
+                self.move_raw_owned_source_after_store(&binding.ty, expr);
                 let var = self.vars.get(&binding.name).cloned();
                 if let Some(var) = &var {
                     self.emit_var_drop(var);
@@ -87,6 +88,7 @@ impl LlvmEmitter {
                     value.value,
                     var.ptr
                 ));
+                self.move_raw_owned_source_after_store(&var.ir_ty, expr);
                 if let Some(collection_key) = self.is_build_service_provider_call(expr) {
                     self.propagate_service_provider_registrations(name, &collection_key);
                 } else if let Some(builder_key) = self.is_web_application_build_call(expr) {
@@ -108,6 +110,7 @@ impl LlvmEmitter {
                     let field_ty = llvm_ir_type(&target.ty);
                     let value = self.cast_value(value, &field_ty)?;
                     self.retain_for_store(&target.ty, expr, &value.value);
+                    self.move_raw_owned_source_after_store(&target.ty, expr);
                     if let Some(type_name) = object_type_name(&target.ty) {
                         if self.object_types.contains_key(type_name) {
                             let old = self.tmp();

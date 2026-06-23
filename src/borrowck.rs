@@ -15,13 +15,44 @@ struct BorrowState {
     ref_targets: HashMap<String, String>,
     scopes: Vec<Vec<String>>,
     terminated: bool,
+    exits_switch: bool,
     loop_exit_snapshots: Vec<LoopExitSnapshot>,
+    switch_exit_snapshots: Vec<BorrowState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopExitKind {
     Break,
     Continue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FlowContext {
+    in_loop: bool,
+    in_switch: bool,
+}
+
+impl FlowContext {
+    fn new() -> Self {
+        Self {
+            in_loop: false,
+            in_switch: false,
+        }
+    }
+
+    fn with_loop(self) -> Self {
+        Self {
+            in_loop: true,
+            in_switch: false,
+        }
+    }
+
+    fn with_switch(self) -> Self {
+        Self {
+            in_loop: self.in_loop,
+            in_switch: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -132,7 +163,10 @@ impl BorrowState {
 
     fn merge_from_branches(base: &BorrowState, branches: &[BorrowState]) -> BorrowState {
         let mut merged = base.clone();
-        let active_branches = branches.iter().filter(|branch| !branch.terminated).collect::<Vec<_>>();
+        let active_branches = branches
+            .iter()
+            .filter(|branch| !branch.terminated && !branch.exits_switch)
+            .collect::<Vec<_>>();
         for (name, state) in &mut merged.vars {
             let mut moved = false;
             let mut shared_borrows = 0usize;
@@ -153,7 +187,12 @@ impl BorrowState {
             .iter()
             .flat_map(|branch| branch.loop_exit_snapshots.iter().cloned())
             .collect();
+        merged.switch_exit_snapshots = branches
+            .iter()
+            .flat_map(|branch| branch.switch_exit_snapshots.iter().cloned())
+            .collect();
         merged.terminated = active_branches.is_empty();
+        merged.exits_switch = branches.iter().all(|branch| branch.exits_switch);
         merged
     }
 
@@ -179,14 +218,21 @@ impl BorrowState {
             .iter()
             .flat_map(|branch| branch.loop_exit_snapshots.iter().cloned())
             .collect();
+        merged.switch_exit_snapshots = branches
+            .iter()
+            .flat_map(|branch| branch.switch_exit_snapshots.iter().cloned())
+            .collect();
         merged.terminated = false;
+        merged.exits_switch = branches.iter().all(|branch| branch.exits_switch);
         merged
     }
 
     fn snapshot_for_loop_exit(&self) -> BorrowState {
         let mut snapshot = self.clone();
         snapshot.terminated = false;
+        snapshot.exits_switch = false;
         snapshot.loop_exit_snapshots.clear();
+        snapshot.switch_exit_snapshots.clear();
         snapshot
     }
 }
@@ -205,7 +251,7 @@ impl BorrowChecker {
                 for param in &constructor.params {
                     state.declare(&param.name);
                 }
-                Self::check_stmts(&constructor.body, &mut state)?;
+                Self::check_stmts(&constructor.body, &mut state, FlowContext::new())?;
             }
             for method in &ty.methods {
                 Self::check_function(method, &["this"])?;
@@ -222,18 +268,20 @@ impl BorrowChecker {
         for param in &function.params {
             state.declare(&param.name);
         }
-        Self::check_stmts(&function.body, &mut state)
+        Self::check_stmts(&function.body, &mut state, FlowContext::new())
     }
 
     fn apply_finally_to_state(
         state: &BorrowState,
         finally_body: &[Stmt],
+        flow: FlowContext,
     ) -> Result<BorrowState, String> {
         let mut final_state = state.clone();
         let terminated_before = final_state.terminated;
         let existing_snapshots = final_state.loop_exit_snapshots.clone();
+        let existing_switch_snapshots = final_state.switch_exit_snapshots.clone();
         final_state.push_scope();
-        Self::check_stmts(finally_body, &mut final_state)?;
+        Self::check_stmts(finally_body, &mut final_state, flow)?;
         final_state.pop_scope();
         final_state.terminated |= terminated_before;
 
@@ -241,7 +289,7 @@ impl BorrowChecker {
         for snapshot in existing_snapshots {
             let mut snapshot_state = snapshot.state.clone();
             snapshot_state.push_scope();
-            Self::check_stmts(finally_body, &mut snapshot_state)?;
+            Self::check_stmts(finally_body, &mut snapshot_state, flow)?;
             snapshot_state.pop_scope();
             propagated_snapshots.push(LoopExitSnapshot {
                 kind: snapshot.kind,
@@ -249,23 +297,33 @@ impl BorrowChecker {
             });
         }
         final_state.loop_exit_snapshots.extend(propagated_snapshots);
+
+        let mut propagated_switch_snapshots = Vec::new();
+        for snapshot in existing_switch_snapshots {
+            let mut snapshot_state = snapshot.clone();
+            snapshot_state.push_scope();
+            Self::check_stmts(finally_body, &mut snapshot_state, flow)?;
+            snapshot_state.pop_scope();
+            propagated_switch_snapshots.push(snapshot_state);
+        }
+        final_state.switch_exit_snapshots.extend(propagated_switch_snapshots);
         Ok(final_state)
     }
 
-    fn check_stmts(stmts: &[Stmt], state: &mut BorrowState) -> Result<(), String> {
+    fn check_stmts(stmts: &[Stmt], state: &mut BorrowState, flow: FlowContext) -> Result<(), String> {
         for stmt in stmts {
-            if state.terminated {
+            if state.terminated || state.exits_switch {
                 break;
             }
-            Self::check_stmt(stmt, state)?;
-            if state.terminated {
+            Self::check_stmt(stmt, state, flow)?;
+            if state.terminated || state.exits_switch {
                 break;
             }
         }
         Ok(())
     }
 
-    fn check_stmt(stmt: &Stmt, state: &mut BorrowState) -> Result<(), String> {
+    fn check_stmt(stmt: &Stmt, state: &mut BorrowState, flow: FlowContext) -> Result<(), String> {
         match stmt {
             Stmt::Let { name, expr, .. } => {
                 Self::check_expr(expr, state)?;
@@ -287,7 +345,7 @@ impl BorrowChecker {
             }
             Stmt::Block(body) => {
                 state.push_scope();
-                Self::check_stmts(body, state)?;
+                Self::check_stmts(body, state, flow)?;
                 state.pop_scope();
             }
             Stmt::If {
@@ -299,11 +357,11 @@ impl BorrowChecker {
                 let base_state = state.clone();
                 let mut then_state = base_state.clone();
                 then_state.push_scope();
-                Self::check_stmts(then_body, &mut then_state)?;
+                Self::check_stmts(then_body, &mut then_state, flow)?;
                 then_state.pop_scope();
                 let mut else_state = base_state.clone();
                 else_state.push_scope();
-                Self::check_stmts(else_body, &mut else_state)?;
+                Self::check_stmts(else_body, &mut else_state, flow)?;
                 else_state.pop_scope();
                 *state = BorrowState::merge_from_branches(&base_state, &[then_state, else_state]);
             }
@@ -315,18 +373,18 @@ impl BorrowChecker {
                 let base_state = state.clone();
                 let mut try_state = base_state.clone();
                 try_state.push_scope();
-                Self::check_stmts(try_body, &mut try_state)?;
+                Self::check_stmts(try_body, &mut try_state, flow)?;
                 try_state.pop_scope();
-                let try_state = Self::apply_finally_to_state(&try_state, finally_body)?;
+                let try_state = Self::apply_finally_to_state(&try_state, finally_body, flow)?;
                 let merged_state = if let Some(catch) = catch {
                     let mut catch_state = base_state.clone();
                     catch_state.push_scope();
                     if let Some(name) = &catch.name {
                         catch_state.declare(name);
                     }
-                    Self::check_stmts(&catch.body, &mut catch_state)?;
+                    Self::check_stmts(&catch.body, &mut catch_state, flow)?;
                     catch_state.pop_scope();
-                    let catch_state = Self::apply_finally_to_state(&catch_state, finally_body)?;
+                    let catch_state = Self::apply_finally_to_state(&catch_state, finally_body, flow)?;
                     BorrowState::merge_from_branches(&base_state, &[try_state, catch_state])
                 } else {
                     try_state
@@ -341,20 +399,32 @@ impl BorrowChecker {
                 Self::check_expr(expr, state)?;
                 let base_state = state.clone();
                 let mut branch_states = Vec::new();
+                let mut switch_exit_states = Vec::new();
                 for case in cases {
                     let mut case_value_state = base_state.clone();
                     Self::check_expr(&case.value, &mut case_value_state)?;
                     let mut case_state = base_state.clone();
                     case_state.push_scope();
-                    Self::check_stmts(&case.body, &mut case_state)?;
+                    Self::check_stmts(&case.body, &mut case_state, flow.with_switch())?;
                     case_state.pop_scope();
-                    branch_states.push(case_state);
+                    switch_exit_states.extend(case_state.switch_exit_snapshots.iter().cloned());
+                    if !case_state.terminated && !case_state.exits_switch {
+                        branch_states.push(case_state);
+                    }
                 }
                 let mut default_state = base_state.clone();
                 default_state.push_scope();
-                Self::check_stmts(default, &mut default_state)?;
+                Self::check_stmts(default, &mut default_state, flow.with_switch())?;
                 default_state.pop_scope();
-                branch_states.push(default_state);
+                switch_exit_states.extend(default_state.switch_exit_snapshots.iter().cloned());
+                if !default_state.terminated && !default_state.exits_switch {
+                    branch_states.push(default_state);
+                }
+                for snapshot in switch_exit_states {
+                    let mut exit_state = snapshot.clone();
+                    exit_state.exits_switch = false;
+                    branch_states.push(exit_state);
+                }
                 *state = BorrowState::merge_from_branches(&base_state, &branch_states);
             }
             Stmt::While { condition, body } => {
@@ -362,7 +432,7 @@ impl BorrowChecker {
                 let base_state = state.clone();
                 let mut body_state = base_state.clone();
                 body_state.push_scope();
-                Self::check_stmts(body, &mut body_state)?;
+                Self::check_stmts(body, &mut body_state, flow.with_loop())?;
                 body_state.pop_scope();
                 let mut loop_branches = vec![body_state.clone()];
                 loop_branches.extend(
@@ -383,18 +453,18 @@ impl BorrowChecker {
                 let mut loop_state = base_state.clone();
                 loop_state.push_scope();
                 if let Some(init) = init {
-                    Self::check_stmt(init, &mut loop_state)?;
+                    Self::check_stmt(init, &mut loop_state, flow.with_loop())?;
                 }
                 if let Some(condition) = condition {
                     Self::check_expr(condition, &mut loop_state)?;
                 }
-                Self::check_stmts(body, &mut loop_state)?;
+                Self::check_stmts(body, &mut loop_state, flow.with_loop())?;
                 loop_state.pop_scope();
                 let mut loop_branches = Vec::new();
                 if !loop_state.terminated {
                     let mut steady_state = loop_state.clone();
                     if let Some(increment) = increment {
-                        Self::check_stmt(increment, &mut steady_state)?;
+                        Self::check_stmt(increment, &mut steady_state, flow.with_loop())?;
                     }
                     loop_branches.push(steady_state);
                 }
@@ -405,7 +475,7 @@ impl BorrowChecker {
                         LoopExitKind::Continue => {
                             branch_state.terminated = false;
                             if let Some(increment) = increment {
-                                Self::check_stmt(increment, &mut branch_state)?;
+                                Self::check_stmt(increment, &mut branch_state, flow.with_loop())?;
                             }
                             loop_branches.push(branch_state);
                         }
@@ -427,7 +497,7 @@ impl BorrowChecker {
                 let mut loop_state = base_state.clone();
                 loop_state.push_scope();
                 loop_state.declare(item_name);
-                Self::check_stmts(body, &mut loop_state)?;
+                Self::check_stmts(body, &mut loop_state, flow.with_loop())?;
                 loop_state.pop_scope();
                 let mut loop_branches = vec![loop_state.clone()];
                 loop_branches.extend(
@@ -458,11 +528,16 @@ impl BorrowChecker {
                     Stmt::Continue => LoopExitKind::Continue,
                     _ => unreachable!(),
                 };
-                state.loop_exit_snapshots.push(LoopExitSnapshot {
-                    kind,
-                    state: state.snapshot_for_loop_exit(),
-                });
-                state.terminated = true;
+                if matches!(stmt, Stmt::Break) && flow.in_switch {
+                    state.switch_exit_snapshots.push(state.snapshot_for_loop_exit());
+                    state.exits_switch = true;
+                } else {
+                    state.loop_exit_snapshots.push(LoopExitSnapshot {
+                        kind,
+                        state: state.snapshot_for_loop_exit(),
+                    });
+                    state.terminated = true;
+                }
             }
         }
         Ok(())
@@ -526,7 +601,7 @@ impl BorrowChecker {
                 }
                 match body {
                     LambdaBody::Expr(body) => Self::check_expr(body, state)?,
-                    LambdaBody::Block(stmts) => Self::check_stmts(stmts, state)?,
+                    LambdaBody::Block(stmts) => Self::check_stmts(stmts, state, FlowContext::new())?,
                 }
                 state.pop_scope();
             }

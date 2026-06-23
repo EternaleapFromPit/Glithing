@@ -122,7 +122,7 @@ struct ServiceRegistration {
 
 fn is_string_like_type(ty: &IrType) -> bool {
     match ty {
-        IrType::String => true,
+        IrType::String | IrType::Exception => true,
         IrType::Class(name) | IrType::Struct(name) | IrType::Unknown(name) => {
             name == "string" || name == "String" || name == "System.String"
         }
@@ -1270,6 +1270,12 @@ impl LlvmEmitter {
         self.terminated = false;
         self.emit_local_drops(None);
         self.emit_default_return();
+        let resume_label_count = self.async_suspend_index.max(2);
+        for index in 1..=resume_label_count {
+            self.body.push_str(&format!(
+                "async_resume_{index}:\n  unreachable\n"
+            ));
+        }
         self.body.push_str("}\n\n");
         self.entry_insert_pos = None;
         Ok(())
@@ -1296,6 +1302,12 @@ impl LlvmEmitter {
         }
         for param in &function.params {
             state_fields.push(llvm_ir_type(&param.ty).as_ir().to_string());
+        }
+        for local in &function.locals {
+            if function.params.iter().any(|param| param.name == local.name) {
+                continue;
+            }
+            state_fields.push(llvm_ir_type(&local.ty).as_ir().to_string());
         }
         self.type_defs.push(format!(
             "%{state_type} = type {{ {} }}\n",
@@ -1367,6 +1379,23 @@ impl LlvmEmitter {
                 "  store {} %{}, ptr {field_ptr}\n",
                 ty.as_ir(),
                 sanitize(&param.name)
+            ));
+        }
+        let local_start = param_start + function.params.len();
+        for (index, local) in function.locals.iter().enumerate() {
+            if function.params.iter().any(|param| param.name == local.name) {
+                continue;
+            }
+            let field_ptr = self.tmp();
+            let ty = llvm_ir_type(&local.ty);
+            self.body.push_str(&format!(
+                "  {field_ptr} = getelementptr inbounds %{state_type}, ptr {state_ptr}, i32 0, i32 {}\n",
+                local_start + index
+            ));
+            self.body.push_str(&format!(
+                "  store {} {}, ptr {field_ptr}\n",
+                ty.as_ir(),
+                ty.default_value()
             ));
         }
 
@@ -1443,57 +1472,56 @@ impl LlvmEmitter {
         ));
         self.entry_insert_pos = Some(self.body.len());
         let pc_ptr = self.tmp();
+        let pc = self.tmp();
+        let dispatch_marker = "__GLITCH_ASYNC_DISPATCH__";
         self.body.push_str(&format!(
-            "  {pc_ptr} = getelementptr inbounds %{state_type}, ptr %env, i32 0, i32 0\n"
+            "  {pc_ptr} = getelementptr inbounds %{state_type}, ptr %env, i32 0, i32 0\n  {pc} = load i32, ptr {pc_ptr}\n  ;{dispatch_marker}\nasync_resume_0:\n"
         ));
         self.async_state_pc_ptr = Some(pc_ptr);
 
         let param_start = if self.current_return == LlType::Void { 1 } else { 2 };
+        let mut state_setup = String::new();
         for (index, param) in function.params.iter().enumerate() {
             let ty = llvm_ir_type(&param.ty);
-            let ptr = self.tmp();
-            let field_ptr = self.tmp();
-            let loaded = self.tmp();
-            self.body.push_str(&format!(
-                "  {ptr} = alloca {}\n  {field_ptr} = getelementptr inbounds %{state_type}, ptr %env, i32 0, i32 {}\n  {loaded} = load {}, ptr {field_ptr}\n  store {} {loaded}, ptr {ptr}\n",
-                ty.as_ir(),
-                param_start + index,
-                ty.as_ir(),
-                ty.as_ir()
+            state_setup.push_str(&format!(
+                "  %async_param_{}_ptr = getelementptr inbounds %{state_type}, ptr %env, i32 0, i32 {}\n",
+                index,
+                param_start + index
             ));
             self.vars.insert(
                 param.name.clone(),
                 LlVar {
-                    ptr,
+                    ptr: format!("%async_param_{}_ptr", index),
                     ty,
                     ir_ty: param.ty.clone(),
-                    drop_kind: DropKind::BorrowOnly,
+                    drop_kind: param.drop_kind(),
                 },
             );
         }
-        for local in &function.locals {
+        let local_start = param_start + function.params.len();
+        for (index, local) in function.locals.iter().enumerate() {
             if self.vars.contains_key(&local.name) {
                 continue;
             }
             let ty = llvm_ir_type(&local.ty);
-            let ptr = self.tmp();
-            self.body
-                .push_str(&format!("  {ptr} = alloca {}\n", ty.as_ir()));
-            self.body.push_str(&format!(
-                "  store {} {}, ptr {ptr}\n",
-                ty.as_ir(),
-                ty.default_value()
+            state_setup.push_str(&format!(
+                "  %async_local_{}_ptr = getelementptr inbounds %{state_type}, ptr %env, i32 0, i32 {}\n",
+                index,
+                local_start + index
             ));
             self.vars.insert(
                 local.name.clone(),
                 LlVar {
-                    ptr,
+                    ptr: format!("%async_local_{}_ptr", index),
                     ty,
                     ir_ty: local.ty.clone(),
                     drop_kind: local.drop_kind(),
                 },
             );
             self.drop_order.push(local.name.clone());
+        }
+        if let Some(insert_pos) = self.entry_insert_pos {
+            self.body.insert_str(insert_pos, &state_setup);
         }
 
         self.emit_typed_stmts(&function.body)?;
@@ -1506,10 +1534,29 @@ impl LlvmEmitter {
         self.terminated = false;
         self.emit_local_drops(None);
         self.emit_default_return();
+        let resume_label_count = self.async_suspend_index.max(2);
+        for index in 1..=resume_label_count {
+            self.body.push_str(&format!(
+                "async_resume_{index}:\n  unreachable\n"
+            ));
+        }
         self.body.push_str("}\n\n");
         self.entry_insert_pos = None;
 
         let resume_body = std::mem::replace(&mut self.body, saved_body);
+        let mut dispatch = String::new();
+        dispatch.push_str("  switch i32 ");
+        dispatch.push_str(&pc);
+        dispatch.push_str(", label %async_resume_0 [\n");
+        for index in 1..=self.async_suspend_index {
+            dispatch.push_str(&format!("    i32 {index}, label %async_resume_{index}\n"));
+        }
+        dispatch.push_str("  ]\n");
+        let resume_body = resume_body.replacen(
+            &format!("  ;{dispatch_marker}\n"),
+            &dispatch,
+            1,
+        );
         self.globals.push(resume_body);
         self.vars = saved_vars;
         self.drop_order = saved_drop_order;
@@ -1566,6 +1613,52 @@ impl LlvmEmitter {
                             drop_symbol(&object.name)
                         ));
                     }
+                }
+                IrType::Task(_) => {
+                    body.push_str(&format!(
+                        "  call void @GlitchTask_Destroy(ptr {loaded})\n"
+                    ));
+                }
+                _ => {}
+            }
+        }
+        let local_start = param_start + function.params.len();
+        for (index, local) in function.locals.iter().enumerate() {
+            if function.params.iter().any(|param| param.name == local.name) {
+                continue;
+            }
+            let field_ptr = format!("%async_local_field_{}_ptr", index);
+            let loaded = format!("%async_local_field_{}", index);
+            let ty = llvm_ir_type(&local.ty);
+            body.push_str(&format!(
+                "  {field_ptr} = getelementptr inbounds %{state_type}, ptr %env, i32 0, i32 {}\n  {loaded} = load {}, ptr {field_ptr}\n",
+                local_start + index,
+                ty.as_ir()
+            ));
+            match &local.ty {
+                IrType::String | IrType::Exception => {
+                    body.push_str(&format!(
+                        "  call void @glitch_string_release(ptr {loaded})\n"
+                    ));
+                }
+                IrType::Function { .. } => {
+                    body.push_str(&format!(
+                        "  call void @glitch_delegate_release(ptr {loaded})\n"
+                    ));
+                }
+                IrType::Class(type_name) | IrType::Interface(type_name) => {
+                    if let Some(object) = self.object_types.get(type_name) {
+                        body.push_str(&format!(
+                            "  call void @{}(ptr {loaded})\n",
+                            drop_symbol(&object.name)
+                        ));
+                    }
+                }
+                IrType::Task(inner) => {
+                    let _ = inner;
+                    body.push_str(&format!(
+                        "  call void @GlitchTask_Destroy(ptr {loaded})\n"
+                    ));
                 }
                 _ => {}
             }

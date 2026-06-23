@@ -52,15 +52,17 @@ impl LlvmEmitter {
                 Ok(value)
             }
             Expr::Binary { left, op, right } => {
-                let left = self.emit_expr(left)?;
+                let left_expr = left;
+                let right_expr = right;
+                let left = self.emit_expr(left_expr)?;
                 if *op == BinaryOp::Coalesce {
                     return Ok(left);
                 }
                 if matches!(op, BinaryOp::And | BinaryOp::Or) {
-                    let right = self.emit_expr(right)?;
-                    return self.emit_logical_value(left, *op, right);
+                    let right = self.emit_expr(right_expr)?;
+                    return self.emit_logical_value(left.clone(), *op, right.clone());
                 }
-                let raw_right = self.emit_expr(right)?;
+                let raw_right = self.emit_expr(right_expr)?; 
                 let right = self.cast_value(raw_right, &left.ty)?;
                 let tmp = self.tmp();
                 if op.is_comparison() {
@@ -113,10 +115,11 @@ impl LlvmEmitter {
                             right.value
                         ));
                     }
-                    Ok(LlValue {
+                    let result = LlValue {
                         value: tmp,
                         ty: LlType::I1,
-                    })
+                    };
+                    Ok(result)
                 } else if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr) {
                     let op_name = if *op == BinaryOp::BitAnd { "and" } else { "or" };
                     self.body.push_str(&format!(
@@ -124,10 +127,11 @@ impl LlvmEmitter {
                         left.ty.as_ir(),
                         left.value, right.value
                     ));
-                    Ok(LlValue {
+                    let result = LlValue {
                         value: tmp,
                         ty: left.ty,
-                    })
+                    };
+                    Ok(result)
                 } else if left.ty == LlType::Double {
                     let op_name = match op {
                         BinaryOp::Sub => "fsub",
@@ -140,10 +144,11 @@ impl LlvmEmitter {
                         "  {tmp} = {op_name} double {}, {}\n",
                         left.value, right.value
                     ));
-                    Ok(LlValue {
+                    let result = LlValue {
                         value: tmp,
                         ty: LlType::Double,
-                    })
+                    };
+                    Ok(result)
                 } else {
                     let op_name = match op {
                         BinaryOp::Sub => "sub",
@@ -158,10 +163,11 @@ impl LlvmEmitter {
                         left.value,
                         right.value
                     ));
-                    Ok(LlValue {
+                    let result = LlValue {
                         value: tmp,
                         ty: left.ty,
-                    })
+                    };
+                    Ok(result)
                 }
             }
             Expr::Unary { op, expr } => {
@@ -379,30 +385,46 @@ impl LlvmEmitter {
                                 helper_name,
                                 task_val.value
                             ));
-                            if is_string_like_type(&result_ty) {
-                                self.body.push_str(&format!(
-                                    "  call void @glitch_string_retain(ptr {})\n",
-                                    call_res
-                                ));
-                            } else if let Some(type_name) = object_type_name(&result_ty) {
-                                if self.object_types.contains_key(type_name) {
-                                    self.emit_retain(type_name, &call_res);
-                                }
-                            }
+                            self.emit_exception_check();
+                            self.retain_task_payload(
+                                &result_ty,
+                                &LlValue {
+                                    value: call_res.clone(),
+                                    ty: result_llvm_type.clone(),
+                                },
+                            );
                             return Ok(LlValue {
                                 value: call_res,
                                 ty: result_llvm_type,
                             });
                         }
                     }
-                    if matches!(name.as_str(), "IsCompleted" | "IsCompletedSuccessfully")
+                    if name == "Exception" && matches!(target.ty, IrType::Task(_)) {
+                        let task_val = self.emit_typed_expr(target)?;
+                        let exception = self.tmp();
+                        self.body.push_str(&format!(
+                            "  {} = call ptr @glitch_task_get_exception(ptr {})\n",
+                            exception, task_val.value
+                        ));
+                        return Ok(LlValue {
+                            value: exception,
+                            ty: LlType::Ptr,
+                        });
+                    }
+                    if matches!(name.as_str(), "IsCompleted" | "IsCompletedSuccessfully" | "IsFaulted")
                         && matches!(target.ty, IrType::Task(_))
                     {
                         let task_val = self.emit_typed_expr(target)?;
                         let completed = self.tmp();
+                        let helper_name = match name.as_str() {
+                            "IsCompleted" => "glitch_task_is_completed",
+                            "IsCompletedSuccessfully" => "glitch_task_is_completed_successfully",
+                            "IsFaulted" => "glitch_task_is_faulted",
+                            _ => unreachable!(),
+                        };
                         self.body.push_str(&format!(
-                            "  {} = call i1 @glitch_task_is_completed(ptr {})\n",
-                            completed, task_val.value
+                            "  {} = call i1 @{}(ptr {})\n",
+                            completed, helper_name, task_val.value
                         ));
                         return Ok(LlValue {
                             value: completed,
@@ -721,31 +743,48 @@ impl LlvmEmitter {
                 if *op == BinaryOp::Coalesce {
                     return self.emit_coalesce_value(left, right, &expr.ty);
                 }
-                let left = self.emit_typed_expr(left)?;
+                if let Some(value) =
+                    self.emit_task_exception_null_compare(left, *op, right)?
+                {
+                    return Ok(value);
+                }
+                let left_expr = left;
+                let right_expr = right;
+                let left = self.emit_typed_expr(left_expr)?;
                 if matches!(op, BinaryOp::And | BinaryOp::Or) {
-                    let right = self.emit_typed_expr(right)?;
-                    return self.emit_logical_value(left, *op, right);
+                    let right = self.emit_typed_expr(right_expr)?;
+                    let value = self.emit_logical_value(left.clone(), *op, right.clone());
+                    self.emit_temporary_drop(left_expr, &left);
+                    self.emit_temporary_drop(right_expr, &right);
+                    return value;
                 }
                 if *op == BinaryOp::Add && is_string_like_type(&expr.ty) {
                     let left = self.cast_value(left, &LlType::Ptr)?;
-                    let right = self.emit_typed_expr(right)?;
+                    let right = self.emit_typed_expr(right_expr)?;
                     let right = self.cast_value(right, &LlType::Ptr)?;
                     let value = self.tmp();
                     self.body.push_str(&format!(
                         "  {value} = call ptr @glitch_string_concat(ptr {}, ptr {})\n",
                         left.value, right.value
                     ));
-                    return Ok(LlValue {
+                    let result = LlValue {
                         value,
                         ty: LlType::Ptr,
-                    });
+                    };
+                    self.emit_temporary_drop(left_expr, &left);
+                    self.emit_temporary_drop(right_expr, &right);
+                    return Ok(result);
                 }
-                let raw_right = self.emit_typed_expr(right)?;
+                let raw_right = self.emit_typed_expr(right_expr)?;
+                let raw_right_for_drop = raw_right.clone();
                 let right = self.cast_value(raw_right, &left.ty)?;
                 if left.ty == LlType::Ptr && !op.is_comparison() {
                     return self.default_typed_value(&expr.ty);
                 }
-                self.emit_binary_value(left, *op, right)
+                let result = self.emit_binary_value(left.clone(), *op, right.clone())?;
+                self.emit_temporary_drop(left_expr, &left);
+                self.emit_temporary_drop(right_expr, &raw_right_for_drop);
+                Ok(result)
             }
             TypedExprKind::Unary { op, expr } => {
                 let value = self.emit_typed_expr(expr)?;
@@ -854,6 +893,9 @@ impl LlvmEmitter {
                     }
                     if is_task && name == "FromResult" {
                         return self.emit_task_from_result_inline(call, &expr.ty);
+                    }
+                    if is_task && name == "FromException" {
+                        return self.emit_task_from_exception_inline(call, &expr.ty);
                     }
                     if is_task && name == "WhenAll" {
                         return self.emit_task_when_all_inline(call);
@@ -1155,6 +1197,9 @@ impl LlvmEmitter {
                                 if name == "FromResult" {
                                     return self.emit_task_from_result_inline(call, &expr.ty);
                                 }
+                                if name == "FromException" {
+                                    return self.emit_task_from_exception_inline(call, &expr.ty);
+                                }
                                 if name == "WhenAll" {
                                     return self.emit_task_when_all_inline(call);
                                 }
@@ -1317,16 +1362,14 @@ impl LlvmEmitter {
                         helper_name,
                         task_val.value
                     ));
-                    if is_string_like_type(&result_ty) {
-                        self.body.push_str(&format!(
-                            "  call void @glitch_string_retain(ptr {})\n",
-                            call_res
-                        ));
-                    } else if let Some(type_name) = object_type_name(&result_ty) {
-                        if self.object_types.contains_key(type_name) {
-                            self.emit_retain(type_name, &call_res);
-                        }
-                    }
+                    self.emit_exception_check();
+                    self.retain_task_payload(
+                        &result_ty,
+                        &LlValue {
+                            value: call_res.clone(),
+                            ty: result_llvm_type.clone(),
+                        },
+                    );
                     let value = LlValue {
                         value: call_res,
                         ty: result_llvm_type,
@@ -1839,6 +1882,64 @@ impl LlvmEmitter {
             value: result,
             ty: LlType::I1,
         })
+    }
+
+    fn emit_task_exception_null_compare(
+        &mut self,
+        left: &TypedExpr,
+        op: BinaryOp,
+        right: &TypedExpr,
+    ) -> Result<Option<LlValue>, String> {
+        fn is_null_expr(expr: &TypedExpr) -> bool {
+            matches!(expr.kind, TypedExprKind::Null)
+                || matches!(expr.ty, IrType::Unknown(ref name) if name == "null")
+        }
+
+        fn task_exception_target(expr: &TypedExpr) -> Option<&TypedExpr> {
+            match &expr.kind {
+                TypedExprKind::Field { target, name }
+                    if name == "Exception" && matches!(target.ty, IrType::Task(_)) =>
+                {
+                    Some(target.as_ref())
+                }
+                _ => None,
+            }
+        }
+
+        let (target_expr, invert) = if is_null_expr(right) {
+            (task_exception_target(left), matches!(op, BinaryOp::Eq))
+        } else if is_null_expr(left) {
+            (task_exception_target(right), matches!(op, BinaryOp::Eq))
+        } else {
+            return Ok(None);
+        };
+
+        let Some(target_expr) = target_expr else {
+            return Ok(None);
+        };
+
+        let task_value = self.emit_typed_expr(target_expr)?;
+        let faulted = self.tmp();
+        self.body.push_str(&format!(
+            "  {faulted} = call i1 @glitch_task_is_faulted(ptr {})\n",
+            task_value.value
+        ));
+        self.emit_temporary_drop(target_expr, &task_value);
+
+        let value = if invert {
+            self.emit_not_value(LlValue {
+                value: faulted,
+                ty: LlType::I1,
+            })?
+            .value
+        } else {
+            faulted
+        };
+
+        Ok(Some(LlValue {
+            value,
+            ty: LlType::I1,
+        }))
     }
 
 }

@@ -414,7 +414,7 @@ fn compiles_lambdas_with_captures() {
     assert!(llvm_ir.contains("%glitch.delegate = type { i64, ptr, ptr, ptr }"));
     assert!(llvm_ir.contains("call ptr @glitch_calloc(i64 1, i64"));
     assert!(llvm_ir.contains("store ptr @glitch_lambda_0_destroy"));
-    assert!(llvm_ir.contains("define ptr @glitch_lambda_0(ptr %env, ptr %x)"));
+    assert!(llvm_ir.contains("define i32 @glitch_lambda_0(ptr %env, i32 %x)"));
     assert!(llvm_ir.contains("getelementptr inbounds %glitch.lambda.0.env, ptr %env"));
     assert!(llvm_ir.contains("glitch_delegate_release"));
     assert!(llvm_ir.contains("glitch_delegate_retain"));

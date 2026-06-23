@@ -100,6 +100,16 @@ impl LlvmEmitter {
                 ));
                 continue;
             }
+            if matches!(field.drop_kind, DropKind::DropTask) {
+                self.body.push_str(&format!(
+                    "  %field_{}_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 {}\n  %field_{} = load ptr, ptr %field_{}_ptr\n",
+                    field.index, field.index, field.index, field.index
+                ));
+                if let IrType::Task(inner) = &field.ty {
+                    self.emit_task_drop_value(&format!("%field_{}", field.index), inner);
+                }
+                continue;
+            }
             if matches!(&field.ty, IrType::Unknown(name) if name == "object") {
                 self.body.push_str(&format!(
                     "  %field_{}_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 {}\n  %field_{} = load ptr, ptr %field_{}_ptr\n  call void @glitch_box_release(ptr %field_{})\n",
@@ -167,6 +177,16 @@ impl LlvmEmitter {
                 "  %nullable_value_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 {}\n  %nullable_value = load ptr, ptr %nullable_value_ptr\n  call void @glitch_delegate_release(ptr %nullable_value)\n",
                 field.index
             ));
+            return;
+        }
+        if matches!(field.drop_kind, DropKind::DropTask) {
+            self.body.push_str(&format!(
+                "  %nullable_value_ptr = getelementptr inbounds %{llvm_name}, ptr %object, i32 0, i32 {}\n  %nullable_value = load ptr, ptr %nullable_value_ptr\n",
+                field.index
+            ));
+            if let IrType::Task(inner) = &field.ty {
+                self.emit_task_drop_value("%nullable_value", inner);
+            }
             return;
         }
         if matches!(field.drop_kind, DropKind::DropClass | DropKind::DropStruct) {

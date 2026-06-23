@@ -327,6 +327,233 @@ fn compiles_valuetask_as_task_surface() {
 }
 
 #[test]
+fn value_task_as_task_retains_owned_string_results_in_llvm() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            string MakeName() {
+                string name = "Ada";
+                return name;
+            }
+
+            fn main() {
+                ValueTask<string> valueTask = ValueTask.FromResult(MakeName());
+                Task<string> task = valueTask.AsTask();
+                print(task.Result);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("ValueTask.AsTask should retain owned string results in LLVM");
+
+    assert!(llvm_ir.contains("glitch_task_from_result_ptr"));
+    assert!(llvm_ir.contains("glitch_string_retain"));
+    assert!(llvm_ir.contains("glitch_string_release"));
+}
+
+#[test]
+fn runs_valuetask_as_task_natively_with_owned_string_result() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            string MakeName() {
+                string name = "Ada";
+                return name;
+            }
+
+            fn main() {
+                ValueTask<string> valueTask = ValueTask.FromResult(MakeName());
+                Task<string> task = valueTask.AsTask();
+                print(task.Result);
+            }
+        "#;
+
+    let output_exe =
+        emit_native_executable_from_source("valuetask-as-task-native", source);
+    let output = run_native_executable(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Ada"));
+}
+
+#[test]
+fn task_result_faults_are_propagated_through_exception_handling_in_llvm() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int Boom() {
+                throw new Exception("boom");
+            }
+
+            fn main() {
+                Task<int> task = Task.Run(Boom);
+                try {
+                    print(task.Result);
+                } catch (Exception) {
+                    print("caught");
+                }
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("faulted tasks should still lower");
+
+    assert!(llvm_ir.contains("glitch_task_get_result_i32"));
+    assert!(llvm_ir.contains("@glitch_exception_pending"));
+}
+
+#[test]
+fn task_result_faults_can_be_caught_natively() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int Boom() {
+                throw new Exception("boom");
+            }
+
+            fn main() {
+                Task<int> task = Task.Run(Boom);
+                try {
+                    print(task.Result);
+                } catch (Exception) {
+                    print("caught");
+                }
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("task-fault-catch", source);
+    let output = run_native_executable(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("caught"));
+}
+
+#[test]
+fn faulted_tasks_report_status_bits_in_llvm_and_native_output() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int Boom() {
+                throw new Exception("boom");
+            }
+
+            fn main() {
+                Task<int> task = Task.Run(Boom);
+                task.Wait();
+                print(task.IsCompletedSuccessfully);
+                print(task.IsFaulted);
+                try {
+                    print(task.Result);
+                } catch (Exception) {
+                    print("caught");
+                }
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("faulted tasks should expose status bits");
+
+    assert!(llvm_ir.contains("glitch_task_is_completed_successfully"));
+    assert!(llvm_ir.contains("glitch_task_is_faulted"));
+
+    let output_exe = emit_native_executable_from_source("task-fault-status", source);
+    let output = run_native_executable(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("false"));
+    assert!(stdout.contains("true"));
+    assert!(stdout.contains("caught"));
+}
+
+#[test]
+fn task_from_exception_returns_faulted_task_in_llvm_and_native_output() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            fn main() {
+                Task<int> task = Task.FromException(new Exception("boom"));
+                print(task.IsFaulted);
+                try {
+                    print(task.Result);
+                } catch (Exception) {
+                    print("caught");
+                }
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("Task.FromException should lower");
+
+    assert!(llvm_ir.contains("glitch_task_from_result_ptr"));
+    assert!(llvm_ir.contains("glitch_task_is_faulted"));
+
+    let output_exe = emit_native_executable_from_source("task-from-exception", source);
+    let output = run_native_executable(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("true"));
+    assert!(stdout.contains("caught"));
+}
+
+#[test]
+fn task_exception_property_lowers_in_llvm_and_native_output() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            fn main() {
+                Task<int> task = Task.FromException(new Exception("boom"));
+                Exception ex = task.Exception;
+                print(task.IsFaulted);
+                print(ex != null);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("Task.Exception should lower");
+
+    assert!(llvm_ir.contains("glitch_task_get_exception"));
+    assert!(llvm_ir.contains("glitch_string_release"));
+
+    let output_exe = emit_native_executable_from_source("task-exception-property", source);
+    let output = run_native_executable(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("true"));
+    assert!(stdout.contains("true"));
+}
+
+#[test]
 fn parses_delegate_declarations_in_framework_packages() {
     let source = r#"
             delegate bool Predicate<T>(T item);
@@ -454,12 +681,60 @@ fn compiles_nested_async_with_two_sequential_awaits() {
 
     let llvm_ir = compile_llvm_ir(source).expect("nested async lowering should compile");
 
-    assert!(llvm_ir.contains("%glitch_async_state_Inner = type { i32, i32 }"));
-    assert!(llvm_ir.contains("%glitch_async_state_Outer = type { i32, i32 }"));
+    assert!(llvm_ir.contains("%glitch_async_state_Inner = type {"));
+    assert!(llvm_ir.contains("%glitch_async_state_Outer = type {"));
     assert!(llvm_ir.contains("define i32 @glitch_async_resume_Inner(ptr %env)"));
     assert!(llvm_ir.contains("define i32 @glitch_async_resume_Outer(ptr %env)"));
     assert!(llvm_ir.contains("glitch_task_run_i32"));
     assert!(llvm_ir.contains("glitch_task_get_result_i32"));
+}
+
+#[test]
+fn async_resume_function_emits_program_counter_dispatch() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int Compute() {
+                return 1;
+            }
+
+            async Task<int> ResumeDemo() {
+                int first = await Task.Run(Compute);
+                int second = await Task.Run(Compute);
+                return first + second;
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("async resume dispatch should lower");
+
+    assert!(llvm_ir.contains("define i32 @glitch_async_resume_ResumeDemo(ptr %env)"));
+    assert!(llvm_ir.contains("switch i32"));
+    assert!(llvm_ir.contains("async_resume_1:"));
+    assert!(llvm_ir.contains("async_resume_2:"));
+}
+
+#[test]
+fn rejects_await_inside_try_finally_in_current_async_gate() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            int Compute() {
+                return 1;
+            }
+
+            async Task<int> Broken() {
+                try {
+                    return await Task.Run(Compute);
+                } finally {
+                    print(0);
+                }
+            }
+        "#;
+
+    let error = compile_llvm_ir(source).expect_err("await inside try/finally should be rejected");
+
+    assert!(error.contains("suspension inside try/catch/finally is not supported yet"));
+    assert!(error.contains("move the await outside the protected region"));
 }
 
 #[test]
@@ -595,6 +870,102 @@ fn runs_async_string_result_natively() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Ada"));
+}
+
+#[test]
+fn runs_async_when_all_string_payloads_natively() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+
+            string First() {
+                return "Ada";
+            }
+
+            string Second() {
+                return "Lovelace";
+            }
+
+            async Task<string> MergeAsync() {
+                List<Task<string>> tasks = new List<Task<string>>();
+                tasks.Add(Task.Run(First));
+                tasks.Add(Task.Run(Second));
+                await Task.WhenAll(tasks.ToArray());
+                return tasks[0].Result + " " + tasks[1].Result;
+            }
+
+            fn main() {
+                Task<string> value = MergeAsync();
+                print(value.Result);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("async-when-all-string-payloads", source);
+    let output = run_native_executable(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Ada Lovelace"));
+}
+
+#[test]
+fn compiles_async_when_all_string_payloads_to_llvm() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+
+            string First() {
+                return "Ada";
+            }
+
+            string Second() {
+                return "Lovelace";
+            }
+
+            async Task<string> MergeAsync() {
+                List<Task<string>> tasks = new List<Task<string>>();
+                tasks.Add(Task.Run(First));
+                tasks.Add(Task.Run(Second));
+                await Task.WhenAll(tasks.ToArray());
+                return tasks[0].Result + " " + tasks[1].Result;
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("async WhenAll should lower to LLVM");
+
+    assert!(llvm_ir.contains("glitch_task_when_all_array"));
+    assert!(llvm_ir.contains("glitch_async_resume_MergeAsync"));
+    assert!(llvm_ir.contains("glitch_task_get_result_ptr"));
+}
+
+#[test]
+fn compiles_list_of_tasks_to_array_for_when_all() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+
+            string First() {
+                return "Ada";
+            }
+
+            fn main() {
+                List<Task<string>> tasks = new List<Task<string>>();
+                tasks.Add(Task.Run(First));
+                Task<string>[] items = tasks.ToArray();
+                print(items[0].Result);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("List<Task<string>>.ToArray should lower");
+
+    assert!(llvm_ir.contains("glitch_task_get_result_ptr"));
+    assert!(llvm_ir.contains("glitch_task_run_ptr"));
 }
 
 #[test]

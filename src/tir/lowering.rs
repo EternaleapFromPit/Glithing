@@ -1001,11 +1001,19 @@ pub(super) fn lower_typed_expr_with_expected(
                     ty: inner.as_ref().clone(),
                     ownership: ownership_for_type(inner),
                 }),
-                (IrType::Task(_), "IsCompleted") => Some(FieldSignature {
+                (IrType::Task(_), "IsCompleted")
+                | (IrType::Task(_), "IsCompletedSuccessfully")
+                | (IrType::Task(_), "IsFaulted") => Some(FieldSignature {
                     package_id: None,
                     visibility: Visibility::Public,
                     ty: IrType::Bool,
                     ownership: Ownership::Copy,
+                }),
+                (IrType::Task(_), "Exception") => Some(FieldSignature {
+                    package_id: None,
+                    visibility: Visibility::Public,
+                    ty: IrType::Exception,
+                    ownership: Ownership::Owned,
                 }),
                 (IrType::Exception, "Message") => Some(FieldSignature {
                     package_id: None,

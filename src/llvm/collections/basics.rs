@@ -198,7 +198,54 @@ impl LlvmEmitter {
             if name == "GetAwaiter" {
                 Ok(task_val)
             } else if name == "AsTask" {
-                Ok(task_val)
+                let result_ty = match expr_ty {
+                    IrType::Task(inner) => inner.as_ref().clone(),
+                    other => {
+                        return Err(format!(
+                            "LLVM TIR backend: AsTask expected Task<T> expression type, got {:?}",
+                            other
+                        ));
+                    }
+                };
+                let result_llvm_type = llvm_ir_type(&result_ty);
+                let call_res = self.tmp();
+                let helper_name = if llvm_ir_type(&result_ty) == LlType::I1
+                    || is_bool_like_type(&result_ty)
+                {
+                    "glitch_task_get_result_bool"
+                } else {
+                    match &result_ty {
+                        IrType::Int | IrType::UInt => "glitch_task_get_result_i32",
+                        IrType::Long => "glitch_task_get_result_i64",
+                        IrType::Double | IrType::Decimal => "glitch_task_get_result_double",
+                        _ => "glitch_task_get_result_ptr",
+                    }
+                };
+                self.body.push_str(&format!(
+                    "  {} = call {} @{}(ptr {})\n",
+                    call_res,
+                    result_llvm_type.as_ir(),
+                    helper_name,
+                    task_val.value
+                ));
+                self.emit_exception_check();
+                if is_string_like_type(&result_ty) {
+                    self.body.push_str(&format!(
+                        "  call void @glitch_string_retain(ptr {})\n",
+                        call_res
+                    ));
+                } else if let Some(type_name) = object_type_name(&result_ty) {
+                    if self.object_types.contains_key(type_name) {
+                        self.emit_retain(type_name, &call_res);
+                    }
+                }
+                self.emit_task_from_result_value(
+                    &result_ty,
+                    LlValue {
+                        value: call_res,
+                        ty: result_llvm_type,
+                    },
+                )
             } else {
                 let result_ty = expr_ty.clone();
                 let result_llvm_type = llvm_ir_type(&result_ty);

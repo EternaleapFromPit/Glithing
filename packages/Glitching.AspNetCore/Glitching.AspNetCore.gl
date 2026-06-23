@@ -282,26 +282,26 @@ public class ConfigurationManager {
         return value;
     }
 
-    string GetConnectionString(string name) {
+    public string GetConnectionString(string name) {
         return GlitchRestHost_read_connection_string(name, "");
     }
 
-    ConfigurationManager GetSection(string name) {
+    public ConfigurationManager GetSection(string name) {
         string sectionPrefix = this.Prefix + name;
         string fullPrefix = sectionPrefix + ":";
         ConfigurationManager section = new ConfigurationManager(fullPrefix);
         return section;
     }
 
-    string Get(string name) {
+    public string Get(string name) {
         return this.get_Item(name);
     }
 
-    T Get<T>() {
+    public T Get<T>() {
         return default(T);
     }
 
-    T GetValue<T>(string name) {
+    public T GetValue<T>(string name) {
         return default(T);
     }
 }
