@@ -1,5 +1,6 @@
 /target/
 /target-codex/
+/target-runtime-link/
 /.agents/
 /temp_*
 /tmp_*
