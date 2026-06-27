@@ -1580,47 +1580,25 @@ impl LlvmEmitter {
         state_type: &str,
         destroy_symbol: &str,
     ) {
-        let mut body = format!("define void @{destroy_symbol}(ptr %env) {{\nentry:\n");
+        let body = format!("define void @{destroy_symbol}(ptr %env) {{\nentry:\n");
         let param_start = if matches!(&function.return_type, IrType::Task(inner) if llvm_ir_type(inner) == LlType::Void) {
             1
         } else {
             2
         };
+        let old_body = std::mem::take(&mut self.body);
+        self.body = body;
+
         for (index, param) in function.params.iter().enumerate() {
             let field_ptr = format!("%async_field_{}_ptr", index);
             let loaded = format!("%async_field_{}", index);
             let ty = llvm_ir_type(&param.ty);
-            body.push_str(&format!(
+            self.body.push_str(&format!(
                 "  {field_ptr} = getelementptr inbounds %{state_type}, ptr %env, i32 0, i32 {}\n  {loaded} = load {}, ptr {field_ptr}\n",
                 param_start + index,
                 ty.as_ir()
             ));
-            match &param.ty {
-                IrType::String | IrType::Exception => {
-                    body.push_str(&format!(
-                        "  call void @glitch_string_release(ptr {loaded})\n"
-                    ));
-                }
-                IrType::Function { .. } => {
-                    body.push_str(&format!(
-                        "  call void @glitch_delegate_release(ptr {loaded})\n"
-                    ));
-                }
-                IrType::Class(type_name) | IrType::Interface(type_name) => {
-                    if let Some(object) = self.object_types.get(type_name) {
-                        body.push_str(&format!(
-                            "  call void @{}(ptr {loaded})\n",
-                            drop_symbol(&object.name)
-                        ));
-                    }
-                }
-                IrType::Task(_) => {
-                    body.push_str(&format!(
-                        "  call void @GlitchTask_Destroy(ptr {loaded})\n"
-                    ));
-                }
-                _ => {}
-            }
+            self.emit_owned_payload_drop_value(&param.ty, &loaded);
         }
         let local_start = param_start + function.params.len();
         for (index, local) in function.locals.iter().enumerate() {
@@ -1630,41 +1608,16 @@ impl LlvmEmitter {
             let field_ptr = format!("%async_local_field_{}_ptr", index);
             let loaded = format!("%async_local_field_{}", index);
             let ty = llvm_ir_type(&local.ty);
-            body.push_str(&format!(
+            self.body.push_str(&format!(
                 "  {field_ptr} = getelementptr inbounds %{state_type}, ptr %env, i32 0, i32 {}\n  {loaded} = load {}, ptr {field_ptr}\n",
                 local_start + index,
                 ty.as_ir()
             ));
-            match &local.ty {
-                IrType::String | IrType::Exception => {
-                    body.push_str(&format!(
-                        "  call void @glitch_string_release(ptr {loaded})\n"
-                    ));
-                }
-                IrType::Function { .. } => {
-                    body.push_str(&format!(
-                        "  call void @glitch_delegate_release(ptr {loaded})\n"
-                    ));
-                }
-                IrType::Class(type_name) | IrType::Interface(type_name) => {
-                    if let Some(object) = self.object_types.get(type_name) {
-                        body.push_str(&format!(
-                            "  call void @{}(ptr {loaded})\n",
-                            drop_symbol(&object.name)
-                        ));
-                    }
-                }
-                IrType::Task(inner) => {
-                    let _ = inner;
-                    body.push_str(&format!(
-                        "  call void @GlitchTask_Destroy(ptr {loaded})\n"
-                    ));
-                }
-                _ => {}
-            }
+            self.emit_owned_payload_drop_value(&local.ty, &loaded);
         }
-        body.push_str("  call void @glitch_free(ptr %env)\n  ret void\n}\n\n");
-        self.globals.push(body);
+        self.body.push_str("  call void @glitch_free(ptr %env)\n  ret void\n}\n\n");
+        let complete_body = std::mem::replace(&mut self.body, old_body);
+        self.globals.push(complete_body);
     }
 
     fn emit_async_capture_retain(&mut self, binding: &TypedBinding, value: &str) {

@@ -1,7 +1,7 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicPtr, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -544,19 +544,21 @@ pub unsafe extern "C" fn GlitchTask_GetException(task: *mut c_void) -> *mut c_vo
         return std::ptr::null_mut();
     }
     task_wait(task);
-    let exception = (*task).exception;
+    let exception_ptr = std::ptr::addr_of_mut!((*task).exception).cast::<AtomicPtr<c_char>>();
+    let exception = (*exception_ptr).swap(std::ptr::null_mut(), Ordering::SeqCst);
     if exception.is_null() {
         return std::ptr::null_mut();
     }
     let message = CStr::from_ptr(exception).to_str().unwrap_or_default();
+    release_glitch_string(exception);
     allocate_glitch_string_from_str(message).cast::<c_void>()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn GlitchTask_Destroy(task: *mut c_void) {
+pub unsafe extern "C" fn GlitchTask_Destroy(task: *mut c_void) -> bool {
     let task = task as *mut GlitchTask;
     if task.is_null() {
-        return;
+        return false;
     }
     let debug_tasks = std::env::var_os("GLITCH_DEBUG_TASKS").is_some();
     let refs_ptr = std::ptr::addr_of_mut!((*task).refs).cast::<AtomicI64>();
@@ -573,19 +575,21 @@ pub unsafe extern "C" fn GlitchTask_Destroy(task: *mut c_void) {
         );
     }
     if old_refs != 1 {
-        return;
+        return false;
     }
     task_wait(task);
-    if !(*task).exception.is_null() {
-        let exception = (*task).exception;
-        (*task).exception = std::ptr::null_mut();
+    let exception_ptr = std::ptr::addr_of_mut!((*task).exception).cast::<AtomicPtr<c_char>>();
+    let exception = (*exception_ptr).swap(std::ptr::null_mut(), Ordering::SeqCst);
+    if !exception.is_null() {
         if debug_tasks {
             eprintln!("GlitchTask_Destroy releasing exception task={:p} exception={:p}", task, exception);
         }
         release_glitch_string(exception);
     }
-    if !(*task).payload.is_null() {
-        let payload = (*task).payload as *mut GlitchTaskPayload;
+    let payload_ptr = std::ptr::addr_of_mut!((*task).payload).cast::<AtomicPtr<c_void>>();
+    let payload = (*payload_ptr).swap(std::ptr::null_mut(), Ordering::SeqCst);
+    if !payload.is_null() {
+        let payload = payload as *mut GlitchTaskPayload;
         let count = (*payload).count;
         let tasks = (*payload).tasks;
         if debug_tasks {
@@ -604,7 +608,6 @@ pub unsafe extern "C" fn GlitchTask_Destroy(task: *mut c_void) {
         GlitchLiveAllocations_Add(-1);
         free(payload.cast::<c_void>());
         GlitchLiveAllocations_Add(-1);
-        (*task).payload = std::ptr::null_mut();
         if debug_tasks {
             eprintln!("GlitchTask_Destroy payload freed task={:p}", task);
         }
@@ -614,6 +617,7 @@ pub unsafe extern "C" fn GlitchTask_Destroy(task: *mut c_void) {
     }
     free(task.cast::<c_void>());
     GlitchLiveAllocations_Add(-1);
+    true
 }
 
 #[no_mangle]
@@ -632,7 +636,8 @@ pub unsafe extern "C" fn GlitchTask_SetPayload(task: *mut c_void, payload: *mut 
     if task.is_null() {
         return;
     }
-    (*task).payload = payload;
+    let payload_ptr = std::ptr::addr_of_mut!((*task).payload).cast::<AtomicPtr<c_void>>();
+    (*payload_ptr).store(payload, Ordering::SeqCst);
 }
 
 type RequestHandler =
@@ -1213,15 +1218,7 @@ pub unsafe extern "C" fn System_IO_File_ReadAllText(path: *const c_char) -> *mut
         Ok(s) => s,
         Err(_) => String::new(),
     };
-    let bytes = content.as_bytes();
-    let len = bytes.len();
-    let ptr = malloc(len + 1) as *mut c_char;
-    if ptr.is_null() {
-        return std::ptr::null_mut();
-    }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, ptr, len);
-    *ptr.add(len) = 0;
-    ptr
+    allocate_glitch_string_from_str(&content)
 }
 
 #[no_mangle]

@@ -57,10 +57,15 @@ impl LlvmEmitter {
                             ptr,
                             ty: LlType::Ptr,
                             ir_ty: IrType::Exception,
-                            drop_kind: DropKind::BorrowOnly,
+                            drop_kind: DropKind::DropException,
                         },
                     );
+                    self.drop_order.push(name.to_string());
                 }
+            } else {
+                self.body.push_str(&format!(
+                    "  call void @glitch_string_release(ptr {exception})\n"
+                ));
             }
             self.exception_handler = Some(if has_finally {
                 finally_label.clone()
@@ -68,6 +73,16 @@ impl LlvmEmitter {
                 propagate_target.clone()
             });
             self.emit_typed_stmts(catch_body)?;
+            if let Some(name) = catch_name {
+                if let Some(var) = self.vars.remove(name) {
+                    if let Some(pos) = self.drop_order.iter().position(|x| x == name) {
+                        self.drop_order.remove(pos);
+                    }
+                    if !self.terminated {
+                        self.emit_var_drop(&var);
+                    }
+                }
+            }
             if !self.terminated {
                 let target = if has_finally {
                     &finally_label

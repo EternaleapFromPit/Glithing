@@ -199,7 +199,8 @@ impl LlvmEmitter {
             }
             TypedStmtKind::Print(expr) => {
                 let value = self.emit_typed_expr(expr)?;
-                self.emit_print(value);
+                self.emit_print(value.clone());
+                self.emit_temporary_drop(expr, &value);
             }
             TypedStmtKind::Return(Some(expr)) => {
                 let value = self.emit_typed_expr(expr)?;

@@ -169,30 +169,13 @@ pub(super) fn emit_task_when_all_inline(
                 "  {} = call ptr @glitch_task_when_all_array(ptr {})\n",
                 task_ptr, tasks_val.value
             ));
-            if let Some(var) = match &tasks.kind {
-                TypedExprKind::Var(name) | TypedExprKind::Move(name) => {
-                    emitter.vars.get(name).cloned()
-                }
-                _ => None,
-            } {
-                if matches!(var.ir_ty, IrType::Array(_))
-                    && !matches!(var.drop_kind, DropKind::BorrowOnly | DropKind::ViewOnly)
-                {
-                    if let IrType::Array(element) = &var.ir_ty {
-                        emitter.emit_array_drop_value(&tasks_val.value, element);
-                    }
-                    emitter.body.push_str(&format!(
-                        "  store {} {}, ptr {}\n",
-                        var.ty.as_ir(),
-                        var.ty.default_value(),
-                        var.ptr
-                    ));
-                } else {
-                    emitter.emit_temporary_drop(tasks, &tasks_val);
-                }
-            } else {
-                emitter.emit_temporary_drop(tasks, &tasks_val);
-            }
+            let array_data_ptr = emitter.tmp();
+            let array_data = emitter.tmp();
+            emitter.body.push_str(&format!(
+                "  {array_data_ptr} = getelementptr inbounds %glitch.array, ptr {}, i32 0, i32 1\n  {array_data} = load ptr, ptr {array_data_ptr}\n  call void @glitch_free(ptr {array_data})\n  call void @glitch_free(ptr {})\n",
+                tasks_val.value,
+                tasks_val.value
+            ));
             Ok(LlValue {
                 value: task_ptr,
                 ty: LlType::Ptr,

@@ -1,7 +1,6 @@
 use super::*;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn free_tcp_port() -> u16 {
@@ -887,12 +886,11 @@ fn runs_async_when_all_string_payloads_natively() {
             }
 
             async Task<string> MergeAsync() {
-                List<Task<string>> tasks = new List<Task<string>>();
-                tasks.Add(Task.Run(First));
-                tasks.Add(Task.Run(Second));
-                await Task.WhenAll(tasks.ToArray());
+                var tasks = new[] { Task.Run(First), Task.Run(Second) };
+                await Task.WhenAll(tasks);
                 return tasks[0].Result + " " + tasks[1].Result;
             }
+
 
             fn main() {
                 Task<string> value = MergeAsync();
@@ -1259,6 +1257,53 @@ fn builder_build_preserves_service_provider_for_controller_routes() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("hello from builder"));
+}
+
+#[test]
+fn array_of_ints_primitive() {
+    let source = r#"
+        int sum = 0;
+        foreach (int v in new[] {1, 2, 3}) {
+            sum = sum + v;
+        }
+        print(sum);
+    "#;
+    let output_exe = emit_native_executable_from_source("array-ints", source);
+    let output = run_native_executable(&output_exe);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("6"));
+}
+#[test]
+fn array_of_bools_primitive() {
+    let source = r#"
+        bool all = true;
+        foreach (bool v in new[] {true, false, true}) {
+            all = all && v;
+        }
+        print(all);
+    "#;
+    let output_exe = emit_native_executable_from_source("array-bools", source);
+    let output = run_native_executable(&output_exe);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("false"));
+}
+
+#[test]
+fn array_of_strings_primitive() {
+    let source = r#"
+        string concat = "";
+        foreach (string s in new[] {"a", "b", "c"}) {
+            concat = concat + s;
+        }
+        print(concat);
+    "#;
+    let output_exe = emit_native_executable_from_source("array-strings", source);
+    let output = run_native_executable(&output_exe);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("abc"));
 }
 
 

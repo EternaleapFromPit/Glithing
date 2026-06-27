@@ -251,6 +251,19 @@ pub(super) fn resolve_method_call(
                 CallResolution::StaticFunction,
             ))
         }
+        (IrType::Unknown(target) | IrType::Class(target), "WhenAll")
+            if target == "Task"
+                || target == "ValueTask"
+                || target == "System.Threading.Tasks.Task"
+                || target == "System.Threading.Tasks.ValueTask" =>
+        {
+            Ok((
+                IrType::Task(Box::new(IrType::Void)),
+                Ownership::Owned,
+                name.to_string(),
+                CallResolution::StaticFunction,
+            ))
+        }
         (IrType::Unknown(target) | IrType::Class(target), "ReadAllText")
             if target == "File" || target == "System.IO.File" =>
         {
@@ -291,10 +304,10 @@ pub(super) fn resolve_method_call(
                 CallResolution::StaticFunction,
             ))
         }
-        (IrType::List(_), method_name) => {
+        (IrType::List(element), method_name) => {
             let collection_resolution = match method_name {
                 "ToArray" => Some((
-                    IrType::Unknown("ToArray".to_string()),
+                    IrType::Array(element.clone()),
                     Ownership::Owned,
                     name.to_string(),
                     CallResolution::CollectionMethod,

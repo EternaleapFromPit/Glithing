@@ -38,7 +38,7 @@ pub(super) fn finish_module(emitter: &LlvmEmitter) -> Result<String, String> {
         out.push_str("declare i1 @GlitchTask_IsCompletedSuccessfully(ptr)\n");
         out.push_str("declare i1 @GlitchTask_IsFaulted(ptr)\n");
         out.push_str("declare ptr @GlitchTask_GetException(ptr)\n");
-        out.push_str("declare void @GlitchTask_Destroy(ptr)\n");
+        out.push_str("declare i1 @GlitchTask_Destroy(ptr)\n");
         out.push_str("declare i32 @GlitchRestHost_read_env_int(ptr, i32)\n");
         out.push_str("declare ptr @GlitchString_Lock()\n");
         out.push_str("declare void @GlitchString_Unlock(ptr)\n");
@@ -181,12 +181,12 @@ done:\n  ret void\n}\n",
               %has_exception = icmp ne ptr %exception, null\n\
               br i1 %has_exception, label %exception_case, label %value_case\n\
             exception_case:\n\
-              store ptr %exception, ptr @glitch_exception_pending\n\
-              store ptr null, ptr %exception_ptr\n\
+              %exchanged_exception = atomicrmw xchg ptr %exception_ptr, ptr null seq_cst\n\
+              store ptr %exchanged_exception, ptr @glitch_exception_pending\n\
               ret ptr null\n\
             value_case:\n\
               %result_ptr = getelementptr inbounds %glitch.task, ptr %task, i32 0, i32 2\n\
-              %result = load ptr, ptr %result_ptr\n\
+              %result = atomicrmw xchg ptr %result_ptr, ptr null seq_cst\n\
               ret ptr %result\n\
             }\n\
             define i32 @glitch_task_get_result_i32(ptr %task) {\n\
@@ -290,8 +290,6 @@ done:\n  ret void\n}\n",
             }\n\
             define ptr @glitch_task_when_all2(ptr %left, ptr %right) {\n\
             entry:\n\
-              call void @GlitchTask_Retain(ptr %left)\n\
-              call void @GlitchTask_Retain(ptr %right)\n\
               call void @glitch_task_wait(ptr %left)\n\
               call void @glitch_task_wait(ptr %right)\n\
               %payload = call ptr @glitch_calloc(i64 1, i64 16)\n\
@@ -301,8 +299,10 @@ done:\n  ret void\n}\n",
               %payload_tasks_ptr = getelementptr inbounds %glitch.task_payload, ptr %payload, i32 0, i32 1\n\
               store ptr %payload_tasks, ptr %payload_tasks_ptr\n\
               %left_slot = getelementptr inbounds ptr, ptr %payload_tasks, i64 0\n\
+              call void @GlitchTask_Retain(ptr %left)\n\
               store ptr %left, ptr %left_slot\n\
               %right_slot = getelementptr inbounds ptr, ptr %payload_tasks, i64 1\n\
+              call void @GlitchTask_Retain(ptr %right)\n\
               store ptr %right, ptr %right_slot\n\
               %left_faulted = call i1 @GlitchTask_IsFaulted(ptr %left)\n\
               br i1 %left_faulted, label %left_fault, label %check_right\n\
@@ -361,7 +361,6 @@ done:\n  ret void\n}\n",
             body:\n\
               %slot = getelementptr inbounds ptr, ptr %data, i64 %index\n\
               %item = load ptr, ptr %slot\n\
-              call void @GlitchTask_Retain(ptr %item)\n\
               %payload_slot = getelementptr inbounds ptr, ptr %payload_tasks, i64 %index\n\
               store ptr %item, ptr %payload_slot\n\
               call void @glitch_task_wait(ptr %item)\n\

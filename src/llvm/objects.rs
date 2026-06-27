@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use super::helpers::*;
 
 impl LlvmEmitter {
@@ -379,10 +379,14 @@ impl LlvmEmitter {
             TypedExprKind::Var(_)
                 | TypedExprKind::Move(_)
                 | TypedExprKind::Borrow { .. }
-                | TypedExprKind::Field { .. }
                 | TypedExprKind::Index { .. }
         ) {
             return;
+        }
+        if let TypedExprKind::Field { target, name } = &expr.kind {
+            if !(matches!(target.ty, IrType::Task(_)) && name == "Result") {
+                return;
+            }
         }
         if matches!(expr.kind, TypedExprKind::FunctionSymbol(_)) {
             self.body.push_str(&format!(
@@ -458,101 +462,69 @@ impl LlvmEmitter {
     }
 
     pub(super) fn emit_var_drop(&mut self, var: &LlVar) {
-        if matches!(var.drop_kind, DropKind::Free) && matches!(var.ir_ty, IrType::String) {
-            let value = self.tmp();
-            self.body
-                .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
-            self.body.push_str(&format!(
-                "  call void @glitch_string_release(ptr {value})\n"
-            ));
+        let needs_drop = (matches!(var.drop_kind, DropKind::Free) && matches!(var.ir_ty, IrType::String))
+            || (matches!(var.ir_ty, IrType::Array(_)) && !matches!(var.drop_kind, DropKind::BorrowOnly | DropKind::ViewOnly))
+            || matches!(var.drop_kind, DropKind::DropCollection)
+            || matches!(var.ir_ty, IrType::Nullable(_))
+            || matches!(var.drop_kind, DropKind::DropDelegate)
+            || matches!(var.drop_kind, DropKind::DropException)
+            || matches!(var.drop_kind, DropKind::DropTask)
+            || matches!(&var.ir_ty, IrType::Unknown(name) if name == "object")
+            || matches!(var.drop_kind, DropKind::DropClass | DropKind::DropStruct);
+
+        if !needs_drop {
             return;
         }
-        if matches!(var.ir_ty, IrType::Array(_))
-            && !matches!(var.drop_kind, DropKind::BorrowOnly | DropKind::ViewOnly)
-        {
-            let value = self.tmp();
-            self.body
-                .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
-            if let IrType::Array(element) = &var.ir_ty {
+
+        let value = self.tmp();
+        self.body.push_str(&format!(
+            "  {value} = load ptr, ptr {}\n  store ptr null, ptr {}\n",
+            var.ptr, var.ptr
+        ));
+
+        match &var.ir_ty {
+            IrType::String | IrType::Exception => {
+                self.body.push_str(&format!(
+                    "  call void @glitch_string_release(ptr {value})\n"
+                ));
+            }
+            IrType::Function { .. } => {
+                self.body.push_str(&format!(
+                    "  call void @glitch_delegate_release(ptr {value})\n"
+                ));
+            }
+            IrType::Array(element) => {
                 self.emit_array_drop_value(&value, element);
             }
-            return;
-        }
-        if matches!(var.drop_kind, DropKind::DropCollection) {
-            let value = self.tmp();
-            self.body
-                .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
-            self.emit_collection_drop_value(&var.ir_ty, &value);
-            return;
-        }
-        if let IrType::Nullable(inner) = &var.ir_ty {
-            let value = self.tmp();
-            self.body
-                .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
-            let type_name = LlvmEmitter::nullable_type_name(inner);
-            if self.object_types.contains_key(&type_name) {
-                self.emit_drop(&type_name, &value);
+            IrType::List(_) | IrType::Dictionary(_, _) => {
+                self.emit_collection_drop_value(&var.ir_ty, &value);
             }
-            return;
-        }
-        if matches!(var.drop_kind, DropKind::DropDelegate) {
-            let value = self.tmp();
-            self.body
-                .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
-            self.body.push_str(&format!(
-                "  call void @glitch_delegate_release(ptr {value})\n"
-            ));
-            return;
-        }
-        if matches!(var.drop_kind, DropKind::DropException) {
-            let value = self.tmp();
-            self.body
-                .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
-            self.body.push_str(&format!(
-                "  call void @glitch_string_release(ptr {value})\n"
-            ));
-            return;
-        }
-        if matches!(var.drop_kind, DropKind::DropTask) {
-            let value = self.tmp();
-            self.body
-                .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
-            if let IrType::Task(inner) = &var.ir_ty {
+            IrType::Task(inner) => {
                 self.emit_task_drop_value(&value, inner);
             }
-            return;
-        }
-        if matches!(&var.ir_ty, IrType::Unknown(name) if name == "object") {
-            let value = self.tmp();
-            self.body
-                .push_str(&format!("  {value} = load ptr, ptr {}\n  call void @glitch_box_release(ptr {value})\n", var.ptr));
-            return;
-        }
-        if !matches!(var.drop_kind, DropKind::DropClass | DropKind::DropStruct) {
-            return;
-        }
-        let Some(type_name) = object_type_name(&var.ir_ty) else {
-            if matches!(var.ir_ty, IrType::Class(_) | IrType::Interface(_)) {
-                let value = self.tmp();
-                self.body
-                    .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
-                self.emit_dynamic_object_drop(&value);
+            IrType::Unknown(name) if name == "object" => {
+                self.body.push_str(&format!(
+                    "  call void @glitch_box_release(ptr {value})\n"
+                ));
             }
-            return;
-        };
-        if !self.object_types.contains_key(type_name) {
-            if matches!(var.ir_ty, IrType::Class(_) | IrType::Interface(_)) {
-                let value = self.tmp();
-                self.body
-                    .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
-                self.emit_dynamic_object_drop(&value);
+            IrType::Nullable(inner) => {
+                let type_name = LlvmEmitter::nullable_type_name(inner);
+                if self.object_types.contains_key(&type_name) {
+                    self.emit_drop(&type_name, &value);
+                }
             }
-            return;
+            _ => {
+                if let Some(type_name) = object_type_name(&var.ir_ty) {
+                    if self.object_types.contains_key(type_name) {
+                        self.emit_drop(type_name, &value);
+                    } else if matches!(var.ir_ty, IrType::Class(_) | IrType::Interface(_)) {
+                        self.emit_dynamic_object_drop(&value);
+                    }
+                } else if matches!(var.ir_ty, IrType::Class(_) | IrType::Interface(_)) {
+                    self.emit_dynamic_object_drop(&value);
+                }
+            }
         }
-        let value = self.tmp();
-        self.body
-            .push_str(&format!("  {value} = load ptr, ptr {}\n", var.ptr));
-        self.emit_drop(type_name, &value);
     }
 
     pub(super) fn emit_local_drops(&mut self, returned_local: Option<&str>) {
@@ -630,11 +602,14 @@ impl LlvmEmitter {
         ));
     }
 
-    fn emit_owned_payload_drop_value(&mut self, ty: &IrType, value: &str) {
+    pub(super) fn emit_owned_payload_drop_value(&mut self, ty: &IrType, value: &str) {
         match ty {
             IrType::Nullable(inner) => self.emit_owned_payload_drop_value(inner, value),
-            IrType::String => self.body.push_str(&format!(
+            IrType::String | IrType::Exception => self.body.push_str(&format!(
                 "  call void @glitch_string_release(ptr {value})\n"
+            )),
+            IrType::Function { .. } => self.body.push_str(&format!(
+                "  call void @glitch_delegate_release(ptr {value})\n"
             )),
             IrType::Array(element) => self.emit_array_drop_value(value, element),
             IrType::List(_) | IrType::Dictionary(_, _) => {
@@ -695,15 +670,17 @@ impl LlvmEmitter {
     pub(super) fn emit_task_drop_value(&mut self, task_value: &str, inner: &IrType) {
         let is_null = self.tmp();
         let release_label = self.next_label("task_release");
+        let drop_payload_label = self.next_label("task_drop_payload");
         let done_label = self.next_label("task_release_done");
         let result_ptr = self.tmp();
         let result = self.tmp();
+        let destroyed = self.tmp();
         self.body.push_str(&format!(
-            "  {is_null} = icmp eq ptr {task_value}, null\n  br i1 {is_null}, label %{done_label}, label %{release_label}\n{release_label}:\n  call void @glitch_task_wait(ptr {task_value})\n  {result_ptr} = getelementptr inbounds %glitch.task, ptr {task_value}, i32 0, i32 2\n  {result} = load ptr, ptr {result_ptr}\n"
+            "  {is_null} = icmp eq ptr {task_value}, null\n  br i1 {is_null}, label %{done_label}, label %{release_label}\n{release_label}:\n  call void @glitch_task_wait(ptr {task_value})\n  {result_ptr} = getelementptr inbounds %glitch.task, ptr {task_value}, i32 0, i32 2\n  {result} = load ptr, ptr {result_ptr}\n  {destroyed} = call i1 @GlitchTask_Destroy(ptr {task_value})\n  br i1 {destroyed}, label %{drop_payload_label}, label %{done_label}\n{drop_payload_label}:\n"
         ));
         self.emit_owned_payload_drop_value(inner, &result);
         self.body.push_str(&format!(
-            "  call void @GlitchTask_Destroy(ptr {task_value})\n  br label %{done_label}\n{done_label}:\n"
+            "  br label %{done_label}\n{done_label}:\n"
         ));
     }
 

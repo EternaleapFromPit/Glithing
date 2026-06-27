@@ -385,14 +385,8 @@ impl LlvmEmitter {
                                 helper_name,
                                 task_val.value
                             ));
+                            self.emit_temporary_drop(target, &task_val);
                             self.emit_exception_check();
-                            self.retain_task_payload(
-                                &result_ty,
-                                &LlValue {
-                                    value: call_res.clone(),
-                                    ty: result_llvm_type.clone(),
-                                },
-                            );
                             return Ok(LlValue {
                                 value: call_res,
                                 ty: result_llvm_type,
@@ -406,6 +400,7 @@ impl LlvmEmitter {
                             "  {} = call ptr @glitch_task_get_exception(ptr {})\n",
                             exception, task_val.value
                         ));
+                        self.emit_temporary_drop(target, &task_val);
                         return Ok(LlValue {
                             value: exception,
                             ty: LlType::Ptr,
@@ -426,6 +421,7 @@ impl LlvmEmitter {
                             "  {} = call i1 @{}(ptr {})\n",
                             completed, helper_name, task_val.value
                         ));
+                        self.emit_temporary_drop(target, &task_val);
                         return Ok(LlValue {
                             value: completed,
                             ty: LlType::I1,
@@ -1340,6 +1336,7 @@ impl LlvmEmitter {
                 let result_llvm_type = llvm_ir_type(&result_ty);
                 if matches!(result_ty, IrType::Void) {
                     self.emit_temporary_drop(inner, &task_val);
+                    self.emit_exception_check();
                     Ok(void_value())
                 } else {
                     let call_res = self.tmp();
@@ -1362,20 +1359,12 @@ impl LlvmEmitter {
                         helper_name,
                         task_val.value
                     ));
+                    self.emit_temporary_drop(inner, &task_val);
                     self.emit_exception_check();
-                    self.retain_task_payload(
-                        &result_ty,
-                        &LlValue {
-                            value: call_res.clone(),
-                            ty: result_llvm_type.clone(),
-                        },
-                    );
-                    let value = LlValue {
+                    Ok(LlValue {
                         value: call_res,
                         ty: result_llvm_type,
-                    };
-                    self.emit_temporary_drop(inner, &task_val);
-                    Ok(value)
+                    })
                 }
             }
             TypedExprKind::FunctionSymbol(name) => {

@@ -228,7 +228,6 @@ impl LlvmEmitter {
                     helper_name,
                     task_val.value
                 ));
-                self.emit_exception_check();
                 if is_string_like_type(&result_ty) {
                     self.body.push_str(&format!(
                         "  call void @glitch_string_retain(ptr {})\n",
@@ -239,6 +238,8 @@ impl LlvmEmitter {
                         self.emit_retain(type_name, &call_res);
                     }
                 }
+                self.emit_temporary_drop(target, &task_val);
+                self.emit_exception_check();
                 self.emit_task_from_result_value(
                     &result_ty,
                     LlValue {
@@ -282,6 +283,7 @@ impl LlvmEmitter {
                             self.emit_retain(type_name, &call_res);
                         }
                     }
+                    self.emit_temporary_drop(target, &task_val);
                     Ok(LlValue {
                         value: call_res,
                         ty: result_llvm_type,
