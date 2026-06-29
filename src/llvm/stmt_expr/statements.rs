@@ -30,8 +30,12 @@ impl LlvmEmitter {
                 self.retain_for_store(&binding.ty, expr, &stored.value);
                 self.move_raw_owned_source_after_store(&binding.ty, expr);
                 let var = self.vars.get(&binding.name).cloned();
+                let skip_drop = self.async_state_pc_ptr.is_some()
+                    && self.async_uninitialized_locals.contains(&binding.name);
                 if let Some(var) = &var {
-                    self.emit_var_drop(var);
+                    if !skip_drop {
+                        self.emit_var_drop(var);
+                    }
                 }
                 let ptr = var.map(|var| var.ptr).unwrap_or_else(|| self.tmp());
                 if !self.vars.contains_key(&binding.name) {
@@ -58,6 +62,9 @@ impl LlvmEmitter {
                         },
                     );
                     self.drop_order.push(binding.name.clone());
+                }
+                if self.async_state_pc_ptr.is_some() {
+                    self.async_uninitialized_locals.remove(&binding.name);
                 }
                 if let Some(collection_key) = self.is_build_service_provider_call(expr) {
                     self.propagate_service_provider_registrations(
@@ -205,7 +212,9 @@ impl LlvmEmitter {
             TypedStmtKind::Return(Some(expr)) => {
                 let value = self.emit_typed_expr(expr)?;
                 if self.current_return == LlType::Void {
-                    self.emit_local_drops(expr_source_name(expr));
+                    if self.async_state_pc_ptr.is_none() {
+                        self.emit_local_drops(expr_source_name(expr));
+                    }
                     self.body.push_str("  ret void\n");
                     self.terminated = true;
                     return Ok(());
@@ -232,7 +241,9 @@ impl LlvmEmitter {
                         value.value
                     ));
                 }
-                self.emit_local_drops(expr_source_name(expr));
+                if self.async_state_pc_ptr.is_none() {
+                    self.emit_local_drops(expr_source_name(expr));
+                }
                 self.body.push_str(&format!(
                     "  ret {} {}\n",
                     self.current_return.as_ir(),
@@ -241,7 +252,6 @@ impl LlvmEmitter {
                 self.terminated = true;
             }
             TypedStmtKind::Return(None) => {
-                self.emit_local_drops(None);
                 self.emit_default_return();
                 self.terminated = true;
             }

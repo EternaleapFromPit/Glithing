@@ -192,6 +192,11 @@ fn is_null_literal_expr(expr: &TypedExpr) -> bool {
 }
 
 fn should_drop_argument_after_call(expr: &TypedExpr) -> bool {
+    if let TypedExprKind::Field { target, name } = &expr.kind {
+        if matches!(target.ty, IrType::Task(_)) && matches!(name.as_str(), "Result" | "Exception") {
+            return true;
+        }
+    }
     matches!(
         expr.kind,
         TypedExprKind::FunctionSymbol(_)
@@ -263,6 +268,7 @@ pub(crate) struct LlvmEmitter {
     loop_targets: Vec<(String, String)>,
     async_state_pc_ptr: Option<String>,
     async_suspend_index: usize,
+    async_uninitialized_locals: HashSet<String>,
     entry_insert_pos: Option<usize>,
     terminated: bool,
     startup: Option<TypedStartup>,
@@ -304,6 +310,7 @@ impl LlvmEmitter {
             loop_targets: Vec::new(),
             async_state_pc_ptr: None,
             async_suspend_index: 0,
+            async_uninitialized_locals: HashSet::new(),
             entry_insert_pos: None,
             terminated: false,
             startup: program.startup.clone(),
@@ -1090,6 +1097,7 @@ impl LlvmEmitter {
             loop_targets: Vec::new(),
             async_state_pc_ptr: None,
             async_suspend_index: 0,
+            async_uninitialized_locals: HashSet::new(),
             entry_insert_pos: None,
             terminated: false,
             startup: None,
@@ -1262,13 +1270,11 @@ impl LlvmEmitter {
         }
         self.emit_typed_stmts(&function.body)?;
         if !self.terminated {
-            self.emit_local_drops(None);
             self.emit_default_return();
         }
         self.body
             .push_str(&format!("{}:\n", self.current_unwind_label));
         self.terminated = false;
-        self.emit_local_drops(None);
         self.emit_default_return();
         let resume_label_count = self.async_suspend_index.max(2);
         for index in 1..=resume_label_count {
@@ -1326,6 +1332,7 @@ impl LlvmEmitter {
         self.current_unwind_label = "exception_unwind".to_string();
         self.async_state_pc_ptr = None;
         self.async_suspend_index = 0;
+        self.async_uninitialized_locals.clear();
         self.current_is_main = false;
         self.current_return = LlType::Ptr;
 
@@ -1452,6 +1459,7 @@ impl LlvmEmitter {
         let saved_terminated = self.terminated;
         let saved_async_pc_ptr = self.async_state_pc_ptr.clone();
         let saved_async_suspend_index = self.async_suspend_index;
+        let saved_async_uninitialized_locals = self.async_uninitialized_locals.clone();
         let saved_body = std::mem::take(&mut self.body);
 
         self.vars.clear();
@@ -1478,6 +1486,7 @@ impl LlvmEmitter {
             "  {pc_ptr} = getelementptr inbounds %{state_type}, ptr %env, i32 0, i32 0\n  {pc} = load i32, ptr {pc_ptr}\n  ;{dispatch_marker}\nasync_resume_0:\n"
         ));
         self.async_state_pc_ptr = Some(pc_ptr);
+        self.async_uninitialized_locals.clear();
 
         let param_start = if self.current_return == LlType::Void { 1 } else { 2 };
         let mut state_setup = String::new();
@@ -1519,6 +1528,7 @@ impl LlvmEmitter {
                 },
             );
             self.drop_order.push(local.name.clone());
+            self.async_uninitialized_locals.insert(local.name.clone());
         }
         if let Some(insert_pos) = self.entry_insert_pos {
             self.body.insert_str(insert_pos, &state_setup);
@@ -1526,13 +1536,11 @@ impl LlvmEmitter {
 
         self.emit_typed_stmts(&function.body)?;
         if !self.terminated {
-            self.emit_local_drops(None);
             self.emit_default_return();
         }
         self.body
             .push_str(&format!("{}:\n", self.current_unwind_label));
         self.terminated = false;
-        self.emit_local_drops(None);
         self.emit_default_return();
         let resume_label_count = self.async_suspend_index.max(2);
         for index in 1..=resume_label_count {
@@ -1570,6 +1578,7 @@ impl LlvmEmitter {
         self.terminated = saved_terminated;
         self.async_state_pc_ptr = saved_async_pc_ptr;
         self.async_suspend_index = saved_async_suspend_index;
+        self.async_uninitialized_locals = saved_async_uninitialized_locals;
         self.entry_insert_pos = None;
         Ok(())
     }
@@ -2012,6 +2021,7 @@ impl LlvmEmitter {
     }
 
     fn emit_default_return(&mut self) {
+        self.emit_local_drops(None);
         if self.current_is_main {
             let live = self.tmp();
             let leaked = self.tmp();

@@ -360,24 +360,20 @@ impl LlvmEmitter {
                 if let TypedExprKind::Field { target, name } = &expr.kind {
                     if name == "Result" && matches!(target.ty, IrType::Task(_)) {
                         let task_val = self.emit_typed_expr(target)?;
+                        let needs_task_retain = should_drop_argument_after_call(target);
+                        if needs_task_retain {
+                            self.body.push_str(&format!(
+                                "  call void @GlitchTask_Retain(ptr {})\n",
+                                task_val.value
+                            ));
+                        }
                         let result_ty = expr.ty.clone();
                         let result_llvm_type = llvm_ir_type(&result_ty);
                         if matches!(result_ty, IrType::Void) {
                             return Ok(void_value());
                         } else {
                             let call_res = self.tmp();
-                            let helper_name = if llvm_ir_type(&result_ty) == LlType::I1
-                                || is_bool_like_type(&result_ty)
-                            {
-                                "glitch_task_get_result_bool"
-                            } else {
-                                match &result_ty {
-                                    IrType::Int | IrType::UInt => "glitch_task_get_result_i32",
-                                    IrType::Long => "glitch_task_get_result_i64",
-                                    IrType::Double | IrType::Decimal => "glitch_task_get_result_double",
-                                    _ => "glitch_task_get_result_ptr",
-                                }
-                            };
+                        let helper_name = task_result_getter_name(&result_ty);
                             self.body.push_str(&format!(
                                 "  {} = call {} @{}(ptr {})\n",
                                 call_res,
@@ -385,7 +381,14 @@ impl LlvmEmitter {
                                 helper_name,
                                 task_val.value
                             ));
-                            self.emit_temporary_drop(target, &task_val);
+                            if needs_task_retain {
+                                self.body.push_str(&format!(
+                                    "  call i1 @GlitchTask_Destroy(ptr {})\n",
+                                    task_val.value
+                                ));
+                            } else {
+                                self.emit_temporary_drop(target, &task_val);
+                            }
                             self.emit_exception_check();
                             return Ok(LlValue {
                                 value: call_res,
@@ -395,12 +398,26 @@ impl LlvmEmitter {
                     }
                     if name == "Exception" && matches!(target.ty, IrType::Task(_)) {
                         let task_val = self.emit_typed_expr(target)?;
+                        let needs_task_retain = should_drop_argument_after_call(target);
+                        if needs_task_retain {
+                            self.body.push_str(&format!(
+                                "  call void @GlitchTask_Retain(ptr {})\n",
+                                task_val.value
+                            ));
+                        }
                         let exception = self.tmp();
                         self.body.push_str(&format!(
                             "  {} = call ptr @glitch_task_get_exception(ptr {})\n",
                             exception, task_val.value
                         ));
-                        self.emit_temporary_drop(target, &task_val);
+                        if needs_task_retain {
+                            self.body.push_str(&format!(
+                                "  call i1 @GlitchTask_Destroy(ptr {})\n",
+                                task_val.value
+                            ));
+                        } else {
+                            self.emit_temporary_drop(target, &task_val);
+                        }
                         return Ok(LlValue {
                             value: exception,
                             ty: LlType::Ptr,
@@ -1337,21 +1354,11 @@ impl LlvmEmitter {
                 if matches!(result_ty, IrType::Void) {
                     self.emit_temporary_drop(inner, &task_val);
                     self.emit_exception_check();
+                    self.terminated = false;
                     Ok(void_value())
                 } else {
                     let call_res = self.tmp();
-                    let helper_name = if llvm_ir_type(&result_ty) == LlType::I1
-                        || is_bool_like_type(&result_ty)
-                    {
-                        "glitch_task_get_result_bool"
-                    } else {
-                        match &result_ty {
-                            IrType::Int | IrType::UInt => "glitch_task_get_result_i32",
-                            IrType::Long => "glitch_task_get_result_i64",
-                            IrType::Double | IrType::Decimal => "glitch_task_get_result_double",
-                            _ => "glitch_task_get_result_ptr",
-                        }
-                    };
+                    let helper_name = task_result_getter_name(&result_ty);
                     self.body.push_str(&format!(
                         "  {} = call {} @{}(ptr {})\n",
                         call_res,
@@ -1361,6 +1368,7 @@ impl LlvmEmitter {
                     ));
                     self.emit_temporary_drop(inner, &task_val);
                     self.emit_exception_check();
+                    self.terminated = false;
                     Ok(LlValue {
                         value: call_res,
                         ty: result_llvm_type,

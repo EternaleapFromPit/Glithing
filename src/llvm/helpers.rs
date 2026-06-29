@@ -127,4 +127,49 @@ pub(super) fn expr_source_name(expr: &TypedExpr) -> Option<&str> {
     }
 }
 
+pub(super) fn task_result_getter_name(result_ty: &IrType) -> &'static str {
+    if is_string_like_type(result_ty) {
+        "glitch_task_get_result_ptr"
+    } else if llvm_ir_type(result_ty) == LlType::I1 || is_bool_like_type(result_ty) {
+        "glitch_task_get_result_bool"
+    } else {
+        match result_ty {
+            IrType::Int | IrType::UInt => "glitch_task_get_result_i32",
+            IrType::Long => "glitch_task_get_result_i64",
+            IrType::Double | IrType::Decimal => "glitch_task_get_result_double",
+            _ => "glitch_task_get_result_ptr",
+        }
+    }
+}
+
+pub(super) fn task_from_result_helper_name(result_ty: &IrType) -> &'static str {
+    if is_string_like_type(result_ty) {
+        "glitch_task_from_result_ptr"
+    } else if llvm_ir_type(result_ty) == LlType::I1 || is_bool_like_type(result_ty) {
+        "glitch_task_from_result_bool"
+    } else {
+        match result_ty {
+            IrType::Int | IrType::UInt => "glitch_task_from_result_i32",
+            IrType::Long => "glitch_task_from_result_i64",
+            IrType::Double | IrType::Decimal => "glitch_task_from_result_double",
+            _ => "glitch_task_from_result_ptr",
+        }
+    }
+}
+
+pub(super) fn task_run_helper_name(result_ty: &IrType) -> &'static str {
+    if is_string_like_type(result_ty) {
+        "glitch_task_run_ptr"
+    } else if llvm_ir_type(result_ty) == LlType::I1 || is_bool_like_type(result_ty) {
+        "glitch_task_run_bool"
+    } else {
+        match result_ty {
+            IrType::Int | IrType::UInt => "glitch_task_run_i32",
+            IrType::Long => "glitch_task_run_i64",
+            IrType::Double | IrType::Decimal => "glitch_task_run_double",
+            _ => "glitch_task_run_ptr",
+        }
+    }
+}
+
 

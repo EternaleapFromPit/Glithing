@@ -872,11 +872,16 @@ impl OwnershipChecker {
                 }
             }
             Expr::ArrayLiteral(values) => {
+                let mut checked = Vec::with_capacity(values.len());
                 for value in values {
-                    Self::check_expr(value, env, state)?;
+                    checked.push(Self::check_expr(value, env, state)?);
                 }
+                let element_ty = checked
+                    .first()
+                    .map(|value| value.ty.clone())
+                    .unwrap_or(IrType::Long);
                 CheckedExpr {
-                    ty: IrType::Array(Box::new(IrType::Long)),
+                    ty: IrType::Array(Box::new(element_ty)),
                     ownership: Ownership::Owned,
                     source_var: None,
                     is_move: false,
@@ -887,14 +892,23 @@ impl OwnershipChecker {
                 length,
                 values,
             } => {
+                let mut checked_values = Vec::with_capacity(values.len());
                 if let Some(length) = length {
                     Self::check_expr(length, env, state)?;
                 }
                 for value in values {
-                    Self::check_expr(value, env, state)?;
+                    checked_values.push(Self::check_expr(value, env, state)?);
                 }
+                let inferred_element = if matches!(element_type, TypeSyntax::Named(name) if name == "var") {
+                    checked_values
+                        .first()
+                        .map(|value| value.ty.clone())
+                        .unwrap_or(IrType::Long)
+                } else {
+                    type_syntax_to_ir(element_type, env)
+                };
                 CheckedExpr {
-                    ty: IrType::Array(Box::new(type_syntax_to_ir(element_type, env))),
+                    ty: IrType::Array(Box::new(inferred_element)),
                     ownership: Ownership::Owned,
                     source_var: None,
                     is_move: false,
@@ -1049,7 +1063,13 @@ impl OwnershipChecker {
                         if target == "Task" =>
                     {
                         args.first()
-                            .map(|arg| IrType::Task(Box::new(arg.ty.clone())))
+                            .map(|arg| {
+                                let result_ty = match &arg.ty {
+                                    IrType::Function { return_type, .. } => return_type.as_ref().clone(),
+                                    _ => arg.ty.clone(),
+                                };
+                                IrType::Task(Box::new(result_ty))
+                            })
                             .unwrap_or_else(|| IrType::Task(Box::new(IrType::Void)))
                     }
                     _ => IrType::Unknown(name.clone()),

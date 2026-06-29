@@ -818,9 +818,13 @@ pub(super) fn lower_typed_expr_with_expected(
                 .iter()
                 .map(|value| lower_typed_expr(value, env, scopes))
                 .collect::<Result<Vec<_>, _>>()?;
+            let element_ty = values
+                .first()
+                .map(|value| value.ty.clone())
+                .unwrap_or(IrType::Long);
             typed_expr_with_ownership(
                 TypedExprKind::ArrayLiteral(values),
-                IrType::Array(Box::new(IrType::Long)),
+                IrType::Array(Box::new(element_ty)),
                 Ownership::Owned,
             )
         }
@@ -829,16 +833,23 @@ pub(super) fn lower_typed_expr_with_expected(
             length,
             values,
         } => {
-            let element_type = type_syntax_to_ir(element_type, env);
+            let values = values
+                .iter()
+                .map(|value| lower_typed_expr(value, env, scopes))
+                .collect::<Result<Vec<_>, _>>()?;
+            let element_type = if matches!(element_type, TypeSyntax::Named(name) if name == "var") {
+                values
+                    .first()
+                    .map(|value| value.ty.clone())
+                    .unwrap_or(IrType::Long)
+            } else {
+                type_syntax_to_ir(element_type, env)
+            };
             let length = length
                 .as_ref()
                 .map(|length| lower_typed_expr(length, env, scopes))
                 .transpose()?
                 .map(Box::new);
-            let values = values
-                .iter()
-                .map(|value| lower_typed_expr(value, env, scopes))
-                .collect::<Result<Vec<_>, _>>()?;
             typed_expr_with_ownership(
                 TypedExprKind::NewArray {
                     element_type: element_type.clone(),
@@ -1669,12 +1680,17 @@ pub(super) fn lower_expr(
             binding
         }
         Expr::ArrayLiteral(values) => {
+            let mut lowered = Vec::with_capacity(values.len());
             for value in values {
-                lower_expr(value, env, scopes)?;
+                lowered.push(lower_expr(value, env, scopes)?);
             }
+            let element_ty = lowered
+                .first()
+                .map(|value| value.ty.clone())
+                .unwrap_or(IrType::Long);
             TypedBinding {
                 name: "<expr>".to_string(),
-                ty: IrType::Array(Box::new(IrType::Long)),
+                ty: IrType::Array(Box::new(element_ty)),
                 ownership: Ownership::Owned,
             }
         }
@@ -1683,16 +1699,21 @@ pub(super) fn lower_expr(
             length,
             values,
         } => {
+            let mut lowered = Vec::with_capacity(values.len());
             if let Some(length) = length {
                 lower_expr(length, env, scopes)?;
             }
             for value in values {
-                lower_expr(value, env, scopes)?;
+                lowered.push(lower_expr(value, env, scopes)?);
             }
-            let element = type_syntax_to_ir(element_type, env);
+            let inferred_element = if matches!(element_type, TypeSyntax::Named(name) if name == "var") {
+                lowered.first().map(|value| value.ty.clone()).unwrap_or(IrType::Long)
+            } else {
+                type_syntax_to_ir(element_type, env)
+            };
             TypedBinding {
                 name: "<expr>".to_string(),
-                ty: IrType::Array(Box::new(element)),
+                ty: IrType::Array(Box::new(inferred_element)),
                 ownership: Ownership::Owned,
             }
         }
@@ -1824,7 +1845,13 @@ pub(super) fn lower_expr(
                 (_, "Add") | (_, "Clear") | (_, "Wait") => IrType::Void,
                 (IrType::Unknown(target) | IrType::Class(target), "Run") if target == "Task" => {
                     args.first()
-                        .map(|arg| IrType::Task(Box::new(arg.ty.clone())))
+                        .map(|arg| {
+                            let result_ty = match &arg.ty {
+                                IrType::Function { return_type, .. } => return_type.as_ref().clone(),
+                                _ => arg.ty.clone(),
+                            };
+                            IrType::Task(Box::new(result_ty))
+                        })
                         .unwrap_or_else(|| IrType::Task(Box::new(IrType::Void)))
                 }
                 (IrType::Unknown(target) | IrType::Class(target), "ReadAllText")

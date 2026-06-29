@@ -36,8 +36,9 @@ impl LlvmEmitter {
                     ));
                 }
                 let result = self.tmp();
+                let helper_name = task_result_getter_name(inner);
                 self.body.push_str(&format!(
-                    "  {result} = call ptr @glitch_task_get_result_ptr(ptr {value})\n"
+                    "  {result} = call ptr @{helper_name}(ptr {value})\n"
                 ));
                 match inner {
                     IrType::String => {

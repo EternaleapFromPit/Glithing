@@ -360,11 +360,30 @@ impl LlvmEmitter {
             "  {len_ptr} = getelementptr inbounds %glitch.list, ptr {list}, i32 0, i32 0\n  {cap_ptr} = getelementptr inbounds %glitch.list, ptr {list}, i32 0, i32 1\n  {data_ptr} = getelementptr inbounds %glitch.list, ptr {list}, i32 0, i32 2\n  {len} = load i64, ptr {len_ptr}\n  {cap} = load i64, ptr {cap_ptr}\n  {data} = load ptr, ptr {data_ptr}\n  {full} = icmp eq i64 {len}, {cap}\n  br i1 {full}, label %{grow}, label %{ready}\n{grow}:\n  {grown_cap} = mul i64 {cap}, 2\n  {bytes} = mul i64 {grown_cap}, {element_size}\n  {grown_data} = call ptr @glitch_realloc(ptr {data}, i64 {bytes})\n  store i64 {grown_cap}, ptr {cap_ptr}\n  store ptr {grown_data}, ptr {data_ptr}\n  br label %{ready}\n{ready}:\n  {current_data} = load ptr, ptr {data_ptr}\n  {slot} = getelementptr inbounds {}, ptr {current_data}, i64 {len}\n",
             llvm_ir_type(element).as_ir()
         ));
-        self.retain_for_store(element, source, value);
+        if should_drop_argument_after_call(source) {
+            self.retain_task_payload(
+                element,
+                &LlValue {
+                    value: value.to_string(),
+                    ty: llvm_ir_type(element),
+                },
+            );
+        } else {
+            self.retain_for_store(element, source, value);
+        }
         self.body.push_str(&format!(
             "  store {} {value}, ptr {slot}\n  {next_len} = add i64 {len}, 1\n  store i64 {next_len}, ptr {len_ptr}\n",
             llvm_ir_type(element).as_ir()
         ));
+        if should_drop_argument_after_call(source) {
+            self.emit_temporary_drop(
+                source,
+                &LlValue {
+                    value: value.to_string(),
+                    ty: llvm_ir_type(element),
+                },
+            );
+        }
         self.move_raw_owned_source_after_store(element, source);
     }
 
@@ -406,16 +425,54 @@ impl LlvmEmitter {
             llvm_ir_type(key_ty).as_ir(),
             llvm_ir_type(value_ty).as_ir()
         ));
-        self.retain_for_store(key_ty, key_source, key);
+        if should_drop_argument_after_call(key_source) {
+            self.retain_task_payload(
+                key_ty,
+                &LlValue {
+                    value: key.to_string(),
+                    ty: llvm_ir_type(key_ty),
+                },
+            );
+        } else {
+            self.retain_for_store(key_ty, key_source, key);
+        }
         self.body.push_str(&format!(
             "  store {} {key}, ptr {key_slot}\n",
             llvm_ir_type(key_ty).as_ir()
         ));
-        self.retain_for_store(value_ty, source, value);
+        if should_drop_argument_after_call(source) {
+            self.retain_task_payload(
+                value_ty,
+                &LlValue {
+                    value: value.to_string(),
+                    ty: llvm_ir_type(value_ty),
+                },
+            );
+        } else {
+            self.retain_for_store(value_ty, source, value);
+        }
         self.body.push_str(&format!(
             "  store {} {value}, ptr {value_slot}\n  {next_len} = add i64 {len}, 1\n  store i64 {next_len}, ptr {len_ptr}\n",
             llvm_ir_type(value_ty).as_ir()
         ));
+        if should_drop_argument_after_call(key_source) {
+            self.emit_temporary_drop(
+                key_source,
+                &LlValue {
+                    value: key.to_string(),
+                    ty: llvm_ir_type(key_ty),
+                },
+            );
+        }
+        if should_drop_argument_after_call(source) {
+            self.emit_temporary_drop(
+                source,
+                &LlValue {
+                    value: value.to_string(),
+                    ty: llvm_ir_type(value_ty),
+                },
+            );
+        }
         self.move_raw_owned_source_after_store(value_ty, source);
     }
 
@@ -503,7 +560,17 @@ impl LlvmEmitter {
             element_ty.as_ir(),
             element_ty.as_ir()
         ));
-        self.retain_for_store(element, &synthetic, &item);
+        if matches!(element, IrType::Task(_)) {
+            self.retain_task_payload(
+                element,
+                &LlValue {
+                    value: item.clone(),
+                    ty: element_ty.clone(),
+                },
+            );
+        } else {
+            self.retain_for_store(element, &synthetic, &item);
+        }
         self.body.push_str(&format!(
             "  {array_slot} = getelementptr inbounds {}, ptr {array_data}, i64 {index}\n  store {} {item}, ptr {array_slot}\n  {next} = add i64 {index}, 1\n  store i64 {next}, ptr {index_ptr}\n  br label %{loop_label}\n{done_label}:\n",
             element_ty.as_ir(),

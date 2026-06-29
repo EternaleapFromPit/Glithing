@@ -1,34 +1,27 @@
-use std::collections::HashMap;
+use crate::ast::Program;
+use crate::tir::{
+    Ownership, IrType, TypedExpr, TypedExprKind, TypedFunction, TypedLambdaBody, TypedProgram,
+    TypedStmt, TypedStmtKind,
+};
 
-use crate::ast::*;
-use crate::tir::TypedProgram;
-
-pub(crate) struct LeakAnalyzer<'a> {
-    functions: HashMap<&'a str, &'a TypeSyntax>,
+pub(crate) struct LeakAnalyzer {
     warnings: Vec<String>,
 }
 
-impl<'a> LeakAnalyzer<'a> {
-    pub(crate) fn analyze_program(program: &'a Program, typed: &TypedProgram) -> String {
+impl LeakAnalyzer {
+    pub(crate) fn analyze_program(_program: &Program, typed: &TypedProgram) -> String {
         let mut analyzer = Self {
-            functions: program
-                .functions
-                .iter()
-                .map(|f| (f.name.as_str(), &f.return_type))
-                .collect(),
             warnings: Vec::new(),
         };
-        let _ownership_summary = typed.ownership_summary();
-        for function in &program.functions {
-            analyzer.analyze_stmts(&format!("function {}", function.name), &function.body);
+        for function in &typed.functions {
+            analyzer.analyze_function(&format!("function {}", function.name), function);
         }
-        for ty in &program.types {
+        for ty in &typed.types {
             for constructor in &ty.constructors {
-                analyzer.analyze_stmts(&format!("constructor {}", ty.name), &constructor.body);
+                analyzer.analyze_function(&format!("constructor {}", ty.name), constructor);
             }
             for method in &ty.methods {
-                analyzer
-                    .analyze_stmts(&format!("method {}.{}", ty.name, method.name), &method.body);
+                analyzer.analyze_function(&format!("method {}.{}", ty.name, method.name), method);
             }
         }
         if analyzer.warnings.is_empty() {
@@ -44,15 +37,19 @@ impl<'a> LeakAnalyzer<'a> {
         }
     }
 
-    fn analyze_stmts(&mut self, context: &str, stmts: &[Stmt]) {
+    fn analyze_function(&mut self, context: &str, function: &TypedFunction) {
+        self.analyze_stmts(context, &function.body);
+    }
+
+    fn analyze_stmts(&mut self, context: &str, stmts: &[TypedStmt]) {
         for stmt in stmts {
             self.analyze_stmt(context, stmt);
         }
     }
 
-    fn analyze_stmt(&mut self, context: &str, stmt: &Stmt) {
-        match stmt {
-            Stmt::Expr(expr) => {
+    fn analyze_stmt(&mut self, context: &str, stmt: &TypedStmt) {
+        match &stmt.kind {
+            TypedStmtKind::Expr(expr) => {
                 if self.expr_may_create_owned_value(expr) {
                     self.warnings.push(format!(
                         "{context}: expression result is owned and discarded: {expr:?}"
@@ -60,14 +57,16 @@ impl<'a> LeakAnalyzer<'a> {
                 }
                 self.analyze_expr(context, expr);
             }
-            Stmt::Let { expr, .. }
-            | Stmt::Assign { expr, .. }
-            | Stmt::AssignTarget { expr, .. }
-            | Stmt::Print(expr)
-            | Stmt::Return(Some(expr))
-            | Stmt::Throw(expr) => self.analyze_expr(context, expr),
-            Stmt::Block(body) | Stmt::While { body, .. } => self.analyze_stmts(context, body),
-            Stmt::If {
+            TypedStmtKind::Let { expr, .. }
+            | TypedStmtKind::Assign { expr, .. }
+            | TypedStmtKind::AssignTarget { expr, .. }
+            | TypedStmtKind::Print(expr)
+            | TypedStmtKind::Return(Some(expr))
+            | TypedStmtKind::Throw(expr) => self.analyze_expr(context, expr),
+            TypedStmtKind::Block(body) | TypedStmtKind::While { body, .. } => {
+                self.analyze_stmts(context, body)
+            }
+            TypedStmtKind::If {
                 condition,
                 then_body,
                 else_body,
@@ -76,18 +75,17 @@ impl<'a> LeakAnalyzer<'a> {
                 self.analyze_stmts(context, then_body);
                 self.analyze_stmts(context, else_body);
             }
-            Stmt::Try {
+            TypedStmtKind::Try {
                 try_body,
-                catch,
+                catch_body,
                 finally_body,
+                ..
             } => {
                 self.analyze_stmts(context, try_body);
-                if let Some(catch) = catch {
-                    self.analyze_stmts(context, &catch.body);
-                }
+                self.analyze_stmts(context, catch_body);
                 self.analyze_stmts(context, finally_body);
             }
-            Stmt::Switch {
+            TypedStmtKind::Switch {
                 expr,
                 cases,
                 default,
@@ -99,7 +97,7 @@ impl<'a> LeakAnalyzer<'a> {
                 }
                 self.analyze_stmts(context, default);
             }
-            Stmt::For {
+            TypedStmtKind::For {
                 init,
                 condition,
                 increment,
@@ -116,24 +114,24 @@ impl<'a> LeakAnalyzer<'a> {
                     self.analyze_stmt(context, increment);
                 }
             }
-            Stmt::ForEach {
+            TypedStmtKind::ForEach {
                 collection, body, ..
             } => {
                 self.analyze_expr(context, collection);
                 self.analyze_stmts(context, body);
             }
-            Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+            TypedStmtKind::Return(None) | TypedStmtKind::Break | TypedStmtKind::Continue => {}
         }
     }
 
-    fn analyze_expr(&mut self, context: &str, expr: &Expr) {
-        match expr {
-            Expr::ArrayLiteral(values) => {
+    fn analyze_expr(&mut self, context: &str, expr: &TypedExpr) {
+        match &expr.kind {
+            TypedExprKind::ArrayLiteral(values) => {
                 for value in values {
                     self.analyze_expr(context, value);
                 }
             }
-            Expr::NewArray { length, values, .. } => {
+            TypedExprKind::NewArray { length, values, .. } => {
                 if let Some(length) = length {
                     self.analyze_expr(context, length);
                 }
@@ -141,29 +139,24 @@ impl<'a> LeakAnalyzer<'a> {
                     self.analyze_expr(context, value);
                 }
             }
-            Expr::Index { target, index } => {
+            TypedExprKind::Index { target, index } => {
                 self.analyze_expr(context, target);
                 self.analyze_expr(context, index);
             }
-            Expr::Field { target, .. } => self.analyze_expr(context, target),
-            Expr::IsPattern { expr, .. } => self.analyze_expr(context, expr),
-            Expr::MethodCall { target, args, .. } => {
-                self.analyze_expr(context, target);
-                for arg in args {
+            TypedExprKind::Field { target, .. } => self.analyze_expr(context, target),
+            TypedExprKind::IsPattern { expr, .. } => self.analyze_expr(context, expr),
+            TypedExprKind::Call(call) => {
+                match &call.kind {
+                    crate::tir::TypedCallKind::Function { .. } => {}
+                    crate::tir::TypedCallKind::Method { target, .. } => {
+                        self.analyze_expr(context, target);
+                    }
+                }
+                for arg in &call.args {
                     self.analyze_expr(context, arg);
                 }
             }
-            Expr::FunctionCall { args, .. } => {
-                for arg in args {
-                    self.analyze_expr(context, arg);
-                }
-            }
-            Expr::Throw(expr) => self.analyze_expr(context, expr),
-            Expr::Assign { target, value } => {
-                self.analyze_expr(context, target);
-                self.analyze_expr(context, value);
-            }
-            Expr::NewObject { args, fields, .. } => {
+            TypedExprKind::NewObject { args, fields, .. } => {
                 for arg in args {
                     self.analyze_expr(context, arg);
                 }
@@ -171,21 +164,24 @@ impl<'a> LeakAnalyzer<'a> {
                     self.analyze_expr(context, &field.expr);
                 }
             }
-            Expr::Binary { left, right, .. } => {
-                self.analyze_expr(context, left);
-                self.analyze_expr(context, right);
+            TypedExprKind::NewCollection(_) | TypedExprKind::NewThread(_) => {}
+            TypedExprKind::Borrow { .. } => {}
+            TypedExprKind::Await(inner)
+            | TypedExprKind::Throw(inner)
+            | TypedExprKind::Unary { expr: inner, .. } => self.analyze_expr(context, inner),
+            TypedExprKind::Assign { target, value } => {
+                self.analyze_expr(context, target);
+                self.analyze_expr(context, value);
             }
-            Expr::Unary { expr, .. } => self.analyze_expr(context, expr),
-            Expr::IncDec { .. } => {}
-            Expr::Lambda { body, .. } => match body {
-                LambdaBody::Expr(body) => self.analyze_expr(context, body),
-                LambdaBody::Block(stmts) => {
+            TypedExprKind::Lambda { body, .. } => match body {
+                TypedLambdaBody::Expr(body) => self.analyze_expr(context, body),
+                TypedLambdaBody::Block(stmts) => {
                     for stmt in stmts {
                         self.analyze_stmt(context, stmt);
                     }
                 }
             },
-            Expr::Conditional {
+            TypedExprKind::Conditional {
                 condition,
                 when_true,
                 when_false,
@@ -194,106 +190,103 @@ impl<'a> LeakAnalyzer<'a> {
                 self.analyze_expr(context, when_true);
                 self.analyze_expr(context, when_false);
             }
-            Expr::Await(inner) => self.analyze_expr(context, inner),
-            Expr::NamedArg { expr, .. } | Expr::RefArg { expr, .. } => {
-                self.analyze_expr(context, expr)
+            TypedExprKind::IncDec { target, .. } => self.analyze_expr(context, target),
+            TypedExprKind::Binary { left, right, .. } => {
+                self.analyze_expr(context, left);
+                self.analyze_expr(context, right);
             }
-            Expr::Int(_)
-            | Expr::Float(_)
-            | Expr::Bool(_)
-            | Expr::Null
-            | Expr::String(_)
-            | Expr::Var(_)
-            | Expr::Move(_)
-            | Expr::NewCollection(_)
-            | Expr::NewThread(_)
-            | Expr::Borrow { .. } => {
+            TypedExprKind::NullableSome(inner) => self.analyze_expr(context, inner),
+            TypedExprKind::Int(_)
+            | TypedExprKind::Float(_)
+            | TypedExprKind::Bool(_)
+            | TypedExprKind::Null
+            | TypedExprKind::String(_)
+            | TypedExprKind::Var(_)
+            | TypedExprKind::FunctionSymbol(_)
+            | TypedExprKind::Move(_) => {
                 let _ = context;
             }
         }
     }
 
-    fn expr_may_create_owned_value(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::String(_)
-            | Expr::NewArray { .. }
-            | Expr::NewCollection(_)
-            | Expr::NewThread(_) => true,
-            Expr::NewObject { type_name, .. } => !is_weak_reference_type_name(type_name),
-            Expr::FunctionCall { name, .. } => self
-                .functions
-                .get(name.as_str())
-                .is_some_and(|ty| type_may_own(ty)),
-            Expr::MethodCall { target, name, .. } => {
-                matches!(name.as_str(), "GetResult")
-                    || matches!(target.as_ref(), Expr::Var(type_name) if type_name == "Task")
+    fn expr_may_create_owned_value(&self, expr: &TypedExpr) -> bool {
+        match &expr.kind {
+            TypedExprKind::String(_) => true,
+            TypedExprKind::ArrayLiteral(_) => true,
+            TypedExprKind::NewArray { .. }
+            | TypedExprKind::NewCollection(_)
+            | TypedExprKind::NewThread(_) => true,
+            TypedExprKind::NewObject { type_name, .. } => !is_weak_reference_type_name(type_name),
+            TypedExprKind::Call(call) => match &call.kind {
+                crate::tir::TypedCallKind::Function { name, .. } => {
+                    if is_internal_helper_function(name) {
+                        false
+                    } else {
+                        type_may_own(&expr.ty)
+                    }
+                }
+                crate::tir::TypedCallKind::Method { .. } => {
+                    if is_framework_fluent_method(call) {
+                        false
+                    } else {
+                        matches!(expr.ownership, Ownership::Owned)
+                    }
+                }
+            },
+            TypedExprKind::Field { target, name } => {
+                matches!(expr.ownership, Ownership::Owned)
+                    && (!matches!(target.ty, IrType::Task(_))
+                        || matches!(name.as_str(), "Result" | "Exception"))
             }
-            Expr::Await(_) => true,
-            Expr::Throw(expr) => self.expr_may_create_owned_value(expr),
-            Expr::Assign { target, value } => {
-                self.expr_may_create_owned_value(target)
-                    || self.expr_may_create_owned_value(value)
-            }
-            Expr::Unary { expr, .. } => self.expr_may_create_owned_value(expr),
-            Expr::Lambda { .. } => false,
-            Expr::Conditional {
-                when_true,
-                when_false,
-                ..
-            } => {
-                self.expr_may_create_owned_value(when_true)
-                    || self.expr_may_create_owned_value(when_false)
-            }
-            Expr::NamedArg { expr, .. } | Expr::RefArg { expr, .. } => {
-                self.expr_may_create_owned_value(expr)
-            }
-            _ => false,
+            TypedExprKind::Index { .. }
+            | TypedExprKind::Await(_)
+            | TypedExprKind::Conditional { .. }
+            | TypedExprKind::NullableSome(_)
+            | TypedExprKind::Unary { .. }
+            | TypedExprKind::Binary { .. } => matches!(expr.ownership, Ownership::Owned),
+            TypedExprKind::Throw(_) | TypedExprKind::Lambda { .. } => false,
+            TypedExprKind::Var(_)
+            | TypedExprKind::FunctionSymbol(_)
+            | TypedExprKind::Move(_)
+            | TypedExprKind::Borrow { .. }
+            | TypedExprKind::Int(_)
+            | TypedExprKind::Float(_)
+            | TypedExprKind::Bool(_)
+            | TypedExprKind::Null
+            | TypedExprKind::Assign { .. }
+            | TypedExprKind::IsPattern { .. }
+            | TypedExprKind::IncDec { .. } => false,
         }
     }
 }
 
-fn type_may_own(ty: &TypeSyntax) -> bool {
+fn type_may_own(ty: &IrType) -> bool {
     match ty {
-        TypeSyntax::String
-        | TypeSyntax::Array(_)
-        | TypeSyntax::List(_)
-        | TypeSyntax::Dictionary(_, _)
-        | TypeSyntax::Thread
-        | TypeSyntax::Task(_) => true,
-        TypeSyntax::IEnumerable(_) => false,
-        TypeSyntax::Named(name) => !is_weak_reference_name(name),
-        TypeSyntax::GenericNamed { name, .. } => {
-            let name = name.as_str();
-            matches!(name, "own" | "System.Ownership.own")
-                || !matches!(
-                    name,
-                    "borrow"
-                        | "view"
-                        | "shared"
-                        | "IReadOnlyDictionary"
-                        | "System.Collections.Generic.IReadOnlyDictionary"
-                        | "weakref"
-                        | "System.Ownership.borrow"
-                        | "System.Ownership.view"
-                        | "System.Ownership.shared"
-                        | "System.Ownership.weakref"
-                ) && !is_weak_reference_name(name)
+        IrType::String
+        | IrType::Array(_)
+        | IrType::Struct(_)
+        | IrType::List(_)
+        | IrType::Dictionary(_, _)
+        | IrType::Thread
+        | IrType::Task(_)
+        | IrType::Exception => true,
+        IrType::Nullable(inner) => type_may_own(inner),
+        IrType::Class(_) | IrType::Interface(_) | IrType::Function { .. } | IrType::Unknown(_) => {
+            true
         }
-        TypeSyntax::Nullable(inner) => type_may_own(inner),
-        _ => false,
+        IrType::Bool
+        | IrType::Byte
+        | IrType::Short
+        | IrType::Int
+        | IrType::Long
+        | IrType::UInt
+        | IrType::Double
+        | IrType::Decimal
+        | IrType::Void
+        | IrType::Ref(_)
+        | IrType::Enumerable(_)
+        | IrType::Weak(_) => false,
     }
-}
-
-fn is_weak_reference_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Weak"
-            | "WeakReference"
-            | "System.WeakReference"
-            | "System.Ownership.Weak"
-            | "weakref"
-            | "System.Ownership.weakref"
-    )
 }
 
 fn is_weak_reference_type_name(name: &str) -> bool {
@@ -308,4 +301,36 @@ fn is_weak_reference_type_name(name: &str) -> bool {
         || name.starts_with("System_WeakReference_")
         || name.starts_with("System_Ownership_Weak")
         || name.starts_with("Weak_")
+}
+
+fn is_framework_fluent_method(call: &crate::tir::TypedCall) -> bool {
+    let crate::tir::TypedCallKind::Method { name, .. } = &call.kind else {
+        return false;
+    };
+    matches!(
+        name.as_str(),
+        "Use"
+            | "UseTrace"
+            | "MapGet"
+            | "MapPost"
+            | "MapPut"
+            | "MapDelete"
+            | "AddDbContext"
+            | "AddLocalization"
+            | "AddCors"
+            | "AddMvc"
+            | "AddJsonOptions"
+            | "Run"
+            | "RunOnce"
+            | "Build"
+            | "BuildServiceProvider"
+            | "Configure"
+    )
+}
+
+fn is_internal_helper_function(name: &str) -> bool {
+    matches!(name, "configure" | "function")
+        || name.starts_with("GlitchRestHost_")
+        || name.starts_with("glitch_register_")
+        || name.starts_with("glitch_endpoint_handlers_")
 }

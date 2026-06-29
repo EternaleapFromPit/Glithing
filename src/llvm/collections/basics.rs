@@ -32,7 +32,15 @@ impl LlvmEmitter {
         for (index, source) in values.iter().enumerate() {
             let value = self.emit_typed_expr(source)?;
             let value = self.cast_value(value, &element_ll_type)?;
-            self.retain_for_store(element_type, source, &value.value);
+            if matches!(element_type, IrType::Task(_))
+                || matches!(source.ty, IrType::Task(_))
+                || is_task_surface_type(&source.ty)
+            {
+                self.body
+                    .push_str(&format!("  call void @GlitchTask_Retain(ptr {})\n", value.value));
+            } else {
+                self.retain_for_store(element_type, source, &value.value);
+            }
             let slot = self.tmp();
             self.body.push_str(&format!(
                 "  {slot} = getelementptr inbounds {}, ptr {data}, i64 {index}\n  store {} {}, ptr {slot}\n",
@@ -40,6 +48,9 @@ impl LlvmEmitter {
                 element_ll_type.as_ir(),
                 value.value
             ));
+            if should_drop_argument_after_call(source) {
+                self.emit_temporary_drop(source, &value);
+            }
         }
         Ok(LlValue {
             value: array,
@@ -209,18 +220,7 @@ impl LlvmEmitter {
                 };
                 let result_llvm_type = llvm_ir_type(&result_ty);
                 let call_res = self.tmp();
-                let helper_name = if llvm_ir_type(&result_ty) == LlType::I1
-                    || is_bool_like_type(&result_ty)
-                {
-                    "glitch_task_get_result_bool"
-                } else {
-                    match &result_ty {
-                        IrType::Int | IrType::UInt => "glitch_task_get_result_i32",
-                        IrType::Long => "glitch_task_get_result_i64",
-                        IrType::Double | IrType::Decimal => "glitch_task_get_result_double",
-                        _ => "glitch_task_get_result_ptr",
-                    }
-                };
+                let helper_name = task_result_getter_name(&result_ty);
                 self.body.push_str(&format!(
                     "  {} = call {} @{}(ptr {})\n",
                     call_res,
@@ -254,18 +254,7 @@ impl LlvmEmitter {
                     Ok(void_value())
                 } else {
                     let call_res = self.tmp();
-                    let helper_name = if llvm_ir_type(&result_ty) == LlType::I1
-                        || is_bool_like_type(&result_ty)
-                    {
-                        "glitch_task_get_result_bool"
-                    } else {
-                        match &result_ty {
-                            IrType::Int | IrType::UInt => "glitch_task_get_result_i32",
-                            IrType::Long => "glitch_task_get_result_i64",
-                            IrType::Double | IrType::Decimal => "glitch_task_get_result_double",
-                            _ => "glitch_task_get_result_ptr",
-                        }
-                    };
+                    let helper_name = task_result_getter_name(&result_ty);
                     self.body.push_str(&format!(
                         "  {} = call {} @{}(ptr {})\n",
                         call_res,

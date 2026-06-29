@@ -350,6 +350,7 @@ impl LlvmEmitter {
                 self.emit_drop(type_name, &final_item);
             }
         }
+        self.emit_temporary_drop(collection, &collection_value);
         self.terminated = false;
         if let Some(previous) = previous {
             self.vars.insert(item.name.clone(), previous);

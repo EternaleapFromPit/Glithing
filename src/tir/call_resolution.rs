@@ -225,7 +225,10 @@ pub(super) fn resolve_method_call(
         (IrType::Unknown(target) | IrType::Class(target), "Run") if target == "Task" => {
             let result = args
                 .first()
-                .map(|arg| arg.ty.clone())
+                .map(|arg| match &arg.ty {
+                    IrType::Function { return_type, .. } => return_type.as_ref().clone(),
+                    _ => arg.ty.clone(),
+                })
                 .unwrap_or(IrType::Void);
             Ok((
                 IrType::Task(Box::new(result)),
@@ -242,7 +245,10 @@ pub(super) fn resolve_method_call(
         {
             let result = args
                 .first()
-                .map(|arg| arg.ty.clone())
+                .map(|arg| match &arg.ty {
+                    IrType::Function { return_type, .. } => return_type.as_ref().clone(),
+                    _ => arg.ty.clone(),
+                })
                 .unwrap_or(IrType::Void);
             Ok((
                 IrType::Task(Box::new(result)),

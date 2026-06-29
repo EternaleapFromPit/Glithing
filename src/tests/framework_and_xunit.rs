@@ -55,6 +55,7 @@ fn compiles_library_service_generic_mvc_shapes() {
 
     assert!(llvm_ir.contains("BookController"));
     assert!(llvm_ir.contains("glitch_task_from_result_ptr"));
+    assert!(llvm_ir.contains("GlitchTask_SetResultKind"));
     assert!(bytecode.contains(".base BaseCrudController<Book,BookResponseDTO>"));
     assert!(bytecode.contains("Task<ActionResult<IEnumerable<TResponseDto>>>"));
 }
@@ -978,6 +979,50 @@ fn compiles_task_from_result_and_leak_report() {
     let report = compile_leak_report(source).expect("leak report should be emitted");
 
     assert!(llvm_ir.contains("glitch_task_from_result_i32"));
+    assert!(report.contains("expression result is owned and discarded"));
+}
+
+#[test]
+fn leak_report_flags_discarded_indexed_owned_value() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+
+            fn main() {
+                Task<string>[] tasks = new Task<string>[] {
+                    Task.FromResult("left"),
+                    Task.FromResult("right")
+                };
+                tasks[0];
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("indexed task handle should lower");
+    let report = compile_leak_report(source).expect("leak report should be emitted");
+
+    assert!(llvm_ir.contains("glitch_task_from_result_ptr"));
+    assert!(report.contains("expression result is owned and discarded"));
+}
+
+#[test]
+fn leak_report_flags_discarded_method_result_from_indexed_task() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+
+            fn main() {
+                Task<string>[] tasks = new Task<string>[] {
+                    Task.FromResult("left"),
+                    Task.FromResult("right")
+                };
+                tasks[0].Result;
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("indexed task result should lower");
+    let report = compile_leak_report(source).expect("leak report should be emitted");
+
+    assert!(llvm_ir.contains("glitch_task_from_result_ptr"));
     assert!(report.contains("expression result is owned and discarded"));
 }
 

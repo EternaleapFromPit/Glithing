@@ -129,6 +129,7 @@ fn compiles_task_generic_smoke() {
     assert!(llvm_ir.contains("glitch_task_get_result_bool"));
     assert!(llvm_ir.contains("glitch_task_from_result_ptr"));
     assert!(llvm_ir.contains("glitch_task_get_result_ptr"));
+    assert!(llvm_ir.contains("GlitchTask_SetResultKind"));
     assert!(llvm_ir.contains("glitch_task_from_result_double"));
     assert!(llvm_ir.contains("glitch_task_get_result_double"));
     assert!(llvm_ir.contains("glitch_string_retain"));
@@ -346,6 +347,7 @@ fn value_task_as_task_retains_owned_string_results_in_llvm() {
         .expect("ValueTask.AsTask should retain owned string results in LLVM");
 
     assert!(llvm_ir.contains("glitch_task_from_result_ptr"));
+    assert!(llvm_ir.contains("GlitchTask_SetResultKind"));
     assert!(llvm_ir.contains("glitch_string_retain"));
     assert!(llvm_ir.contains("glitch_string_release"));
 }
@@ -607,6 +609,7 @@ fn tasks_retain_and_release_string_results_in_llvm() {
 
     assert!(llvm_ir.contains("glitch_task_run_ptr"));
     assert!(llvm_ir.contains("glitch_task_get_result_ptr"));
+    assert!(llvm_ir.contains("GlitchTask_SetResultKind"));
     assert!(llvm_ir.contains("glitch_string_retain"));
     assert!(llvm_ir.contains("glitch_string_release"));
 }
@@ -913,6 +916,54 @@ fn runs_async_when_all_string_payloads_natively() {
 }
 
 #[test]
+fn native_async_when_all_string_payloads_stepwise_debug() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+
+            string First() {
+                return "Ada";
+            }
+
+            string Second() {
+                return "Lovelace";
+            }
+
+            async Task<string> MergeAsync() {
+                var tasks = new[] { Task.Run(First), Task.Run(Second) };
+                print("before");
+                await Task.WhenAll(tasks);
+                print("after");
+                print(tasks[0].Result);
+                print(tasks[1].Result);
+                return tasks[0].Result + " " + tasks[1].Result;
+            }
+
+
+            fn main() {
+                Task<string> value = MergeAsync();
+                print(value.Result);
+            }
+        "#;
+
+    let output_exe =
+        emit_native_executable_from_source("async-when-all-string-payloads-stepwise", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Ada"));
+    assert!(stdout.contains("Lovelace"));
+    assert!(stdout.contains("Ada Lovelace"));
+}
+
+#[test]
 fn compiles_async_when_all_string_payloads_to_llvm() {
     let source = r#"
             using System.Collections.Generic;
@@ -933,13 +984,160 @@ fn compiles_async_when_all_string_payloads_to_llvm() {
                 await Task.WhenAll(tasks.ToArray());
                 return tasks[0].Result + " " + tasks[1].Result;
             }
-        "#;
+    "#;
 
     let llvm_ir = compile_llvm_ir(source).expect("async WhenAll should lower to LLVM");
 
     assert!(llvm_ir.contains("glitch_task_when_all_array"));
     assert!(llvm_ir.contains("glitch_async_resume_MergeAsync"));
     assert!(llvm_ir.contains("glitch_task_get_result_ptr"));
+}
+
+#[test]
+fn native_list_task_to_array_preserves_task_results() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+
+            string First() {
+                return "Ada";
+            }
+
+            string Second() {
+                return "Lovelace";
+            }
+
+            fn main() {
+                List<Task<string>> tasks = new List<Task<string>>();
+                tasks.Add(Task.Run(First));
+                tasks.Add(Task.Run(Second));
+                Task<string>[] items = tasks.ToArray();
+                print(items[0].Result + " " + items[1].Result);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("list-task-to-array-preserves-results", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Ada Lovelace"));
+}
+
+#[test]
+fn native_array_literal_task_results_preserve_handles() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            string First() {
+                return "Ada";
+            }
+
+            string Second() {
+                return "Lovelace";
+            }
+
+            fn main() {
+                var tasks = new[] { Task.Run(First), Task.Run(Second) };
+                print(tasks[0].Result);
+                print(tasks[1].Result);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("array-literal-task-results", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Ada"));
+    assert!(stdout.contains("Lovelace"));
+}
+
+#[test]
+fn native_array_literal_task_creation_is_stable() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            string First() {
+                return "Ada";
+            }
+
+            string Second() {
+                return "Lovelace";
+            }
+
+            fn main() {
+                var tasks = new[] { Task.Run(First), Task.Run(Second) };
+                print("ok");
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("array-literal-task-creation", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ok"));
+}
+
+#[test]
+fn native_async_when_all_then_return_constant_after_await() {
+    let source = r#"
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+
+            string First() {
+                return "Ada";
+            }
+
+            string Second() {
+                return "Lovelace";
+            }
+
+            async Task<string> MergeAsync() {
+                List<Task<string>> tasks = new List<Task<string>>();
+                tasks.Add(Task.Run(First));
+                tasks.Add(Task.Run(Second));
+                await Task.WhenAll(tasks.ToArray());
+                return "done";
+            }
+
+            fn main() {
+                Task<string> value = MergeAsync();
+                print(value.Result);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("async-when-all-then-return-constant", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("done"));
 }
 
 #[test]
@@ -964,6 +1162,7 @@ fn compiles_list_of_tasks_to_array_for_when_all() {
 
     assert!(llvm_ir.contains("glitch_task_get_result_ptr"));
     assert!(llvm_ir.contains("glitch_task_run_ptr"));
+    assert!(llvm_ir.contains("GlitchTask_SetResultKind"));
 }
 
 #[test]

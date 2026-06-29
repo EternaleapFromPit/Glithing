@@ -89,6 +89,7 @@ struct GlitchDelegate {
 struct GlitchTask {
     refs: i64,
     completed: i32,
+    result_kind: i32,
     result: *mut c_void,
     state: *mut GlitchTaskState,
     exception: *mut c_char,
@@ -280,6 +281,7 @@ where
     }
     (*task).refs = 1;
     (*task).completed = 0;
+    (*task).result_kind = 0;
     (*task).result = std::ptr::null_mut();
     (*task).exception = std::ptr::null_mut();
     (*task).payload = std::ptr::null_mut();
@@ -555,6 +557,22 @@ pub unsafe extern "C" fn GlitchTask_GetException(task: *mut c_void) -> *mut c_vo
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn GlitchDebug_LogTaskResult(
+    stage: i32,
+    task: *mut c_void,
+    result: *mut c_void,
+    exception: *mut c_void,
+) {
+    if std::env::var_os("GLITCH_DEBUG_TASKS").is_none() {
+        return;
+    }
+    eprintln!(
+        "GlitchDebug_LogTaskResult stage={} task={:p} result={:p} exception={:p}",
+        stage, task, result, exception
+    );
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn GlitchTask_Destroy(task: *mut c_void) -> bool {
     let task = task as *mut GlitchTask;
     if task.is_null() {
@@ -565,10 +583,11 @@ pub unsafe extern "C" fn GlitchTask_Destroy(task: *mut c_void) -> bool {
     let old_refs = (*refs_ptr).fetch_sub(1, Ordering::SeqCst);
     if debug_tasks {
         eprintln!(
-            "GlitchTask_Destroy task={:p} old_refs={} completed={} exception={:p} result={:p} payload={:p}",
+            "GlitchTask_Destroy task={:p} old_refs={} completed={} result_kind={} exception={:p} result={:p} payload={:p}",
             task,
             old_refs,
             (*task).completed,
+            (*task).result_kind,
             (*task).exception,
             (*task).result,
             (*task).payload
@@ -586,23 +605,24 @@ pub unsafe extern "C" fn GlitchTask_Destroy(task: *mut c_void) -> bool {
         }
         release_glitch_string(exception);
     }
+    let result_kind = (*task).result_kind;
+    let result = (*task).result;
+    if result_kind == 1 && !result.is_null() {
+        if debug_tasks {
+            eprintln!("GlitchTask_Destroy releasing string result task={:p} result={:p}", task, result);
+        }
+        release_glitch_string(result.cast::<c_char>());
+    }
     let payload_ptr = std::ptr::addr_of_mut!((*task).payload).cast::<AtomicPtr<c_void>>();
     let payload = (*payload_ptr).swap(std::ptr::null_mut(), Ordering::SeqCst);
     if !payload.is_null() {
         let payload = payload as *mut GlitchTaskPayload;
-        let count = (*payload).count;
         let tasks = (*payload).tasks;
         if debug_tasks {
             eprintln!(
-                "GlitchTask_Destroy payload task={:p} payload={:p} count={}",
-                task, payload, count
+                "GlitchTask_Destroy payload task={:p} payload={:p}",
+                task, payload
             );
-        }
-        for index in 0..count {
-            let item = *tasks.add(index as usize);
-            if !item.is_null() {
-                GlitchTask_Destroy(item.cast::<c_void>());
-            }
         }
         free(tasks.cast::<c_void>());
         GlitchLiveAllocations_Add(-1);
@@ -638,6 +658,15 @@ pub unsafe extern "C" fn GlitchTask_SetPayload(task: *mut c_void, payload: *mut 
     }
     let payload_ptr = std::ptr::addr_of_mut!((*task).payload).cast::<AtomicPtr<c_void>>();
     (*payload_ptr).store(payload, Ordering::SeqCst);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchTask_SetResultKind(task: *mut c_void, kind: i32) {
+    let task = task as *mut GlitchTask;
+    if task.is_null() {
+        return;
+    }
+    (*task).result_kind = kind;
 }
 
 type RequestHandler =
@@ -1375,6 +1404,7 @@ mod tests {
         let mut task = GlitchTask {
             refs: 0,
             completed: 0,
+            result_kind: 0,
             result: std::ptr::null_mut(),
             state: std::ptr::null_mut(),
             exception: std::ptr::null_mut(),

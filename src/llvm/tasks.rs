@@ -32,7 +32,7 @@ impl LlvmEmitter {
         ));
         let exception_ptr = self.tmp();
         self.body.push_str(&format!(
-            "  {} = getelementptr inbounds %glitch.task, ptr {}, i32 0, i32 4\n  store ptr {}, ptr {}\n",
+            "  {} = getelementptr inbounds %glitch.task, ptr {}, i32 0, i32 5\n  store ptr {}, ptr {}\n",
             exception_ptr, task_ptr, message_val.value, exception_ptr
         ));
         Ok(LlValue {
@@ -76,16 +76,7 @@ impl LlvmEmitter {
     ) -> Result<LlValue, String> {
         let result_llvm_type = llvm_ir_type(result_ty);
         let task_ptr = self.tmp();
-        let helper_name = if llvm_ir_type(result_ty) == LlType::I1 || is_bool_like_type(result_ty) {
-            "glitch_task_from_result_bool"
-        } else {
-            match result_ty {
-                IrType::Int | IrType::UInt => "glitch_task_from_result_i32",
-                IrType::Long => "glitch_task_from_result_i64",
-                IrType::Double | IrType::Decimal => "glitch_task_from_result_double",
-                _ => "glitch_task_from_result_ptr",
-            }
-        };
+        let helper_name = task_from_result_helper_name(result_ty);
 
         let helper_arg = if helper_name == "glitch_task_from_result_ptr" && value_val.ty != LlType::Ptr
         {
@@ -112,7 +103,7 @@ impl LlvmEmitter {
         };
 
         self.body.push_str(&format!(
-            "  {} = call ptr @{}({} {})\n",
+                "  {} = call ptr @{}({} {})\n",
             task_ptr,
             helper_name,
             if helper_name == "glitch_task_from_result_ptr" {
@@ -122,6 +113,12 @@ impl LlvmEmitter {
             },
             helper_arg
         ));
+        if is_string_like_type(result_ty) {
+            self.body.push_str(&format!(
+                "  call void @GlitchTask_SetResultKind(ptr {}, i32 1)\n",
+                task_ptr
+            ));
+        }
 
         Ok(LlValue {
             value: task_ptr,
@@ -169,13 +166,7 @@ pub(super) fn emit_task_when_all_inline(
                 "  {} = call ptr @glitch_task_when_all_array(ptr {})\n",
                 task_ptr, tasks_val.value
             ));
-            let array_data_ptr = emitter.tmp();
-            let array_data = emitter.tmp();
-            emitter.body.push_str(&format!(
-                "  {array_data_ptr} = getelementptr inbounds %glitch.array, ptr {}, i32 0, i32 1\n  {array_data} = load ptr, ptr {array_data_ptr}\n  call void @glitch_free(ptr {array_data})\n  call void @glitch_free(ptr {})\n",
-                tasks_val.value,
-                tasks_val.value
-            ));
+            emitter.emit_temporary_drop(tasks, &tasks_val);
             Ok(LlValue {
                 value: task_ptr,
                 ty: LlType::Ptr,
@@ -236,22 +227,19 @@ pub(super) fn emit_task_run_inline(
         })
     } else {
         let task_ptr = emitter.tmp();
-        let helper_name = if llvm_ir_type(&result_ty) == LlType::I1 || is_bool_like_type(&result_ty) {
-            "glitch_task_run_bool"
-        } else {
-            match &result_ty {
-            IrType::Int | IrType::UInt => "glitch_task_run_i32",
-            IrType::Long => "glitch_task_run_i64",
-            IrType::Double | IrType::Decimal => "glitch_task_run_double",
-            _ => "glitch_task_run_ptr",
-        }
-        };
+        let helper_name = task_run_helper_name(&result_ty);
         emitter.body.push_str(&format!(
             "  {} = call ptr @{}(ptr {})\n",
             task_ptr,
             helper_name,
             worker_val.value
         ));
+        if is_string_like_type(&result_ty) {
+            emitter.body.push_str(&format!(
+                "  call void @GlitchTask_SetResultKind(ptr {}, i32 1)\n",
+                task_ptr
+            ));
+        }
         emitter.emit_temporary_drop(worker_expr, &worker_val);
         Ok(LlValue {
             value: task_ptr,

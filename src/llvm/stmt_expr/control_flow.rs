@@ -335,6 +335,7 @@ impl LlvmEmitter {
         self.body.push_str(&format!(
             "  {current_index} = load i64, ptr {index_ptr}\n  {next_index} = add i64 {current_index}, 1\n  store i64 {next_index}, ptr {index_ptr}\n  br label %{condition_label}\n{end_label}:\n"
         ));
+        self.emit_temporary_drop(collection, &collection_value);
         self.terminated = false;
         if let Some(previous) = previous {
             self.vars.insert(item.name.clone(), previous);

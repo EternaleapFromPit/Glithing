@@ -241,6 +241,11 @@ impl LlvmEmitter {
     }
 
     pub(super) fn retain_for_store(&mut self, ty: &IrType, expr: &TypedExpr, value: &str) {
+        if let TypedExprKind::Field { target, name } = &expr.kind {
+            if matches!(target.ty, IrType::Task(_)) && matches!(name.as_str(), "Result" | "Exception") {
+                return;
+            }
+        }
         if let IrType::Nullable(inner) = ty {
             if matches!(
                 expr.kind,
@@ -384,6 +389,10 @@ impl LlvmEmitter {
             return;
         }
         if let TypedExprKind::Field { target, name } = &expr.kind {
+            if matches!(target.ty, IrType::Task(_)) && matches!(name.as_str(), "Result" | "Exception") {
+                self.emit_owned_payload_drop_value(&expr.ty, &value.value);
+                return;
+            }
             if !(matches!(target.ty, IrType::Task(_)) && name == "Result") {
                 return;
             }
@@ -583,6 +592,7 @@ impl LlvmEmitter {
             }
         }
         self.body.push_str(&format!("{done_label}:\n"));
+        self.terminated = false;
     }
 
     pub(super) fn emit_array_drop_value(&mut self, value: &str, element: &IrType) {
@@ -600,6 +610,7 @@ impl LlvmEmitter {
         self.body.push_str(&format!(
             "  call void @glitch_free(ptr {data})\n  call void @glitch_free(ptr {value})\n  br label %{done_label}\n{done_label}:\n"
         ));
+        self.terminated = false;
     }
 
     pub(super) fn emit_owned_payload_drop_value(&mut self, ty: &IrType, value: &str) {
@@ -665,6 +676,7 @@ impl LlvmEmitter {
         self.body.push_str(&format!(
             "  {next} = add i64 {index}, 1\n  store i64 {next}, ptr {index_ptr}\n  br label %{loop_label}\n{done_label}:\n"
         ));
+        self.terminated = false;
     }
 
     pub(super) fn emit_task_drop_value(&mut self, task_value: &str, inner: &IrType) {
@@ -676,12 +688,13 @@ impl LlvmEmitter {
         let result = self.tmp();
         let destroyed = self.tmp();
         self.body.push_str(&format!(
-            "  {is_null} = icmp eq ptr {task_value}, null\n  br i1 {is_null}, label %{done_label}, label %{release_label}\n{release_label}:\n  call void @glitch_task_wait(ptr {task_value})\n  {result_ptr} = getelementptr inbounds %glitch.task, ptr {task_value}, i32 0, i32 2\n  {result} = load ptr, ptr {result_ptr}\n  {destroyed} = call i1 @GlitchTask_Destroy(ptr {task_value})\n  br i1 {destroyed}, label %{drop_payload_label}, label %{done_label}\n{drop_payload_label}:\n"
+            "  {is_null} = icmp eq ptr {task_value}, null\n  br i1 {is_null}, label %{done_label}, label %{release_label}\n{release_label}:\n  call void @glitch_task_wait(ptr {task_value})\n  {result_ptr} = getelementptr inbounds %glitch.task, ptr {task_value}, i32 0, i32 3\n  {result} = load ptr, ptr {result_ptr}\n  {destroyed} = call i1 @GlitchTask_Destroy(ptr {task_value})\n  br i1 {destroyed}, label %{drop_payload_label}, label %{done_label}\n{drop_payload_label}:\n"
         ));
         self.emit_owned_payload_drop_value(inner, &result);
         self.body.push_str(&format!(
             "  br label %{done_label}\n{done_label}:\n"
         ));
+        self.terminated = false;
     }
 
 
