@@ -692,6 +692,70 @@ fn compiles_nested_async_with_two_sequential_awaits() {
 }
 
 #[test]
+fn compiles_nested_async_string_concatenation_after_child_await() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            async Task<string> Child() {
+                return "Ada";
+            }
+
+            async Task<string> Parent() {
+                string name = await Child();
+                return name + " Lovelace";
+            }
+
+            fn main() {
+                Task<string> value = Parent();
+                print(value.Result);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("nested async string concatenation should compile");
+
+    assert!(llvm_ir.contains("%glitch_async_state_Child = type {"));
+    assert!(llvm_ir.contains("%glitch_async_state_Parent = type {"));
+    assert!(llvm_ir.contains("define ptr @glitch_async_resume_Child(ptr %env)"));
+    assert!(llvm_ir.contains("define ptr @glitch_async_resume_Parent(ptr %env)"));
+    assert!(llvm_ir.contains("glitch_string_concat"));
+}
+
+#[test]
+fn runs_nested_async_string_concatenation_after_child_await_natively() {
+    let source = r#"
+            using System.Threading.Tasks;
+
+            async Task<string> Child() {
+                return "Ada";
+            }
+
+            async Task<string> Parent() {
+                string name = await Child();
+                return name + " Lovelace";
+            }
+
+            fn main() {
+                Task<string> value = Parent();
+                print(value.Result);
+            }
+        "#;
+
+    let output_exe =
+        emit_native_executable_from_source("nested-async-string-concat", source);
+    let output = run_native_executable_with_leak_report(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Ada Lovelace"));
+}
+
+#[test]
 fn async_resume_function_emits_program_counter_dispatch() {
     let source = r#"
             using System.Threading.Tasks;
