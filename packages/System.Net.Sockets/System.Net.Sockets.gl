@@ -1,0 +1,89 @@
+package System.Net.Sockets;
+
+public class SocketException : Exception {
+    public SocketException(string message) : base(message) {
+    }
+}
+
+extern int* GlitchSocket_Connect(string host, int port);
+extern void GlitchSocket_Close(int* socket);
+extern int GlitchSocket_Read(int* socket, byte[] buffer, int offset, int count);
+extern int GlitchSocket_Write(int* socket, byte[] buffer, int offset, int count);
+
+public class NetworkStream {
+    int* _socket;
+
+    public NetworkStream(int* socket) {
+        this._socket = socket;
+    }
+
+    public int Read(byte[] buffer, int offset, int count) {
+        if (this._socket == null) {
+            return -1;
+        }
+        return GlitchSocket_Read(this._socket, buffer, offset, count);
+    }
+
+    public int Write(byte[] buffer, int offset, int count) {
+        if (this._socket == null) {
+            return -1;
+        }
+        return GlitchSocket_Write(this._socket, buffer, offset, count);
+    }
+
+    public void Close() {
+        if (this._socket != null) {
+            GlitchSocket_Close(this._socket);
+            this._socket = null;
+        }
+    }
+}
+
+public class TcpClient {
+    int* _socket;
+    string _host;
+    int _port;
+
+    public TcpClient() {
+        this._socket = null;
+        this._host = "";
+        this._port = 0;
+    }
+
+    public TcpClient(string host, int port) {
+        this._socket = null;
+        this._host = "";
+        this._port = 0;
+        this.Connect(host, port);
+    }
+
+    public bool Connected {
+        get {
+            return this._socket != null;
+        }
+    }
+
+    public void Connect(string host, int port) {
+        this.Close();
+        this._host = host;
+        this._port = port;
+        this._socket = GlitchSocket_Connect(host, port);
+        if (this._socket == null) {
+            throw new SocketException("Failed to connect to TCP endpoint");
+        }
+    }
+
+    public NetworkStream GetStream() {
+        if (this._socket == null) {
+            throw new SocketException("TCP client is not connected");
+        }
+        return new NetworkStream(this._socket);
+    }
+
+    public void Close() {
+        if (this._socket != null) {
+            GlitchSocket_Close(this._socket);
+            this._socket = null;
+        }
+    }
+}

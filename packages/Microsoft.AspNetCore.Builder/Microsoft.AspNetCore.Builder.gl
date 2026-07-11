@@ -2,9 +2,9 @@ package Microsoft.AspNetCore.Builder;
 
 using Microsoft.Extensions.DependencyInjection;
 
-delegate void CorsConfigure(CorsPolicyBuilder options);
-delegate void SwaggerOptionsConfigure(SwaggerOptions options);
-delegate void SwaggerUiOptionsConfigure(SwaggerUiOptions options);
+public delegate void CorsConfigure(CorsPolicyBuilder options);
+public delegate void SwaggerOptionsConfigure(SwaggerOptions options);
+public delegate void SwaggerUiOptionsConfigure(SwaggerUiOptions options);
 
 public class CorsPolicyBuilder {
     public CorsPolicyBuilder AllowAnyOrigin() {
@@ -20,7 +20,7 @@ public class CorsPolicyBuilder {
     }
 }
 
-class SwaggerOptions {
+public class SwaggerOptions {
     public string RouteTemplate;
 
     public SwaggerOptions() {

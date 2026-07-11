@@ -137,6 +137,9 @@ pub(crate) struct TypedFunction {
     pub(crate) symbol: String,
     pub(crate) is_async: bool,
     pub(crate) generic_params: Vec<String>,
+    pub(crate) generic_constraints: Vec<Vec<String>>,
+    pub(crate) owner_generic_params: Vec<String>,
+    pub(crate) owner_generic_constraints: Vec<Vec<String>>,
     pub(crate) is_extern: bool,
     pub(crate) required_params: usize,
     pub(crate) return_type: IrType,
@@ -423,7 +426,7 @@ struct DelegateSignature {
 }
 
 #[derive(Default)]
-struct TypeEnv {
+pub(crate) struct TypeEnv {
     kinds: HashMap<String, TypeKind>,
     type_packages: HashMap<String, Option<String>>,
     type_visibilities: HashMap<String, Visibility>,
@@ -509,7 +512,9 @@ impl TypedProgram {
         let functions = program
             .functions
             .iter()
-            .map(|function| lower_function(function, &env, &[], None, None))
+            .map(|function| {
+                lower_function(function, &env, &[], None, &[], &[], None)
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut generic_instantiations = Vec::new();

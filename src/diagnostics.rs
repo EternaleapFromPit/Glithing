@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+﻿use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::tir::{self, TypedProgram};
@@ -10,6 +10,8 @@ pub(crate) struct CompatibilityAnalyzer<'a> {
     interface_implementations: HashMap<String, String>,
     emitted: HashSet<String>,
     diagnostics: Vec<String>,
+    current_generic_params: Vec<String>,
+    current_generic_constraints: Vec<Vec<String>>,
 }
 
 impl<'a> CompatibilityAnalyzer<'a> {
@@ -65,18 +67,45 @@ impl<'a> CompatibilityAnalyzer<'a> {
             interface_implementations,
             emitted: HashSet::new(),
             diagnostics: Vec::new(),
+            current_generic_params: Vec::new(),
+            current_generic_constraints: Vec::new(),
         };
         analyzer.detect_native_blocks();
         analyzer.detect_unexecutable_endpoints(typed);
         for function in &typed.functions {
-            analyzer.visit_stmts(&function.body, emit_llvm);
+            analyzer.visit_function(function, &function.body, emit_llvm);
         }
         for ty in &typed.types {
             for function in ty.constructors.iter().chain(&ty.methods) {
-                analyzer.visit_stmts(&function.body, emit_llvm);
+                analyzer.visit_function(function, &function.body, emit_llvm);
             }
         }
         analyzer.diagnostics
+    }
+
+    fn visit_function(
+        &mut self,
+        function: &tir::TypedFunction,
+        body: &[tir::TypedStmt],
+        emit_llvm: bool,
+    ) {
+        let saved_params = std::mem::take(&mut self.current_generic_params);
+        let saved_constraints = std::mem::take(&mut self.current_generic_constraints);
+        self.current_generic_params = function
+            .owner_generic_params
+            .iter()
+            .chain(&function.generic_params)
+            .cloned()
+            .collect();
+        self.current_generic_constraints = function
+            .owner_generic_constraints
+            .iter()
+            .chain(&function.generic_constraints)
+            .cloned()
+            .collect();
+        self.visit_stmts(body, emit_llvm);
+        self.current_generic_params = saved_params;
+        self.current_generic_constraints = saved_constraints;
     }
 
     fn detect_unexecutable_endpoints(&mut self, typed: &TypedProgram) {
@@ -332,14 +361,16 @@ impl<'a> CompatibilityAnalyzer<'a> {
                         symbol,
                         resolution,
                     } => {
-                        if let Some((message, help)) =
-                            placeholder_member_diagnostic(&target.ty, name, &expr.ty)
-                        {
+                        let is_placeholder =
+                            placeholder_member_diagnostic(&target.ty, name, &expr.ty);
+                        if let Some((message, help)) = is_placeholder.clone() {
                             self.emit("GL3013", &format!(".{name}"), message, help);
                         }
-                        if matches!(resolution, tir::CallResolution::Unknown)
-                            || (matches!(resolution, tir::CallResolution::InstanceMethod)
-                                && !self.symbols.contains(symbol))
+                        let suppress_gl3001 = is_placeholder.is_some();
+                        if !suppress_gl3001
+                            && (matches!(resolution, tir::CallResolution::Unknown)
+                                || (matches!(resolution, tir::CallResolution::InstanceMethod)
+                                    && !self.symbols.contains(symbol)))
                         {
                             if let tir::IrType::Interface(interface_name) = &target.ty {
                                 if self
@@ -409,6 +440,13 @@ impl<'a> CompatibilityAnalyzer<'a> {
                 if simple_name.starts_with("Rc_")
                     || simple_name.starts_with("ListEnumerator")
                     || type_name.contains("Rc_")
+                    || matches!(
+                        simple_name,
+                        "SynchronizationContext"
+                            | "TaskScheduler"
+                            | "CancellationTokenSource"
+                            | "CancellationToken"
+                    )
                 {
                     for arg in args {
                         self.visit_expr(arg, emit_llvm);
@@ -465,7 +503,11 @@ impl<'a> CompatibilityAnalyzer<'a> {
                 }
             }
             tir::TypedExprKind::Index { target, index } => {
-                if is_generic_placeholder_type(&target.ty) {
+                if is_generic_placeholder_type(&target.ty)
+                    && self
+                        .resolve_generic_placeholder_index_target(&target.ty)
+                        .is_none()
+                {
                     self.emit(
                         "GL3008",
                         "[",
@@ -473,7 +515,7 @@ impl<'a> CompatibilityAnalyzer<'a> {
                             "indexing on generic placeholder {:?} still lowers to a typed default; LLVM cannot specialize this package body yet",
                             target.ty
                         ),
-                        "rewrite this code to call a concrete helper or move the indexing into a specialized method body".to_string(),
+                        "rewrite this code so the index target has a concrete type, for example by moving the logic into a specialized method body or by introducing a concrete helper that accepts List<T>/Dictionary<K,V> instead of raw T".to_string(),
                     );
                 }
                 self.visit_expr(target, emit_llvm);
@@ -606,6 +648,39 @@ fn is_generic_placeholder_type(ty: &tir::IrType) -> bool {
                     .is_some_and(|ch| ch.is_ascii_uppercase())
         }
         _ => false,
+    }
+}
+
+impl<'a> CompatibilityAnalyzer<'a> {
+    fn resolve_generic_placeholder_index_target(&self, ty: &tir::IrType) -> Option<tir::IrType> {
+        let name = match ty {
+            tir::IrType::Unknown(name)
+            | tir::IrType::Class(name)
+            | tir::IrType::Struct(name) => name,
+            _ => return None,
+        };
+        let index = self.current_generic_params.iter().position(|param| param == name)?;
+        let constraints = self.current_generic_constraints.get(index)?;
+        for constraint in constraints {
+            if matches!(
+                constraint.as_str(),
+                "class" | "struct" | "notnull" | "unmanaged" | "new()"
+            ) {
+                continue;
+            }
+            let parsed = tir::parse_monomorphized_ir_type(constraint, &tir::TypeEnv::default())?;
+            if matches!(
+                parsed,
+                tir::IrType::Array(_)
+                    | tir::IrType::List(_)
+                    | tir::IrType::Dictionary(_, _)
+                    | tir::IrType::String
+                    | tir::IrType::Ref(_)
+            ) {
+                return Some(parsed);
+            }
+        }
+        None
     }
 }
 
@@ -802,11 +877,12 @@ fn placeholder_member_diagnostic(
     name: &str,
     return_type: &tir::IrType,
 ) -> Option<(String, String)> {
-    let type_name = match target_type {
-        tir::IrType::Class(name) | tir::IrType::Struct(name) | tir::IrType::Interface(name) => {
-            name.as_str()
-        }
+    // Normalize Task/ValueTask receiver types so async-scheduler compat patterns can match.
+    let type_name: &str = match target_type {
+        tir::IrType::Class(n) | tir::IrType::Struct(n) | tir::IrType::Interface(n) => n.as_str(),
         tir::IrType::Dictionary(_, _) => "Dictionary",
+        // Both Task<T> and ValueTask<T> use IrType::Task in the TIR.
+        tir::IrType::Task(_) => "Task",
         _ => return None,
     };
 
@@ -817,13 +893,6 @@ fn placeholder_member_diagnostic(
                 typed_default_description(return_type)
             ),
             "bind concrete startup settings explicitly or add a real `.gl` package implementation for the requested configuration source".to_string(),
-        )),
-        ("IServiceCollection", "AddDbContext")
-        | ("ServiceCollection", "AddDbContext")
-        | ("IServiceCollection", "AddDbContextPool")
-        | ("ServiceCollection", "AddDbContextPool") => Some((
-            "Entity Framework service registration is still only a compile-time surface; the current package does not build a real scoped DbContext graph".to_string(),
-            "construct the DbContext explicitly for now, or add a real DI registration/runtime implementation before relying on AddDbContext-style activation".to_string(),
         )),
         ("IServiceCollection", "AddEndpointsApiExplorer")
         | ("ServiceCollection", "AddEndpointsApiExplorer")
@@ -881,25 +950,33 @@ fn placeholder_member_diagnostic(
             "DbSet.FindAsync is still a compatibility stub; the current package returns a typed default instead of resolving by key".to_string(),
             "rewrite this lookup as an explicit predicate query such as `Where(...).FirstOrDefaultAsync(...)`, or add a real key-resolution implementation for your provider".to_string(),
         )),
-        ("WebApplication", "UseSwagger")
-        | ("WebApplication", "UseSwaggerUI")
-        | ("WebApplication", "UseStaticFiles")
+        ("Task", "ConfigureAwait")
+        | ("ValueTask", "ConfigureAwait")
+        | ("Task", "Delay")
+        | ("TaskScheduler", _)
+        | ("SynchronizationContext", _) => Some((
+            "this async-scheduler call is still a compatibility surface; the current runtime uses a blocking worker-thread gate and ignores ConfigureAwait/SynchronizationContext/TaskScheduler semantics".to_string(),
+            "keep the call only as a compile-time marker; if you need real scheduler or context behavior, add a runtime implementation before depending on it".to_string(),
+        )),
+        ("CancellationToken", "ThrowIfCancellationRequested") => Some((
+            "CancellationToken.ThrowIfCancellationRequested() is still a compatibility stub; the current runtime does not propagate cancellation at suspension points".to_string(),
+            "keep the call as a compile-time marker, or add a real cancellation-check implementation before depending on cooperative cancellation behavior".to_string(),
+        )),
+        ("CancellationToken", "IsCancellationRequested") => Some((
+            "CancellationToken.IsCancellationRequested is still a compatibility stub; the current runtime always returns false".to_string(),
+            "keep the check as a compile-time marker, or add a real cancellation-state implementation before depending on the result".to_string(),
+        )),
+        ("WebApplication", "UseStaticFiles")
         | ("WebApplication", "UseMiddleware")
-        | ("WebApplication", "UseCors")
         | ("WebApplication", "UseAuthentication")
-        | ("WebApplication", "UseMvc")
         | ("WebApplication", "UseHttpsRedirection")
         | ("WebApplication", "UseRouting")
         | ("WebApplication", "UseEndpoints")
         | ("WebApplication", "MapControllers")
         | ("WebApplication", "Run")
-        | ("IApplicationBuilder", "UseSwagger")
-        | ("IApplicationBuilder", "UseSwaggerUI")
         | ("IApplicationBuilder", "UseStaticFiles")
         | ("IApplicationBuilder", "UseMiddleware")
-        | ("IApplicationBuilder", "UseCors")
         | ("IApplicationBuilder", "UseAuthentication")
-        | ("IApplicationBuilder", "UseMvc")
         | ("IApplicationBuilder", "UseHttpsRedirection")
         | ("IApplicationBuilder", "UseRouting")
         | ("IApplicationBuilder", "UseEndpoints")

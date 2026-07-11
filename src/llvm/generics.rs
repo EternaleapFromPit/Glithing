@@ -548,6 +548,9 @@ pub(super) fn specialize_typed_function(
         .into_iter()
         .map(|stmt| specialize_typed_stmt(stmt, subst))
         .collect();
+    specialized.generic_constraints.clear();
+    specialized.owner_generic_params.clear();
+    specialized.owner_generic_constraints.clear();
     specialized
 }
 
@@ -1051,6 +1054,8 @@ pub(super) fn specialize_typed_function_owner(
         .into_iter()
         .map(|stmt| specialize_typed_stmt(stmt, subst))
         .collect();
+    function.owner_generic_params.clear();
+    function.owner_generic_constraints.clear();
     function
 }
 
@@ -1070,6 +1075,16 @@ pub(super) fn collect_generic_object_instantiations_program(
         }
         for method in &ty.methods {
             collect_generic_object_instantiations_function(method, out);
+        }
+    }
+    for endpoint in &program.endpoint_handlers {
+        collect_generic_object_instantiation_type(&endpoint.return_type, out);
+        collect_generic_object_instantiation_type(&endpoint.response_type, out);
+        for param in &endpoint.params {
+            collect_generic_object_instantiation_type(&param.ty, out);
+        }
+        for ctor in &endpoint.constructor_params {
+            collect_generic_object_instantiation_type(ctor, out);
         }
     }
 }

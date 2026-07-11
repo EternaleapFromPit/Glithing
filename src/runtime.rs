@@ -1,6 +1,6 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicI64, AtomicPtr, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -102,6 +102,16 @@ struct GlitchTaskPayload {
     tasks: *mut *mut GlitchTask,
 }
 
+#[repr(C)]
+struct GlitchArrayHeader {
+    len: i64,
+    data: *mut c_void,
+}
+
+struct GlitchSocketHandle {
+    stream: Mutex<TcpStream>,
+}
+
 enum TaskOutcome {
     Value(u64),
     Fault(String),
@@ -147,6 +157,140 @@ unsafe fn release_glitch_string(value: *mut c_char) {
     }
     free(node.cast::<c_void>());
     GlitchLiveAllocations_Add(-1);
+}
+
+unsafe fn glitch_array_len(array: *mut c_void) -> usize {
+    if array.is_null() {
+        return 0;
+    }
+    (*(array as *const GlitchArrayHeader)).len.max(0) as usize
+}
+
+unsafe fn glitch_array_data(array: *mut c_void) -> *mut u8 {
+    if array.is_null() {
+        return std::ptr::null_mut();
+    }
+    (*(array as *const GlitchArrayHeader)).data.cast::<u8>()
+}
+
+unsafe fn glitch_socket_from_raw(socket: *mut c_void) -> Option<&'static GlitchSocketHandle> {
+    if socket.is_null() {
+        return None;
+    }
+    Some(&*(socket as *mut GlitchSocketHandle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchSocket_Connect(host: *const c_char, port: i32) -> *mut c_void {
+    if port <= 0 {
+        return std::ptr::null_mut();
+    }
+    let host = if host.is_null() {
+        "127.0.0.1"
+    } else {
+        CStr::from_ptr(host).to_str().unwrap_or("127.0.0.1")
+    };
+    let addr = format!("{host}:{}", port);
+    let Some(target) = addr
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+    else {
+        return std::ptr::null_mut();
+    };
+    let stream = match TcpStream::connect_timeout(&target, Duration::from_secs(5)) {
+        Ok(stream) => stream,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let handle = Box::new(GlitchSocketHandle {
+        stream: Mutex::new(stream),
+    });
+    Box::into_raw(handle).cast::<c_void>()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchSocket_Close(socket: *mut c_void) {
+    if socket.is_null() {
+        return;
+    }
+    drop(Box::from_raw(socket as *mut GlitchSocketHandle));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchSocket_Read(
+    socket: *mut c_void,
+    buffer: *mut c_void,
+    offset: i32,
+    count: i32,
+) -> i32 {
+    let Some(socket) = glitch_socket_from_raw(socket) else {
+        return -1;
+    };
+    if buffer.is_null() || offset < 0 || count <= 0 {
+        return -1;
+    }
+    let len = glitch_array_len(buffer);
+    let start = offset as usize;
+    if start >= len {
+        return 0;
+    }
+    let end = len.min(start.saturating_add(count as usize));
+    let Some(slice_len) = end.checked_sub(start) else {
+        return -1;
+    };
+    let data = glitch_array_data(buffer);
+    if data.is_null() {
+        return -1;
+    }
+    let mut guard = match socket.stream.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let slice = std::slice::from_raw_parts_mut(data.add(start), slice_len);
+    match guard.read(slice) {
+        Ok(read) => read as i32,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn GlitchSocket_Write(
+    socket: *mut c_void,
+    buffer: *const c_void,
+    offset: i32,
+    count: i32,
+) -> i32 {
+    let Some(socket) = glitch_socket_from_raw(socket) else {
+        return -1;
+    };
+    if buffer.is_null() || offset < 0 || count <= 0 {
+        return -1;
+    }
+    let len = glitch_array_len(buffer.cast_mut());
+    let start = offset as usize;
+    if start >= len {
+        return 0;
+    }
+    let end = len.min(start.saturating_add(count as usize));
+    let Some(slice_len) = end.checked_sub(start) else {
+        return -1;
+    };
+    let data = glitch_array_data(buffer.cast_mut());
+    if data.is_null() {
+        return -1;
+    }
+    let guard = match socket.stream.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let slice = std::slice::from_raw_parts(data.add(start), slice_len);
+    let mut stream = guard;
+    match stream.write(slice) {
+        Ok(written) => written as i32,
+        Err(_) => -1,
+    }
 }
 
 unsafe fn lookup_glitch_symbol(name: &[u8]) -> Option<*mut c_void> {
@@ -1387,6 +1531,64 @@ mod tests {
         assert!(second.contains("{\"message\":\"hi\"}"));
 
         worker.join().expect("host thread should exit cleanly");
+    }
+
+    #[repr(C)]
+    struct TestArrayHeader {
+        len: i64,
+        data: *mut c_void,
+    }
+
+    #[test]
+    fn socket_helpers_can_connect_and_echo_bytes() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("should bind echo listener");
+        let port = listener.local_addr().expect("listener should expose local addr").port();
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                panic!("echo server should accept a connection");
+            };
+            let mut buffer = [0_u8; 16];
+            let read = stream.read(&mut buffer).expect("echo server should read");
+            stream.write_all(&buffer[..read]).expect("echo server should echo");
+        });
+
+        let host = std::ffi::CString::new("127.0.0.1").expect("CString");
+        let socket = unsafe { GlitchSocket_Connect(host.as_ptr(), port as i32) };
+        assert!(!socket.is_null());
+
+        let mut outbound = vec![b'p', b'i', b'n', b'g'];
+        let mut outbound_header = TestArrayHeader {
+            len: outbound.len() as i64,
+            data: outbound.as_mut_ptr().cast::<c_void>(),
+        };
+        let written = unsafe {
+            GlitchSocket_Write(
+                socket,
+                (&mut outbound_header as *mut TestArrayHeader).cast::<c_void>(),
+                0,
+                outbound.len() as i32,
+            )
+        };
+        assert_eq!(written, 4);
+
+        let mut inbound = vec![0_u8; 4];
+        let mut inbound_header = TestArrayHeader {
+            len: inbound.len() as i64,
+            data: inbound.as_mut_ptr().cast::<c_void>(),
+        };
+        let read = unsafe {
+            GlitchSocket_Read(
+                socket,
+                (&mut inbound_header as *mut TestArrayHeader).cast::<c_void>(),
+                0,
+                inbound.len() as i32,
+            )
+        };
+        assert_eq!(read, 4);
+        assert_eq!(&inbound, b"ping");
+
+        unsafe { GlitchSocket_Close(socket) };
+        server.join().expect("echo server should finish");
     }
 
     static TASK_STARTED: AtomicBool = AtomicBool::new(false);

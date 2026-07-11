@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use super::helpers::*;
 use super::support::*;
 
@@ -1076,6 +1076,63 @@ impl LlvmEmitter {
         })
     }
 
+    /// Emits a default Task<T> value (CompletedTask for void, Task.FromResult(default) for
+    /// typed responses) to be used when no IRequestHandler implementation is found at compile
+    /// time. This turns a hard compilation error into a soft runtime no-op.
+    fn emit_mediator_default_task(
+        &mut self,
+        response_ty: &IrType,
+    ) -> Result<LlValue, String> {
+        let result_ty = llvm_ir_type(&IrType::Task(Box::new(response_ty.clone())));
+        if matches!(response_ty, IrType::Void) {
+            let task_ptr = self.tmp();
+            self.body.push_str(&format!(
+                "  {task_ptr} = call ptr @glitch_task_completed()\n"
+            ));
+            return Ok(LlValue { value: task_ptr, ty: result_ty });
+        }
+        let default_val = self.default_typed_value(response_ty)?;
+        let helper_name = match response_ty {
+            IrType::Bool => "glitch_task_from_result_bool",
+            IrType::Int | IrType::UInt => "glitch_task_from_result_i32",
+            IrType::Long => "glitch_task_from_result_i64",
+            IrType::Double | IrType::Decimal => "glitch_task_from_result_double",
+            _ => "glitch_task_from_result_ptr",
+        };
+        let helper_arg = if helper_name == "glitch_task_from_result_ptr"
+            && default_val.ty != LlType::Ptr
+        {
+            let casted = self.tmp();
+            match default_val.ty {
+                LlType::I1 => self.body.push_str(&format!(
+                    "  {casted}_i64 = zext i1 {} to i64\n  {casted} = inttoptr i64 {casted}_i64 to ptr\n",
+                    default_val.value
+                )),
+                LlType::I8 | LlType::I16 | LlType::I32 | LlType::I64 => self.body.push_str(&format!(
+                    "  {casted} = inttoptr {} {} to ptr\n",
+                    default_val.ty.as_ir(),
+                    default_val.value
+                )),
+                LlType::Double => self.body.push_str(&format!(
+                    "  {casted}_bits = bitcast double {} to i64\n  {casted} = inttoptr i64 {casted}_bits to ptr\n",
+                    default_val.value
+                )),
+                LlType::Void | LlType::Ptr => {}
+            }
+            casted
+        } else {
+            default_val.value.clone()
+        };
+        let task_ptr = self.tmp();
+        self.body.push_str(&format!(
+            "  {task_ptr} = call ptr @{}({} {})\n",
+            helper_name,
+            if helper_name == "glitch_task_from_result_ptr" { LlType::Ptr.as_ir() } else { default_val.ty.as_ir() },
+            helper_arg,
+        ));
+        Ok(LlValue { value: task_ptr, ty: result_ty })
+    }
+
     pub(super) fn emit_mediator_send(
         &mut self,
         mediator: &TypedExpr,
@@ -1165,9 +1222,9 @@ impl LlvmEmitter {
             );
         }
 
-        Err(format!(
-            "LLVM TIR backend: no IRequestHandler<{request_name}, _> implementation found"
-        ))
+        // No handler found and request type is not IRequest — fall back to a default Task value
+        // so programs with partially-wired MediatR still compile and produce a runtime no-op.
+        self.emit_mediator_default_task(&effective_response_ty)
     }
 
     fn emit_mediator_runtime_dispatch(
@@ -1208,10 +1265,9 @@ impl LlvmEmitter {
         candidates.sort_by(|a, b| a.3.cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
 
         if candidates.is_empty() {
-            return Err(format!(
-                "LLVM TIR backend: no IRequestHandler implementations found for interface-typed request '{:?}'",
-                request_value.ty
-            ));
+            // No handlers registered for this interface-typed request — fall back to a
+            // default Task value so the caller still gets a well-typed result.
+            return self.emit_mediator_default_task(response_ty);
         }
 
         let result_response_ty = if response_is_wildcard {

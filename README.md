@@ -1,4 +1,4 @@
-# GlitchC Prototype
+﻿# GlitchC Prototype
 
 This is a small compiler prototype for a C#-inspired systems language with Rust-like ownership checks.
 
@@ -64,6 +64,8 @@ Current implemented subset:
 - `List<int>` with `new List<int>()`, `.Add(value)`, and indexing
 - `List<T>.GetEnumerator()` on the supported list surface, plus `Dictionary<K,V>.GetEnumerator()` / dictionary `foreach` lowering on the current LLVM snapshot-enumerator path
 - `Dictionary<string, int>` with `new Dictionary<string, int>()`, `.Add(key, value)`, and indexing
+- generic owner layouts and generic method bodies specialize concretely for instantiated types, including nested generic fields
+- generic placeholder indexing lowers safely when the type constraint resolves to a concrete indexable type such as `List<T>`, `Dictionary<K,V>`, arrays, strings, or refs; unconstrained placeholders still require a rewrite
 - package-backed user-defined indexer lowering for `target[index]` when the target exposes `get_Item(...)`, including the current `IStringLocalizer<T>` compatibility slice
 - `HashSet<string>` with `new HashSet<string>()`, `.Add(value)`, `.Contains(value)`, and `.Clear()`
 - `System.Collections.Generic.List<int>` and `System.Collections.Generic.Dictionary<string, int>`, including `using` aliases
@@ -128,7 +130,8 @@ Current async boundary:
 - suspension inside loops is still limited to the currently exercised shapes, and the gate remains intentionally blocking over worker threads rather than event-loop based
 - async route handlers now compile and run through typed endpoint thunks on the native host path for the current `Task<string>` / `Task<class>` slice
 - generic `UseMiddleware<T>()` and several ASP.NET/DI registration markers such as `AddEndpointsApiExplorer()`, `AddMemoryCache()`, plus direct host/logging/Swagger compatibility markers still emit explicit `GL3013` warnings instead of silently looking implemented
-- async socket/event-loop hosting, cancellation, `ConfigureAwait`, and `SynchronizationContext` semantics are not implemented yet
+- `ConfigureAwait`, `Task.Delay`, `CancellationToken.ThrowIfCancellationRequested`, `CancellationToken.IsCancellationRequested`, `TaskScheduler.*`, and `SynchronizationContext.*` are recognized as compatibility surfaces; they compile and emit `GL3013` guidance diagnostics, but the underlying scheduling/cancellation semantics are not implemented — the runtime remains a blocking worker-thread gate
+- async socket/event-loop hosting, real cooperative cancellation propagation, and non-blocking scheduler semantics are not implemented yet
 
 Owned local returns now lower as moves on the LLVM path. Returning a local `string`, class, or other owned value no longer injects an extra retain before the callee drops its locals, which closes a leak edge in package/helper methods that return owned temporaries.
 

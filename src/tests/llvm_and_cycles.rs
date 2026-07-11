@@ -206,6 +206,32 @@ fn lowers_attribute_controller_routes_to_owned_llvm_thunks() {
 }
 
 #[test]
+fn lowers_generic_route_handler_layouts_through_endpoint_metadata() {
+    let source = r#"
+            using Glitching.AspNetCore;
+
+            class Box<T> {
+                public T Value;
+            }
+
+            Box<int> CreateBox() {
+                return new Box<int> { Value = 7 };
+            }
+
+            fn main() {
+                WebApplication app = new WebApplication();
+                app.MapGet("/box", CreateBox);
+                app.RunOnce(5102);
+            }
+        "#;
+
+    let llvm = compile_llvm_ir(source).expect("generic route handler should lower");
+    assert!(llvm.contains("%glitch.Box_int"));
+    assert!(llvm.contains("define ptr @glitch_endpoint_handler_0(ptr %app, ptr %path, ptr %body)"));
+    assert!(llvm.contains("ptr @WebApplication_Handle"));
+}
+
+#[test]
 fn lowers_inherited_generic_controller_routes_and_templates() {
     let source = r#"
             using Glitching.AspNetCore;
@@ -624,7 +650,7 @@ fn warns_for_automapper_map_stub_members() {
 }
 
 #[test]
-fn warns_for_noop_swagger_host_configuration_members() {
+fn startup_swagger_host_configuration_members_lower_without_placeholder_warning() {
     let source = r#"
             using Glitching.AspNetCore;
 
@@ -637,11 +663,11 @@ fn warns_for_noop_swagger_host_configuration_members() {
         "#;
 
     let output = compile_source_with_options(source, true, false)
-        .expect("Swagger host configuration markers should still compile with a warning");
+        .expect("Swagger host configuration members should compile");
     let diagnostics = output.diagnostics.join("\n");
 
-    assert!(diagnostics.contains("warning GL3013"));
-    assert!(diagnostics.contains("no-op compatibility surface"));
+    assert!(!diagnostics.contains("warning GL3013"), "{diagnostics}");
+    assert!(!diagnostics.contains("no-op compatibility surface"), "{diagnostics}");
 }
 
 #[test]
@@ -761,9 +787,6 @@ fn startup_configuration_surfaces_resolve_without_missing_member_fallbacks() {
                     options.UseSqlite("demo.db");
                 });
                 services.AddLocalization(x => x.ResourcesPath = "Resources");
-                services.AddSwaggerGen(x => {
-                    x.SupportNonNullableReferenceTypes();
-                });
                 services.AddCors();
                 services.AddMvc(opt => {
                     opt.EnableEndpointRouting = false;
@@ -778,7 +801,7 @@ fn startup_configuration_surfaces_resolve_without_missing_member_fallbacks() {
         .expect("startup configuration surfaces should compile through package members");
     let diagnostics = output.diagnostics.join("\n");
 
-    assert!(diagnostics.contains("warning GL3013"), "{diagnostics}");
+    assert!(!diagnostics.contains("warning GL3013"), "{diagnostics}");
     for member in [
         "member 'AddDbContext'",
         "member 'AddLocalization'",

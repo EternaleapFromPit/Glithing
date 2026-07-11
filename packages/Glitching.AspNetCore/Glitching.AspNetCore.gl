@@ -307,16 +307,16 @@ public class ConfigurationManager {
 }
 
 public class HostEnvironment {
-    bool IsDevelopment() {
+    public bool IsDevelopment() {
         return false;
     }
 }
 
 public class LoggingBuilder {
-    void ClearProviders() {
+    public void ClearProviders() {
     }
 
-    void AddSerilog(string logger, bool dispose) {
+    public void AddSerilog(string logger, bool dispose) {
     }
 }
 
@@ -333,12 +333,12 @@ public class WebApplicationBuilder {
         this.Logging = new LoggingBuilder();
     }
 
-    WebApplication Build() {
+    public WebApplication Build() {
         ServiceProvider provider = this.Services.BuildServiceProvider();
         return new WebApplication(move provider);
     }
 
-    void ConfigureSerilog() {}
+    public void ConfigureSerilog() {}
 }
 
 WebApplicationBuilder CreateBuilder(string[] args) {
@@ -404,7 +404,7 @@ public class HttpContext {
         this.TraceIdentifier = "trace";
     }
 
-    void WriteJson(string text) {
+    public void WriteJson(string text) {
         this.Response.Body = text;
         this.Response.Headers.Add("Content-Type", "application/json");
     }
@@ -419,15 +419,15 @@ public class HttpContextAccessor : IHttpContextAccessor {
 }
 
 public class CorsPolicyBuilder {
-    CorsPolicyBuilder AllowAnyOrigin() {
+    public CorsPolicyBuilder AllowAnyOrigin() {
         return new CorsPolicyBuilder();
     }
 
-    CorsPolicyBuilder AllowAnyHeader() {
+    public CorsPolicyBuilder AllowAnyHeader() {
         return new CorsPolicyBuilder();
     }
 
-    CorsPolicyBuilder AllowAnyMethod() {
+    public CorsPolicyBuilder AllowAnyMethod() {
         return new CorsPolicyBuilder();
     }
 }
@@ -441,7 +441,7 @@ public class SwaggerOptions {
 }
 
 public class SwaggerUiOptions {
-    void SwaggerEndpoint(string url, string name) {}
+    public void SwaggerEndpoint(string url, string name) {}
 }
 
 public class CorsMiddlewareOptions {
@@ -488,86 +488,86 @@ public class WebApplication {
         glitch_register_attribute_routes(this);
     }
 
-    void Use(string name) {
+    public void Use(string name) {
         this.Middleware.Add(name);
     }
 
-    void UseRouting() {
+    public void UseRouting() {
         this.Use("routing");
     }
 
-    void UseEndpoints() {
+    public void UseEndpoints() {
         this.Use("endpoints");
     }
 
-    void UseTrace() {
+    public void UseTrace() {
         this.Use("trace");
     }
 
-    void UseJsonEnvelope() {
+    public void UseJsonEnvelope() {
         this.Use("json-envelope");
     }
 
-    void UseHttpsRedirection() {
+    public void UseHttpsRedirection() {
         this.Use("https-redirection");
     }
 
-    void UseAuthorization() {
+    public void UseAuthorization() {
         this.Use("authorization");
     }
 
-    void UseAuthentication() {
+    public void UseAuthentication() {
         this.Use("authentication");
     }
 
-    void UseCors(string policy) {
+    public void UseCors(string policy) {
         this.Use("cors");
     }
 
-    void UseCors(CorsConfigure configure) {
+    public void UseCors(CorsConfigure configure) {
         this.Use("cors");
     }
     
-    void UseCors() {
+    public void UseCors() {
         this.Use("cors");
     }
 
-    void UseMiddleware<T>() {}
-    void UseMiddleware<T>(object param) {}
-    void UseSwagger() {}
-    void UseSwagger(SwaggerOptionsConfigure configure) {}
-    void UseSwaggerUI(SwaggerUiOptionsConfigure configure) {}
-    void UseSwaggerUI() {}
-    void UseStaticFiles(object options) {}
-    void UseStaticFiles() {}
+    public void UseMiddleware<T>() {}
+    public void UseMiddleware<T>(object param) {}
+    public void UseSwagger() {}
+    public void UseSwagger(SwaggerOptionsConfigure configure) {}
+    public void UseSwaggerUI(SwaggerUiOptionsConfigure configure) {}
+    public void UseSwaggerUI() {}
+    public void UseStaticFiles(object options) {}
+    public void UseStaticFiles() {}
 
-    void MapControllers() {
+    public void MapControllers() {
         this.Use("controllers");
     }
 
-    void MapGet<T>(string path, Func<T> handler) {
+    public void MapGet<T>(string path, Func<T> handler) {
         string key = "GET " + path;
         this.Routes.Add(key);
     }
 
-    void MapGet(string path, string text) {
+    public void MapGet(string path, string text) {
         string key = "GET " + path;
         this.Routes.Add(key);
         this.Responses.Add(key, text);
     }
 
-    void MapPost<T>(string path, Func<T> handler) {
+    public void MapPost<T>(string path, Func<T> handler) {
         string key = "POST " + path;
         this.Routes.Add(key);
     }
 
-    void MapPost(string path, string text) {
+    public void MapPost(string path, string text) {
         string key = "POST " + path;
         this.Routes.Add(key);
         this.Responses.Add(key, text);
     }
 
-    string Handle(string method, string path, string body) {
+    public string Handle(string method, string path, string body) {
         string methodPrefix = method + " ";
         string key = methodPrefix + path;
         if (GlitchEndpointHandlers_Contains(this, method, path)) {
@@ -582,7 +582,7 @@ public class WebApplication {
         }
     }
 
-    string ApplyMiddleware(string text) {
+    public string ApplyMiddleware(string text) {
         string current = GlitchMiddlewareHandlers_Apply(this, text);
         if (this.Middleware.Contains("json-envelope")) {
             string prefix = "{\"result\":";
@@ -596,11 +596,11 @@ public class WebApplication {
         return current;
     }
 
-    void Run(int port) {
+    public void Run(int port) {
         GlitchRestHost_Run(this, port, GlitchRestHost_read_env_int("GLITCH_HTTP_MAX_REQUESTS", 0));
     }
 
-    void Run() {
+    public void Run() {
         GlitchRestHost_Run(
             this,
             GlitchRestHost_read_env_int("GLITCH_HTTP_PORT", 5000),
@@ -608,7 +608,7 @@ public class WebApplication {
         );
     }
 
-    void RunOnce(int port) {
+    public void RunOnce(int port) {
         GlitchRestHost_Run(this, port, 1);
     }
 }
@@ -691,7 +691,7 @@ public class ModelStateDictionary {
         this.Entries = new Dictionary<string, ModelStateEntry>();
     }
 
-    void AddModelError(string key, string message) {
+    public void AddModelError(string key, string message) {
         this.IsValid = false;
         ModelStateEntry entry = null;
         if (!this.Entries.TryGetValue(key, out entry)) {
@@ -700,7 +700,7 @@ public class ModelStateDictionary {
         }
         entry.Errors.Add(new ModelError { ErrorMessage = message });
     }
-    Dictionary<string, ModelStateEntry> ToDictionary() {
+    public Dictionary<string, ModelStateEntry> ToDictionary() {
         return this.Entries;
     }
 }
@@ -713,9 +713,9 @@ public class ControllerBase {
         this.ModelState = new ModelStateDictionary();
     }
 
-    object Ok(object value) { return value; }
-    object Ok() { return ""; }
-    object BadRequest(object error) { return error; }
-    object NotFound() { return "Not Found"; }
-    object StatusCode(int code, object value) { return value; }
+    public object Ok(object value) { return value; }
+    public object Ok() { return ""; }
+    public object BadRequest(object error) { return error; }
+    public object NotFound() { return "Not Found"; }
+    public object StatusCode(int code, object value) { return value; }
 }

@@ -20,6 +20,16 @@ pub(super) fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Resul
         .constructors
         .iter()
         .map(|constructor| {
+            let owner_generic_params = ty
+                .generic_params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect::<Vec<_>>();
+            let owner_generic_constraints = ty
+                .generic_params
+                .iter()
+                .map(|param| param.constraints.clone())
+                .collect::<Vec<_>>();
             let function = Function {
                 package_id: ty.package_id.clone(),
                 visibility: constructor.visibility,
@@ -40,6 +50,8 @@ pub(super) fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Resul
                 env,
                 std::slice::from_ref(&this_binding),
                 Some(ty.name.clone()),
+                &owner_generic_params,
+                &owner_generic_constraints,
                 Some(type_constructor_symbol(ty, symbol_id, constructor, env)),
             )
         })
@@ -48,6 +60,16 @@ pub(super) fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Resul
         .methods
         .iter()
         .map(|method| {
+            let owner_generic_params = ty
+                .generic_params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect::<Vec<_>>();
+            let owner_generic_constraints = ty
+                .generic_params
+                .iter()
+                .map(|param| param.constraints.clone())
+                .collect::<Vec<_>>();
             let implicit_params: &[TypedBinding] = if method.is_extension || method.is_static {
                 &[]
             } else {
@@ -58,6 +80,8 @@ pub(super) fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Resul
                 env,
                 implicit_params,
                 Some(ty.name.clone()),
+                &owner_generic_params,
+                &owner_generic_constraints,
                 Some(type_method_symbol(ty, symbol_id, method, env)),
             )
         })
@@ -87,6 +111,8 @@ pub(super) fn lower_function(
     env: &TypeEnv,
     implicit_params: &[TypedBinding],
     current_type: Option<String>,
+    owner_generic_params: &[String],
+    owner_generic_constraints: &[Vec<String>],
     symbol_override: Option<String>,
 ) -> Result<TypedFunction, String> {
     let return_type = type_syntax_to_ir(&function.return_type, env);
@@ -170,6 +196,13 @@ pub(super) fn lower_function(
             .iter()
             .map(|param| param.name.clone())
             .collect(),
+        generic_constraints: function
+            .generic_params
+            .iter()
+            .map(|param| param.constraints.clone())
+            .collect(),
+        owner_generic_params: owner_generic_params.to_vec(),
+        owner_generic_constraints: owner_generic_constraints.to_vec(),
         is_extern: function.is_extern,
         required_params: function
             .params

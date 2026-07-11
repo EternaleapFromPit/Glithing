@@ -1578,7 +1578,7 @@ pub(super) fn split_monomorphized_type(text: &str) -> Option<(&str, Vec<String>)
     Some((base, parsed_args))
 }
 
-pub(super) fn parse_monomorphized_ir_type(text: &str, env: &TypeEnv) -> Option<IrType> {
+pub(crate) fn parse_monomorphized_ir_type(text: &str, env: &TypeEnv) -> Option<IrType> {
     let text = text.trim();
     if text.is_empty() {
         return None;

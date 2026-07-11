@@ -724,7 +724,10 @@ impl Parser {
                     self.expect(TokenKind::RParen)?;
                     "new()".to_string()
                 } else {
-                    self.parse_qualified_name()?.join(".")
+                    let constraint = self
+                        .parse_type_syntax()?
+                        .ok_or_else(|| self.error_here("expected generic constraint type"))?;
+                    type_syntax_name(&constraint)
                 };
                 constraints.push(constraint);
                 if !self.match_kind(&TokenKind::Comma) {

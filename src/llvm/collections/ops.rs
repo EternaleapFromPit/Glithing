@@ -1,6 +1,27 @@
 use super::*;
 
 impl LlvmEmitter {
+    fn resolve_generic_placeholder_index_target(&self, name: &str) -> Option<IrType> {
+        let index = self.current_generic_params.iter().position(|param| param == name)?;
+        let constraints = self.current_generic_constraints.get(index)?;
+        for constraint in constraints {
+            if matches!(
+                constraint.as_str(),
+                "class" | "struct" | "notnull" | "unmanaged" | "new()"
+            ) {
+                continue;
+            }
+            let parsed = parse_monomorphized_ir_type(constraint, &TypeEnv::default())?;
+            if matches!(
+                parsed,
+                IrType::Array(_) | IrType::List(_) | IrType::Dictionary(_, _) | IrType::String | IrType::Ref(_)
+            ) {
+                return Some(parsed);
+            }
+        }
+        None
+    }
+
     pub(in crate::llvm) fn resolve_dictionary_enumerator_layout_from_target(
         &self,
         target: &TypedExpr,
@@ -690,7 +711,13 @@ impl LlvmEmitter {
         index: &TypedExpr,
     ) -> Result<LlValue, String> {
         let collection = self.emit_typed_expr(target)?;
-        match &target.ty {
+        let effective_ty = match &target.ty {
+            IrType::Unknown(name) => self
+                .resolve_generic_placeholder_index_target(name)
+                .unwrap_or_else(|| target.ty.clone()),
+            _ => target.ty.clone(),
+        };
+        match &effective_ty {
             IrType::Array(element) => {
                 let index = self.emit_typed_expr(index)?;
                 let index = self.cast_value(index, &LlType::I64)?;
@@ -800,7 +827,11 @@ impl LlvmEmitter {
         index: &TypedExpr,
         source: &TypedExpr,
     ) -> Result<(), String> {
-        if matches!(target.ty, IrType::Unknown(_)) || self.is_opaque_field(target) {
+        let effective_ty = match &target.ty {
+            IrType::Unknown(name) => self.resolve_generic_placeholder_index_target(name),
+            _ => Some(target.ty.clone()),
+        };
+        if effective_ty.is_none() || self.is_opaque_field(target) {
             self.emit_typed_expr(target)?;
             self.emit_typed_expr(index)?;
             self.emit_typed_expr(source)?;
@@ -808,11 +839,12 @@ impl LlvmEmitter {
         }
 
         let collection = self.emit_typed_expr(target)?;
-        match &target.ty {
+        let effective_ty = effective_ty.unwrap();
+        match &effective_ty {
             IrType::Array(element) | IrType::List(element) => {
                 let index = self.emit_typed_expr(index)?;
                 let index = self.cast_value(index, &LlType::I64)?;
-                let data_field = if matches!(target.ty, IrType::Array(_)) {
+                let data_field = if matches!(&effective_ty, IrType::Array(_)) {
                     ("%glitch.array", 1)
                 } else {
                     ("%glitch.list", 2)

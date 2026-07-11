@@ -22,7 +22,7 @@ public class SqlProvider {
         this.ConnectionString = connectionString;
     }
 
-    string BuildSelectAll(string table) {
+    public string BuildSelectAll(string table) {
         string prefix = "select * from ";
         return prefix + table;
     }
@@ -31,7 +31,7 @@ public class SqlProvider {
 public struct DbSet<T> {
     public List<T> Items;
 
-    DbQuery<T> AsQueryable() {
+    public DbQuery<T> AsQueryable() {
         var items = new List<T>();
         if (this.Items != null) {
             int i = 0;
@@ -43,7 +43,7 @@ public struct DbSet<T> {
         return new DbQuery<T> { Rows = items };
     }
 
-    DbQuery<T> AsNoTracking() {
+    public DbQuery<T> AsNoTracking() {
         var items = new List<T>();
         if (this.Items != null) {
             int i = 0;
@@ -55,7 +55,7 @@ public struct DbSet<T> {
         return new DbQuery<T> { Rows = items };
     }
 
-    DbQuery<T> Where(Func<T, bool> predicate) {
+    public DbQuery<T> Where(Func<T, bool> predicate) {
         var items = new List<T>();
         if (this.Items != null) {
             int i = 0;
@@ -67,13 +67,13 @@ public struct DbSet<T> {
         return new DbQuery<T> { Rows = items, Predicate = predicate };
     }
 
-    int Count {
+    public int Count {
         get {
             return this.AsQueryable().Count;
         }
     }
 
-    void Add(T entity) {
+    public void Add(T entity) {
         if (this.Items == null) {
             this.Items = new List<T>();
         }
@@ -81,31 +81,31 @@ public struct DbSet<T> {
         items.Add(entity);
     }
 
-    void Clear() {
+    public void Clear() {
         if (this.Items == null) {
             this.Items = new List<T>();
         }
         this.Items.Clear();
     }
 
-    Task AddAsync(T entity, CancellationToken cancellationToken) {
+    public Task AddAsync(T entity, CancellationToken cancellationToken) {
         this.Add(entity);
         return Task.CompletedTask;
     }
 
-    Task AddAsync(T entity) {
+    public Task AddAsync(T entity) {
         this.Add(entity);
         return Task.CompletedTask;
     }
 
-    Task AddRangeAsync(IEnumerable<T> entities, CancellationToken cancellationToken) {
+    public Task AddRangeAsync(IEnumerable<T> entities, CancellationToken cancellationToken) {
         foreach (var entity in entities) {
             this.Add(entity);
         }
         return Task.CompletedTask;
     }
 
-    Task AddRangeAsync(List<T> entities, CancellationToken cancellationToken) {
+    public Task AddRangeAsync(List<T> entities, CancellationToken cancellationToken) {
         int i = 0;
         while (i < entities.Count) {
             this.Add(entities[i]);
@@ -114,47 +114,47 @@ public struct DbSet<T> {
         return Task.CompletedTask;
     }
 
-    Task<bool> AnyAsync(CancellationToken cancellationToken) {
+    public Task<bool> AnyAsync(CancellationToken cancellationToken) {
         return this.AsQueryable().AnyAsync(cancellationToken);
     }
 
-    Task<bool> AnyAsync(Func<T, bool> predicate, CancellationToken cancellationToken) {
+    public Task<bool> AnyAsync(Func<T, bool> predicate, CancellationToken cancellationToken) {
         return this.Where(predicate).AnyAsync(cancellationToken);
     }
 
-    Task<T> FirstAsync(CancellationToken cancellationToken) {
+    public Task<T> FirstAsync(CancellationToken cancellationToken) {
         return this.AsQueryable().FirstAsync(cancellationToken);
     }
 
-    Task<T> FirstAsync(Func<T, bool> predicate, CancellationToken cancellationToken) {
+    public Task<T> FirstAsync(Func<T, bool> predicate, CancellationToken cancellationToken) {
         return this.Where(predicate).FirstAsync(cancellationToken);
     }
 
-    Task<T> FirstOrDefaultAsync(CancellationToken cancellationToken) {
+    public Task<T> FirstOrDefaultAsync(CancellationToken cancellationToken) {
         return this.AsQueryable().FirstOrDefaultAsync(cancellationToken);
     }
 
-    Task<T> FirstOrDefaultAsync(Func<T, bool> predicate, CancellationToken cancellationToken) {
+    public Task<T> FirstOrDefaultAsync(Func<T, bool> predicate, CancellationToken cancellationToken) {
         return this.Where(predicate).FirstOrDefaultAsync(cancellationToken);
     }
 
-    Task<T> SingleOrDefaultAsync(CancellationToken cancellationToken) {
+    public Task<T> SingleOrDefaultAsync(CancellationToken cancellationToken) {
         return this.AsQueryable().SingleOrDefaultAsync(cancellationToken);
     }
 
-    Task<T> SingleOrDefaultAsync(Func<T, bool> predicate, CancellationToken cancellationToken) {
+    public Task<T> SingleOrDefaultAsync(Func<T, bool> predicate, CancellationToken cancellationToken) {
         return this.Where(predicate).SingleOrDefaultAsync(cancellationToken);
     }
 
-    Task<List<T>> ToListAsync(CancellationToken cancellationToken) {
+    public Task<List<T>> ToListAsync(CancellationToken cancellationToken) {
         return this.AsQueryable().ToListAsync(cancellationToken);
     }
 
-    Task<T> FindAsync(object key) {
+    public Task<T> FindAsync(object key) {
         return new Task<T> { Result = default(T) };
     }
 
-    List<T> Snapshot() {
+    public List<T> Snapshot() {
         var copy = new List<T>();
         if (this.Items == null) {
             return copy;
@@ -172,41 +172,41 @@ public struct DbQuery<T> {
     public List<T> Rows;
     public Func<T, bool> Predicate;
 
-    List<T> RowsSnapshot() {
+    public List<T> RowsSnapshot() {
         return this.Rows;
     }
 
-    bool Matches(T item) {
+    public bool Matches(T item) {
         if (this.Predicate != null && !this.Predicate(item)) {
             return false;
         }
         return true;
     }
 
-    DbQuery<T> AsQueryable() {
+    public DbQuery<T> AsQueryable() {
         return new DbQuery<T> { Rows = this.Rows, Predicate = this.Predicate };
     }
 
-    DbQuery<T> AsNoTracking() {
+    public DbQuery<T> AsNoTracking() {
         return new DbQuery<T> { Rows = this.Rows, Predicate = this.Predicate };
     }
 
-    DbQuery<T> Include(object navigation) {
+    public DbQuery<T> Include(object navigation) {
         return new DbQuery<T> { Rows = this.Rows, Predicate = this.Predicate };
     }
 
-    DbQuery<T> ThenInclude(object navigation) {
+    public DbQuery<T> ThenInclude(object navigation) {
         return new DbQuery<T> { Rows = this.Rows, Predicate = this.Predicate };
     }
 
-    DbQuery<T> Where(Func<T, bool> predicate) {
+    public DbQuery<T> Where(Func<T, bool> predicate) {
         return new DbQuery<T> {
             Rows = this.Rows,
             Predicate = predicate,
         };
     }
 
-    int Count {
+    public int Count {
         get {
             int count = 0;
             int i = 0;
@@ -221,7 +221,7 @@ public struct DbQuery<T> {
         }
     }
 
-    Task<bool> AnyAsync(CancellationToken cancellationToken) {
+    public Task<bool> AnyAsync(CancellationToken cancellationToken) {
         int i = 0;
         var items = RowsSnapshot();
         while (i < items.Count) {
@@ -233,7 +233,7 @@ public struct DbQuery<T> {
         return new Task<bool> { Result = false };
     }
 
-    Task<T> FirstAsync(CancellationToken cancellationToken) {
+    public Task<T> FirstAsync(CancellationToken cancellationToken) {
         int i = 0;
         var items = RowsSnapshot();
         while (i < items.Count) {
@@ -246,19 +246,19 @@ public struct DbQuery<T> {
         return new Task<T> { Result = default(T) };
     }
 
-    Task<T> FirstAsync(Func<T, bool> predicate, CancellationToken cancellationToken) {
+    public Task<T> FirstAsync(Func<T, bool> predicate, CancellationToken cancellationToken) {
         return this.Where(predicate).FirstAsync(cancellationToken);
     }
 
-    Task<T> FirstOrDefaultAsync(CancellationToken cancellationToken) {
+    public Task<T> FirstOrDefaultAsync(CancellationToken cancellationToken) {
         return this.FirstAsync(cancellationToken);
     }
 
-    Task<T> FirstOrDefaultAsync(Func<T, bool> predicate, CancellationToken cancellationToken) {
+    public Task<T> FirstOrDefaultAsync(Func<T, bool> predicate, CancellationToken cancellationToken) {
         return this.Where(predicate).FirstOrDefaultAsync(cancellationToken);
     }
 
-    Task<T> SingleOrDefaultAsync(CancellationToken cancellationToken) {
+    public Task<T> SingleOrDefaultAsync(CancellationToken cancellationToken) {
         int i = 0;
         T found = default(T);
         bool has = false;
@@ -277,11 +277,11 @@ public struct DbQuery<T> {
         return new Task<T> { Result = found };
     }
 
-    Task<T> SingleOrDefaultAsync(Func<T, bool> predicate, CancellationToken cancellationToken) {
+    public Task<T> SingleOrDefaultAsync(Func<T, bool> predicate, CancellationToken cancellationToken) {
         return this.Where(predicate).SingleOrDefaultAsync(cancellationToken);
     }
 
-    Task<List<T>> ToListAsync(CancellationToken cancellationToken) {
+    public Task<List<T>> ToListAsync(CancellationToken cancellationToken) {
         var list = new List<T>();
         int i = 0;
         var items = RowsSnapshot();
@@ -305,8 +305,8 @@ public class ChangeTracker {
     public ChangeTracker() {
         this.DebugView = new DebugView();
     }
-    void DetectChanges() {}
-    void Clear() {}
+    public void DetectChanges() {}
+    public void Clear() {}
 }
 
 public class DebugView {
@@ -324,20 +324,20 @@ public class DatabaseFacade {
         this.ConnectionString = connectionString;
     }
 
-    bool EnsureCreated() { return true; }
-    bool EnsureDeleted() { return false; }
-    bool IsInMemory() { return this.ConnectionString == "inmemory"; }
-    DatabaseTransaction BeginTransaction(object isolationLevel) {
+    public bool EnsureCreated() { return true; }
+    public bool EnsureDeleted() { return false; }
+    public bool IsInMemory() { return this.ConnectionString == "inmemory"; }
+    public DatabaseTransaction BeginTransaction(object isolationLevel) {
         return new DatabaseTransaction();
     }
-    void Migrate() {}
-    int ExecuteSqlRaw(string sql, object parameters) { return 0; }
+    public void Migrate() {}
+    public int ExecuteSqlRaw(string sql, object parameters) { return 0; }
 }
 
 public class DatabaseTransaction : IDbContextTransaction {
-    void Commit() {}
-    void Rollback() {}
-    void Dispose() {}
+    public void Commit() {}
+    public void Rollback() {}
+    public void Dispose() {}
 }
 
 public enum EntityState {
@@ -390,55 +390,55 @@ public class DbContext {
         this.ChangeTracker = new ChangeTracker();
     }
 
-    void EnsureNotDisposed() {
+    public void EnsureNotDisposed() {
         if (this.IsDisposed) {
             throw new Exception("DbContext is disposed");
         }
     }
 
-    void Track(string entityKey) {
+    public void Track(string entityKey) {
         this.EnsureNotDisposed();
         this.TrackedEntities.Add(entityKey);
     }
 
-    int TrackedCount => this.TrackedEntities.Count;
+    public int TrackedCount => this.TrackedEntities.Count;
 
-    int SaveChanges() {
+    public int SaveChanges() {
         this.EnsureNotDisposed();
         int count = this.TrackedEntities.Count;
         this.TrackedEntities.Clear();
         return count;
     }
 
-    Task<int> SaveChangesAsync() {
+    public Task<int> SaveChangesAsync() {
         this.EnsureNotDisposed();
         int count = this.TrackedEntities.Count;
         this.TrackedEntities.Clear();
         return new Task<int> { Result = count };
     }
 
-    void Add(string entityKey) {
+    public void Add(string entityKey) {
         this.Track(entityKey);
     }
 
-    void Update(string entityKey) {
+    public void Update(string entityKey) {
         this.Track(entityKey);
     }
 
-    void Remove(string entityKey) {
+    public void Remove(string entityKey) {
         this.EnsureNotDisposed();
     }
 
-    void Dispose() {
+    public void Dispose() {
         this.IsDisposed = true;
         this.TrackedEntities.Clear();
     }
 
-    DbSet<T> Set<T>() {
+    public DbSet<T> Set<T>() {
         return new DbSet<T>();
     }
 
-    EntityEntry Entry(object entity) {
+    public EntityEntry Entry(object entity) {
         return new EntityEntry();
     }
 }
@@ -454,16 +454,16 @@ public class IQueryableString {
         this.Tracking = tracking;
     }
 
-    IQueryableString AsNoTracking() {
+    public IQueryableString AsNoTracking() {
         return new IQueryableString(this.ConnectionString, this.Table, false);
     }
 
-    string ToQueryString() {
+    public string ToQueryString() {
         SqlProvider provider = new SqlProvider("sql", this.ConnectionString);
         return provider.BuildSelectAll(this.Table);
     }
 
-    List<string> ToList() {
+    public List<string> ToList() {
         List<string> values = new List<string>();
         string query = this.ToQueryString();
         if (this.Tracking) {
@@ -485,15 +485,15 @@ public class DbSetString {
         this.Table = table;
     }
 
-    IQueryableString AsQueryable() {
+    public IQueryableString AsQueryable() {
         return new IQueryableString(this.ConnectionString, this.Table, true);
     }
 
-    IQueryableString AsNoTracking() {
+    public IQueryableString AsNoTracking() {
         return new IQueryableString(this.ConnectionString, this.Table, false);
     }
 
-    List<string> ToList() {
+    public List<string> ToList() {
         return this.AsQueryable().ToList();
     }
 }
@@ -504,13 +504,13 @@ public DbSetString SetString(DbContext context, string table) {
 }
 
 public class ModelBuilder {
-    EntityTypeBuilder<T> Entity<T>() {
+    public EntityTypeBuilder<T> Entity<T>() {
         return new EntityTypeBuilder<T>();
     }
-    object Entity(string name) {
+    public object Entity(string name) {
         return new EntityTypeBuilder<object>();
     }
-    object Entity(string name, object configure) {
+    public object Entity(string name, object configure) {
         return new EntityTypeBuilder<object>();
     }
 }
@@ -540,101 +540,101 @@ public object HasDefaultSchema(object target, string schema) { return target; }
 public object Entity(object target, string name) { return target; }
 public object Entity(object target, string name, object configure) { return target; }
 public object HasAnnotation(object target, string name, object value) { return target; }
-object UseIdentityColumns(object target) { return target; }
-object EnsureSchema(object target, string schema) { return target; }
-object CreateTable(object target, string name, object columns) { return target; }
-object CreateTable(object target, string name, object columns, object constraints) { return target; }
-object CreateTable(object target, string name, object columns, object constraints, string schema) { return target; }
-object CreateTable(object target, string name, string schema, object columns, object constraints) { return target; }
-object CreateIndex(object target, string name, object columns) { return target; }
-object CreateIndex(object target, string name, string table, object columns) { return target; }
-object CreateIndex(object target, string name, string table, object columns, bool unique) { return target; }
-object CreateIndex(object target, string name, string schema, string table, object columns) { return target; }
-object CreateIndex(object target, string name, string schema, string table, object columns, bool unique) { return target; }
-object CreateIndex(object target, string name, string table, object columns, string schema, bool unique) { return target; }
+public object UseIdentityColumns(object target) { return target; }
+public object EnsureSchema(object target, string schema) { return target; }
+public object CreateTable(object target, string name, object columns) { return target; }
+public object CreateTable(object target, string name, object columns, object constraints) { return target; }
+public object CreateTable(object target, string name, object columns, object constraints, string schema) { return target; }
+public object CreateTable(object target, string name, string schema, object columns, object constraints) { return target; }
+public object CreateIndex(object target, string name, object columns) { return target; }
+public object CreateIndex(object target, string name, string table, object columns) { return target; }
+public object CreateIndex(object target, string name, string table, object columns, bool unique) { return target; }
+public object CreateIndex(object target, string name, string schema, string table, object columns) { return target; }
+public object CreateIndex(object target, string name, string schema, string table, object columns, bool unique) { return target; }
+public object CreateIndex(object target, string name, string table, object columns, string schema, bool unique) { return target; }
 
-object DropTable(object target, string name) { return target; }
-object DropTable(object target, string name, string schema) { return target; }
+public object DropTable(object target, string name) { return target; }
+public object DropTable(object target, string name, string schema) { return target; }
 
-object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5) { return target; }
-object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6) { return target; }
-object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7) { return target; }
-object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8) { return target; }
-object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8, object arg9) { return target; }
-object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8, object arg9, object arg10) { return target; }
-object AlterColumn(object target, string name, object column) { return target; }
+public object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5) { return target; }
+public object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6) { return target; }
+public object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7) { return target; }
+public object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8) { return target; }
+public object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8, object arg9) { return target; }
+public object AlterColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8, object arg9, object arg10) { return target; }
+public object AlterColumn(object target, string name, object column) { return target; }
 
-object DropIndex(object target, string name) { return target; }
-object DropIndex(object target, string name, string schema) { return target; }
-object DropIndex(object target, string name, string schema, string table) { return target; }
+public object DropIndex(object target, string name) { return target; }
+public object DropIndex(object target, string name, string schema) { return target; }
+public object DropIndex(object target, string name, string schema, string table) { return target; }
 
-object AddColumn<T>(object target, object arg1, object arg2) { return target; }
-object AddColumn<T>(object target, object arg1, object arg2, object arg3) { return target; }
-object AddColumn<T>(object target, object arg1, object arg2, object arg3, object arg4) { return target; }
-object AddColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5) { return target; }
-object AddColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6) { return target; }
-object AddColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7) { return target; }
-object AddColumn(object target, string name, object column) { return target; }
+public object AddColumn<T>(object target, object arg1, object arg2) { return target; }
+public object AddColumn<T>(object target, object arg1, object arg2, object arg3) { return target; }
+public object AddColumn<T>(object target, object arg1, object arg2, object arg3, object arg4) { return target; }
+public object AddColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5) { return target; }
+public object AddColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6) { return target; }
+public object AddColumn<T>(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7) { return target; }
+public object AddColumn(object target, string name, object column) { return target; }
 
-object DropColumn(object target, string name) { return target; }
-object DropColumn(object target, string name, string schema) { return target; }
-object DropColumn(object target, string name, string schema, string table) { return target; }
+public object DropColumn(object target, string name) { return target; }
+public object DropColumn(object target, string name, string schema) { return target; }
+public object DropColumn(object target, string name, string schema, string table) { return target; }
 
-object RenameColumn(object target, string name, string newName) { return target; }
-object RenameColumn(object target, string table, string name, string newName, string schema) { return target; }
-object RenameColumn(object target, object arg1, object arg2, object arg3, object arg4) { return target; }
-object RenameColumn(object target, object arg1, object arg2, object arg3, object arg4, object arg5) { return target; }
+public object RenameColumn(object target, string name, string newName) { return target; }
+public object RenameColumn(object target, string table, string name, string newName, string schema) { return target; }
+public object RenameColumn(object target, object arg1, object arg2, object arg3, object arg4) { return target; }
+public object RenameColumn(object target, object arg1, object arg2, object arg3, object arg4, object arg5) { return target; }
 
-object AddForeignKey(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8) { return target; }
-object AddForeignKey(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8, object arg9) { return target; }
-object AddForeignKey(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8, object arg9, object arg10) { return target; }
-object AddForeignKey(object target, string name, string table, string column, string principalTable, string principalColumn) { return target; }
+public object AddForeignKey(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8) { return target; }
+public object AddForeignKey(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8, object arg9) { return target; }
+public object AddForeignKey(object target, object arg1, object arg2, object arg3, object arg4, object arg5, object arg6, object arg7, object arg8, object arg9, object arg10) { return target; }
+public object AddForeignKey(object target, string name, string table, string column, string principalTable, string principalColumn) { return target; }
 
-object DropForeignKey(object target, string name, string table) { return target; }
-object DropForeignKey(object target, string name, string table, string schema) { return target; }
-object Annotation(object target, string name, object value) { return target; }
-object Column(object target, object name) { return target; }
-object HasDefaultValueSql(object target, string sql) { return target; }
-object Property(object target, object prop) { return target; }
-object HasConversion(object target) { return target; }
-object IsUnique(object target) { return target; }
-object HasIndex(object target, object index) { return target; }
-object UsingEntity(object target, object entity) { return target; }
-object WithMany(object target, string navigation) { return target; }
-object HasMany(object target, string navigation) { return target; }
-object OnDelete(object target, object behavior) { return target; }
-object HasForeignKey(object target, string navigation) { return target; }
-object HasOne(object target, object navigation) { return target; }
-object AsQueryable(object target) { return target; }
-object IgnoreQueryFilters(object target) { return target; }
-object Where(object target, object predicate) { return target; }
-object Take(object target, int count) { return target; }
-object Skip(object target, int count) { return target; }
-object ToList(object target) { return target; }
-object Include(object target, object navigation) { return target; }
-object ThenInclude(object target, object navigation) { return target; }
-object HasDefaultValue(object target, object value) { return target; }
-object HasColumnType(object target, string type) { return target; }
-object Any(object target) { return target; }
-object Any(object target, object predicate) { return target; }
-object ToDictionary(object target, object keySelector) { return target; }
-object ToDictionary(object target, object keySelector, object elementSelector) { return target; }
-object ToArray(object target) { return target; }
-object Select(object target, object selector) { return target; }
-object FirstOrDefault(object target) { return target; }
-object FirstOrDefault(object target, object predicate) { return target; }
-object FirstOrDefaultAsync(object target) { return target; }
-object FirstOrDefaultAsync(object target, object predicate) { return target; }
-object SingleOrDefaultAsync(object target) { return target; }
-object SingleOrDefaultAsync(object target, object predicate) { return target; }
-Task<int> SaveChangesAsync() { return new Task<int> { Result = 0 }; }
-object SaveChangesAsync(object target) { return target; }
-object AddRangeAsync(object target, object entities) { return target; }
-Task AddRangeAsync(object target, object entities, object cancellationToken) { return Task.CompletedTask; }
-object AddAsync(object target, object entity) { return target; }
-object AsNoTrackingWithIdentityResolution(object target) { return target; }
-object FromSqlRaw(object target, string sql, object parameters) { return target; }
-object ExecuteSqlRaw(object target, string sql, object parameters) { return target; }
+public object DropForeignKey(object target, string name, string table) { return target; }
+public object DropForeignKey(object target, string name, string table, string schema) { return target; }
+public object Annotation(object target, string name, object value) { return target; }
+public object Column(object target, object name) { return target; }
+public object HasDefaultValueSql(object target, string sql) { return target; }
+public object Property(object target, object prop) { return target; }
+public object HasConversion(object target) { return target; }
+public object IsUnique(object target) { return target; }
+public object HasIndex(object target, object index) { return target; }
+public object UsingEntity(object target, object entity) { return target; }
+public object WithMany(object target, string navigation) { return target; }
+public object HasMany(object target, string navigation) { return target; }
+public object OnDelete(object target, object behavior) { return target; }
+public object HasForeignKey(object target, string navigation) { return target; }
+public object HasOne(object target, object navigation) { return target; }
+public object AsQueryable(object target) { return target; }
+public object IgnoreQueryFilters(object target) { return target; }
+public object Where(object target, object predicate) { return target; }
+public object Take(object target, int count) { return target; }
+public object Skip(object target, int count) { return target; }
+public object ToList(object target) { return target; }
+public object Include(object target, object navigation) { return target; }
+public object ThenInclude(object target, object navigation) { return target; }
+public object HasDefaultValue(object target, object value) { return target; }
+public object HasColumnType(object target, string type) { return target; }
+public object Any(object target) { return target; }
+public object Any(object target, object predicate) { return target; }
+public object ToDictionary(object target, object keySelector) { return target; }
+public object ToDictionary(object target, object keySelector, object elementSelector) { return target; }
+public object ToArray(object target) { return target; }
+public object Select(object target, object selector) { return target; }
+public object FirstOrDefault(object target) { return target; }
+public object FirstOrDefault(object target, object predicate) { return target; }
+public object FirstOrDefaultAsync(object target) { return target; }
+public object FirstOrDefaultAsync(object target, object predicate) { return target; }
+public object SingleOrDefaultAsync(object target) { return target; }
+public object SingleOrDefaultAsync(object target, object predicate) { return target; }
+public Task<int> SaveChangesAsync() { return new Task<int> { Result = 0 }; }
+public object SaveChangesAsync(object target) { return target; }
+public object AddRangeAsync(object target, object entities) { return target; }
+public Task AddRangeAsync(object target, object entities, object cancellationToken) { return Task.CompletedTask; }
+public object AddAsync(object target, object entity) { return target; }
+public object AsNoTrackingWithIdentityResolution(object target) { return target; }
+public object FromSqlRaw(object target, string sql, object parameters) { return target; }
+public object ExecuteSqlRaw(object target, string sql, object parameters) { return target; }
 
 native "/*
 Microsoft.EntityFrameworkCore package.

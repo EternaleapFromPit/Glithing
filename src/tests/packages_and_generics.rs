@@ -260,6 +260,47 @@ fn compiles_dictionary_try_get_value_surface() {
 }
 
 #[test]
+fn compiles_tcp_client_socket_surface() {
+    let source = r#"
+            using System.Net.Sockets;
+
+            fn main() {
+                TcpClient client = new TcpClient("127.0.0.1", 9);
+                NetworkStream stream = client.GetStream();
+                byte[] buffer = new byte[4];
+                stream.Write(buffer, 0, 4);
+                stream.Close();
+                client.Close();
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("System.Net.Sockets package surface should lower");
+
+    assert!(llvm_ir.contains("GlitchSocket_Connect"));
+    assert!(llvm_ir.contains("GlitchSocket_Read"));
+    assert!(llvm_ir.contains("GlitchSocket_Write"));
+}
+
+#[test]
+fn compiles_sql_client_socket_surface() {
+    let source = r#"
+            using System.Data.SqlClient;
+
+            fn main() {
+                SqlConnection connection = new SqlConnection("Server=127.0.0.1,1433;Database=demo;User ID=demo;Password=demo");
+                connection.Open();
+                connection.Close();
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source).expect("System.Data.SqlClient package surface should lower");
+
+    assert!(llvm_ir.contains("GlitchSocket_Connect"));
+    assert!(llvm_ir.contains("SqlConnection"));
+    assert!(llvm_ir.contains("SqlException"));
+}
+
+#[test]
 fn compiles_readonly_dictionary_as_view_framework_surface() {
     let source = r#"
             using System.Collections.Generic;
@@ -388,7 +429,27 @@ fn warns_on_generic_placeholder_indexing_with_actionable_diagnostic() {
 
     assert!(diagnostics.contains("warning GL3008"));
     assert!(diagnostics.contains("generic placeholder"));
+    assert!(diagnostics.contains("concrete type"));
     assert!(diagnostics.contains("specialized method body"));
+}
+
+#[test]
+fn does_not_warn_on_generic_placeholder_indexing_when_constraint_is_concrete_list() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            class Picker {
+                public static int First<T>(T values) where T : List<int> {
+                    return values[0];
+                }
+            }
+        "#;
+
+    let output = compile_source_with_options(source, true, false)
+        .expect("constrained generic placeholder indexing should compile without a warning");
+    let diagnostics = output.diagnostics.join("\n");
+
+    assert!(!diagnostics.contains("warning GL3008"));
 }
 
 #[test]
@@ -454,6 +515,60 @@ fn specializes_concrete_generic_owner_layouts_discovered_inside_generic_method_b
 
     assert!(llvm_ir.contains("%glitch.Holder_int___g0__t1 = type { i64, ptr, ptr }"));
     assert!(llvm_ir.contains("%glitch.Box_int___g0__t0 = type { i64, ptr, i32 }"));
+}
+
+#[test]
+fn lowers_generic_placeholder_indexing_when_constraint_provides_concrete_list_type() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            class Picker {
+                public static int First<T>(T values) where T : List<int> {
+                    return values[0];
+                }
+            }
+
+            fn main() {
+                List<int> values = new List<int>();
+                values.Add(7);
+                print(Picker.First(values));
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("constrained generic placeholder indexing should lower safely");
+
+    assert!(llvm_ir.contains("getelementptr inbounds %glitch.list"));
+    assert!(llvm_ir.contains("Picker"));
+}
+
+#[test]
+fn specializes_inherited_generic_base_layouts_and_fields() {
+    let source = r#"
+            using System.Collections.Generic;
+
+            class Base<T> {
+                public T Value;
+            }
+
+            class Derived<T> : Base<List<T>> {
+                public int Tag;
+            }
+
+            fn main() {
+                Derived<int> derived = new Derived<int>();
+                derived.Value = new List<int>();
+                derived.Value.Add(7);
+                print(derived.Value[0]);
+            }
+        "#;
+
+    let llvm_ir = compile_llvm_ir(source)
+        .expect("inherited generic base layouts should specialize concretely");
+
+    assert!(llvm_ir.contains("%glitch.Base_List_int_"));
+    assert!(llvm_ir.contains("%glitch.Derived_int"));
+    assert!(llvm_ir.contains("List_int"));
 }
 
 #[test]

@@ -269,6 +269,8 @@ pub(crate) struct LlvmEmitter {
     async_state_pc_ptr: Option<String>,
     async_suspend_index: usize,
     async_uninitialized_locals: HashSet<String>,
+    current_generic_params: Vec<String>,
+    current_generic_constraints: Vec<Vec<String>>,
     entry_insert_pos: Option<usize>,
     terminated: bool,
     startup: Option<TypedStartup>,
@@ -311,6 +313,8 @@ impl LlvmEmitter {
             async_state_pc_ptr: None,
             async_suspend_index: 0,
             async_uninitialized_locals: HashSet::new(),
+            current_generic_params: Vec::new(),
+            current_generic_constraints: Vec::new(),
             entry_insert_pos: None,
             terminated: false,
             startup: program.startup.clone(),
@@ -1098,6 +1102,8 @@ impl LlvmEmitter {
             async_state_pc_ptr: None,
             async_suspend_index: 0,
             async_uninitialized_locals: HashSet::new(),
+            current_generic_params: Vec::new(),
+            current_generic_constraints: Vec::new(),
             entry_insert_pos: None,
             terminated: false,
             startup: None,
@@ -1162,6 +1168,24 @@ impl LlvmEmitter {
         if function.is_async {
             return self.emit_async_function(function);
         }
+        let saved_generic_params = std::mem::replace(
+            &mut self.current_generic_params,
+            function
+                .owner_generic_params
+                .iter()
+                .chain(&function.generic_params)
+                .cloned()
+                .collect(),
+        );
+        let saved_generic_constraints = std::mem::replace(
+            &mut self.current_generic_constraints,
+            function
+                .owner_generic_constraints
+                .iter()
+                .chain(&function.generic_constraints)
+                .cloned()
+                .collect(),
+        );
         self.vars.clear();
         self.service_collection_registrations.clear();
         self.service_provider_registrations.clear();
@@ -1284,6 +1308,8 @@ impl LlvmEmitter {
         }
         self.body.push_str("}\n\n");
         self.entry_insert_pos = None;
+        self.current_generic_params = saved_generic_params;
+        self.current_generic_constraints = saved_generic_constraints;
         Ok(())
     }
 
@@ -1297,6 +1323,24 @@ impl LlvmEmitter {
                 ));
             }
         };
+        let saved_generic_params = std::mem::replace(
+            &mut self.current_generic_params,
+            function
+                .owner_generic_params
+                .iter()
+                .chain(&function.generic_params)
+                .cloned()
+                .collect(),
+        );
+        let saved_generic_constraints = std::mem::replace(
+            &mut self.current_generic_constraints,
+            function
+                .owner_generic_constraints
+                .iter()
+                .chain(&function.generic_constraints)
+                .cloned()
+                .collect(),
+        );
         let result_ll = llvm_ir_type(&result_ty);
         let state_type = format!("glitch_async_state_{}", sanitize(&function.symbol));
         let resume_symbol = format!("glitch_async_resume_{}", sanitize(&function.symbol));
@@ -1437,6 +1481,8 @@ impl LlvmEmitter {
             "  {task_ptr} = call ptr @{helper_name}(ptr {delegate_ptr})\n  ret ptr {task_ptr}\n}}\n\n"
         ));
         self.entry_insert_pos = None;
+        self.current_generic_params = saved_generic_params;
+        self.current_generic_constraints = saved_generic_constraints;
         Ok(())
     }
 

@@ -3,10 +3,10 @@ package Microsoft.AspNetCore.Mvc;
 using Glitching.AspNetCore;
 using Microsoft.AspNetCore.Mvc.Filters;
 
-class Controller : ControllerBase {
+public class Controller : ControllerBase {
 }
 
-class RouteAttribute {
+public class RouteAttribute {
     public string Template;
 
     public RouteAttribute() {
@@ -18,7 +18,7 @@ class RouteAttribute {
     }
 }
 
-class HttpGetAttribute {
+public class HttpGetAttribute {
     public string Template;
 
     public HttpGetAttribute() {
@@ -30,7 +30,7 @@ class HttpGetAttribute {
     }
 }
 
-class HttpPostAttribute {
+public class HttpPostAttribute {
     public string Template;
 
     public HttpPostAttribute() {
@@ -42,7 +42,7 @@ class HttpPostAttribute {
     }
 }
 
-class HttpPutAttribute {
+public class HttpPutAttribute {
     public string Template;
 
     public HttpPutAttribute() {
@@ -54,7 +54,7 @@ class HttpPutAttribute {
     }
 }
 
-class HttpDeleteAttribute {
+public class HttpDeleteAttribute {
     public string Template;
 
     public HttpDeleteAttribute() {
@@ -66,15 +66,15 @@ class HttpDeleteAttribute {
     }
 }
 
-class FromQueryAttribute {
+public class FromQueryAttribute {
     public FromQueryAttribute() {}
 }
 
-class FromBodyAttribute {
+public class FromBodyAttribute {
     public FromBodyAttribute() {}
 }
 
-class ContentResult {
+public class ContentResult {
     public string Content;
     public string ContentType;
 

@@ -286,7 +286,14 @@ pub(crate) fn validate_generic_param_constraints(
             ) {
                 continue;
             }
-            if !known_types.contains_key(constraint) {
+            let constraint_name = constraint
+                .split('<')
+                .next()
+                .unwrap_or(constraint)
+                .rsplit('.')
+                .next()
+                .unwrap_or(constraint);
+            if !known_types.contains_key(constraint_name) {
                 return Err(format!(
                     "generic constraint error in {context}: unknown constraint type '{}'",
                     constraint

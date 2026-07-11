@@ -76,3 +76,4 @@ mod framework_and_xunit;
 mod borrow_checker;
 mod cli;
 
+mod compat_surfaces;
