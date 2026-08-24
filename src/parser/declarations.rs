@@ -69,6 +69,7 @@ impl Parser {
         visibility: Visibility,
         namespace: Vec<String>,
         attributes: Vec<Attribute>,
+        enclosing_types: &[String],
         nested_types: &mut Vec<TypeDef>,
         native_c: &mut Vec<String>,
         delegates: &mut Vec<DelegateDef>,
@@ -127,6 +128,7 @@ impl Parser {
                     ty: param.ty.clone(),
                     is_static: false,
                     initializer: None,
+                    attributes: Vec::new(),
                 });
             }
             constructors.push(Constructor {
@@ -155,6 +157,7 @@ impl Parser {
                 namespace,
                 attributes,
                 name,
+                enclosing_types: enclosing_types.to_vec(),
                 generic_params,
                 bases,
                 fields,
@@ -218,6 +221,11 @@ impl Parser {
                 || self.at(&TokenKind::Record)
                 || self.at(&TokenKind::Interface)
             {
+                let child_enclosing_types = enclosing_types
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(name.clone()))
+                    .collect::<Vec<_>>();
                 let nested = self.parse_type_def(
                     package_id.clone(),
                     member_modifiers.visibility.unwrap_or_else(|| {
@@ -225,6 +233,7 @@ impl Parser {
                     }),
                     namespace.clone(),
                     member_attributes,
+                    &child_enclosing_types,
                     nested_types,
                     native_c,
                     delegates,
@@ -387,6 +396,7 @@ impl Parser {
                     ty,
                     is_static: member_modifiers.is_static,
                     initializer,
+                    attributes: member_attributes,
                 });
             } else {
                 let mut initializer = None;
@@ -402,6 +412,7 @@ impl Parser {
                     ty,
                     is_static: member_modifiers.is_static,
                     initializer,
+                    attributes: member_attributes,
                 });
             }
         }
@@ -414,6 +425,7 @@ impl Parser {
             namespace,
             attributes,
             name,
+            enclosing_types: enclosing_types.to_vec(),
             generic_params,
             bases,
             fields,
@@ -499,6 +511,7 @@ impl Parser {
             namespace,
             attributes,
             name,
+            enclosing_types: Vec::new(),
             generic_params: Vec::new(),
             bases: Vec::new(),
             fields: Vec::new(),

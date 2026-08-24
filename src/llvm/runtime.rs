@@ -46,7 +46,7 @@ pub(super) fn finish_module(emitter: &LlvmEmitter) -> Result<String, String> {
         out.push_str("declare void @GlitchString_Unlock(ptr)\n");
         out.push_str("declare i64 @GlitchLiveAllocations_Add(i64)\n");
         out.push_str("declare i64 @GlitchLiveAllocations_Load()\n");
-        out.push_str("@glitch_exception_pending = internal global ptr null\n");
+        out.push_str("@glitch_exception_pending = internal thread_local global ptr null\n");
         out.push_str(
             "define dllexport ptr @glitch_take_pending_exception() {\nentry:\n  %value = load ptr, ptr @glitch_exception_pending\n  store ptr null, ptr @glitch_exception_pending\n  ret ptr %value\n}\n",
         );

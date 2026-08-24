@@ -41,11 +41,30 @@ pub(crate) struct TypeDef {
     pub(crate) namespace: Vec<String>,
     pub(crate) attributes: Vec<Attribute>,
     pub(crate) name: String,
+    /// Simple names of enclosing types, outermost first, e.g. `["List"]` for
+    /// a `Query` declared inside `class List { ... }`. Empty for top-level
+    /// types. Combined with `namespace` and `name`, this gives every type a
+    /// collision-free canonical identity even when many features each
+    /// declare their own nested type with the same simple name (a common
+    /// MediatR convention: `Articles.List.Query`, `Comments.List.Query`, ...).
+    pub(crate) enclosing_types: Vec<String>,
     pub(crate) generic_params: Vec<GenericParam>,
     pub(crate) bases: Vec<String>,
     pub(crate) fields: Vec<FieldDef>,
     pub(crate) constructors: Vec<Constructor>,
     pub(crate) methods: Vec<Function>,
+}
+
+/// The full dot-joined canonical identity of a type: namespace segments,
+/// then enclosing-type segments, then the type's own simple name.
+pub(crate) fn qualified_type_path(namespace: &[String], enclosing_types: &[String], name: &str) -> String {
+    namespace
+        .iter()
+        .chain(enclosing_types.iter())
+        .chain(std::iter::once(&name.to_string()))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +95,7 @@ pub(crate) struct FieldDef {
     pub(crate) ty: TypeSyntax,
     pub(crate) is_static: bool,
     pub(crate) initializer: Option<Expr>,
+    pub(crate) attributes: Vec<Attribute>,
 }
 
 #[derive(Debug, Clone)]

@@ -125,6 +125,10 @@ pub(crate) struct TypedType {
     pub(crate) kind: TypeKind,
     pub(crate) bases: Vec<String>,
     pub(crate) fields: Vec<TypedBinding>,
+    /// Names of fields declared with `[JsonIgnore]`, skipped by endpoint
+    /// response JSON serialization (and exempt from its shape checks) to
+    /// mirror `System.Text.Json`'s default cycle-breaking behavior.
+    pub(crate) json_ignore_fields: std::collections::HashSet<String>,
     pub(crate) constructors: Vec<TypedFunction>,
     pub(crate) methods: Vec<TypedFunction>,
 }

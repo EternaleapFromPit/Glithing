@@ -44,10 +44,11 @@ impl LlvmEmitter {
                     )?
                 }
                 ServiceLifetime::Transient | ServiceLifetime::Scoped => {
+                    let prefix = self.next_label("service_lookup");
                     LlValue {
                         value: self.emit_endpoint_object_allocation(
                             &registration.implementation_name,
-                            "service_lookup",
+                            &prefix,
                         )?,
                         ty: LlType::Ptr,
                     }
@@ -92,8 +93,9 @@ impl LlvmEmitter {
                     self.emit_temporary_drop(target, &receiver);
                     return self.default_typed_value(result_ty);
                 }
+                let prefix = self.next_label("service_lookup");
                 let allocated =
-                    self.emit_endpoint_object_allocation(&implementation, "service_lookup")?;
+                    self.emit_endpoint_object_allocation(&implementation, &prefix)?;
                 self.emit_temporary_drop(target, &receiver);
                 return Ok(LlValue {
                     value: allocated,
@@ -117,8 +119,9 @@ impl LlvmEmitter {
                         "LLVM TIR backend: {name}<{interface_name}> requires a unique concrete implementation or an explicit AddTransient/AddScoped registration"
                     ));
                 };
+                let prefix = self.next_label("service_lookup");
                 let allocated =
-                    self.emit_endpoint_object_allocation(&implementation, "service_lookup")?;
+                    self.emit_endpoint_object_allocation(&implementation, &prefix)?;
                 self.emit_temporary_drop(target, &receiver);
                 return Ok(LlValue {
                     value: allocated,

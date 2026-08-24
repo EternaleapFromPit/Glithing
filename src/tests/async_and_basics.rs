@@ -780,7 +780,7 @@ fn async_resume_function_emits_program_counter_dispatch() {
 }
 
 #[test]
-fn rejects_await_inside_try_finally_in_current_async_gate() {
+fn accepts_await_inside_try_finally_in_current_async_gate() {
     let source = r#"
             using System.Threading.Tasks;
 
@@ -797,10 +797,74 @@ fn rejects_await_inside_try_finally_in_current_async_gate() {
             }
         "#;
 
-    let error = compile_llvm_ir(source).expect_err("await inside try/finally should be rejected");
+    let llvm_ir = compile_llvm_ir(source).expect("await inside try/finally should now lower");
 
-    assert!(error.contains("suspension inside try/catch/finally is not supported yet"));
-    assert!(error.contains("move the await outside the protected region"));
+    assert!(llvm_ir.contains("define i32 @glitch_async_resume_Broken(ptr %env)"));
+    assert!(llvm_ir.contains("async_resume_1:"));
+}
+
+#[test]
+fn runs_transaction_pipeline_style_await_inside_try_catch_natively() {
+    let source = r#"
+            using System;
+            using System.Threading.Tasks;
+
+            class Ctx {
+                public int Committed;
+                public int RolledBack;
+                void CommitTransaction() { Committed = Committed + 1; }
+                void RollbackTransaction() { RolledBack = RolledBack + 1; }
+
+                public async Task<int> Handle(bool shouldFail) {
+                    int result;
+                    try {
+                        result = await Work(shouldFail);
+                        CommitTransaction();
+                    } catch (Exception) {
+                        RollbackTransaction();
+                        throw;
+                    }
+                    return result;
+                }
+
+                async Task<int> Work(bool shouldFail) {
+                    if (shouldFail) {
+                        throw new Exception("boom");
+                    }
+                    return 42;
+                }
+            }
+
+            fn main() {
+                Ctx ok = new Ctx();
+                print(ok.Handle(false).Result);
+                print(ok.Committed);
+                print(ok.RolledBack);
+
+                Ctx bad = new Ctx();
+                try {
+                    print(bad.Handle(true).Result);
+                } catch (Exception) {
+                    print("caught");
+                }
+                print(bad.Committed);
+                print(bad.RolledBack);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("try-await-transaction", source);
+    let output = run_native_executable(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines, vec!["42", "1", "0", "caught", "0", "1"]);
 }
 
 #[test]
@@ -1478,6 +1542,179 @@ fn runs_async_controller_route_with_di_via_app_handle_natively() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("hello from di"));
+}
+
+#[test]
+fn runs_nested_list_json_endpoint_natively() {
+    let source = r#"
+            using System.Collections.Generic;
+            using Glitching.AspNetCore;
+
+            class Item {
+                public string Name;
+                public int Count;
+            }
+
+            class ItemsEnvelope {
+                public List<Item> Items;
+                public int ItemsCount;
+            }
+
+            [Route("items")]
+            class ItemsController : Controller {
+                [HttpGet]
+                ItemsEnvelope Get() {
+                    List<Item> items = new List<Item>();
+                    items.Add(new Item { Name = "a", Count = 1 });
+                    items.Add(new Item { Name = "b", Count = 2 });
+                    return new ItemsEnvelope { Items = items, ItemsCount = 2 };
+                }
+            }
+
+            fn main() {
+                WebApplication app = new WebApplication();
+                string response = app.Handle("GET", "/items", "");
+                print(response);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("nested-list-json-endpoint", source);
+    let output = run_native_executable(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(r#"{"Items":[{"Name":"a","Count":1},{"Name":"b","Count":2}],"ItemsCount":2}"#),
+        "stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn runs_json_ignore_cyclic_reference_endpoint_natively() {
+    let source = r#"
+            using Glitching.AspNetCore;
+
+            class Child {
+                public string Name;
+                [JsonIgnore]
+                public Weak<Parent> Owner;
+            }
+
+            class Parent {
+                public string Name;
+                public Child Kid;
+            }
+
+            [Route("family")]
+            class FamilyController : Controller {
+                [HttpGet]
+                Parent Get() {
+                    Parent parent = new Parent { Name = "top" };
+                    Child child = new Child { Name = "leaf" };
+                    child.Owner = new Weak<Parent>(parent);
+                    parent.Kid = child;
+                    return parent;
+                }
+            }
+
+            fn main() {
+                WebApplication app = new WebApplication();
+                string response = app.Handle("GET", "/family", "");
+                print(response);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("json-ignore-cyclic-endpoint", source);
+    let output = run_native_executable(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(r#"{"Name":"top","Kid":{"Name":"leaf"}}"#),
+        "stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn resolves_colliding_nested_mediatr_types_by_namespace_natively() {
+    // MediatR's convention of nesting `Command`/`CommandHandler` inside a
+    // per-feature grouping class means unrelated features very commonly
+    // declare a type with the exact same simple name (this is not
+    // hypothetical: the real ASP.NET Core RealWorld sample app declares
+    // "Create", "Delete", "Details", "List" etc. as a feature-grouping
+    // class name 2-4 times each, in different namespaces, each with its own
+    // nested Command/Query/Handler). Both `Create` classes below share a
+    // simple name; only the qualification pass keeps their nested `Command`
+    // types, constructors, and MediatR handler dispatch from colliding.
+    let source = r#"
+            using MediatR;
+
+            namespace App.Features.Articles;
+
+            public class Create {
+                public record Command(string Body) : IRequest<string>;
+
+                public class CommandHandler : IRequestHandler<Command, string> {
+                    public Task<string> Handle(Command message, CancellationToken cancellationToken) {
+                        return Task.FromResult("articles:" + message.Body);
+                    }
+                }
+            }
+
+            namespace App.Features.Comments;
+
+            public class Create {
+                public record Command(string Body, string Slug) : IRequest<string>;
+
+                public class CommandHandler : IRequestHandler<Command, string> {
+                    public Task<string> Handle(Command message, CancellationToken cancellationToken) {
+                        return Task.FromResult("comments:" + message.Body + ":" + message.Slug);
+                    }
+                }
+            }
+
+            namespace App.Features.Comments;
+
+            class CommentsController(IMediator mediator) {
+                public Task<string> Create(string body, string slug, CancellationToken cancellationToken) =>
+                    mediator.Send(new Create.Command(body, slug), cancellationToken);
+            }
+
+            fn main() {
+                var mediator = new Mediator(new ServiceProvider());
+                var controller = new CommentsController(mediator);
+                string result = controller.Create("hi", "slug", CancellationToken.None).Result;
+                print(result);
+            }
+        "#;
+
+    let output_exe = emit_native_executable_from_source("colliding-nested-mediatr-types", source);
+    let output = run_native_executable(&output_exe);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("comments:hi:slug"),
+        "expected the Comments feature's own Command/CommandHandler to win, not Articles': {stdout}"
+    );
 }
 
 #[test]

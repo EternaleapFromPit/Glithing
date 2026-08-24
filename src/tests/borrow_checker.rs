@@ -367,10 +367,9 @@ fn compiles_conduit_integration_tests_project_file_through_llvm() {
         eprintln!("skipping missing external fixture: {project}");
         return;
     }
-    let error = compile_llvm_ir_from_path(project)
-        .expect_err("Conduit integration tests project should currently fail on unsupported async suspension");
-    assert!(error.contains("suspension inside try/catch/finally"));
-    assert!(error.contains("Handle"));
+    compile_llvm_ir_from_path(project).unwrap_or_else(|error| {
+        panic!("Conduit integration tests project should now compile to LLVM IR: {error}");
+    });
 }
 
 #[test]

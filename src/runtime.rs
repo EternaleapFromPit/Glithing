@@ -151,8 +151,13 @@ unsafe fn release_glitch_string(value: *mut c_char) {
         return;
     }
     let node = value.cast::<u8>().sub(16);
-    let refs = *(node.cast::<i64>());
+    let refs_ptr = node.cast::<i64>().cast::<AtomicI64>();
+    let refs = (*refs_ptr).load(Ordering::SeqCst);
     if refs >= 1_000_000 {
+        return;
+    }
+    let old_refs = (*refs_ptr).fetch_sub(1, Ordering::SeqCst);
+    if old_refs != 1 {
         return;
     }
     free(node.cast::<c_void>());
@@ -696,8 +701,9 @@ pub unsafe extern "C" fn GlitchTask_GetException(task: *mut c_void) -> *mut c_vo
         return std::ptr::null_mut();
     }
     let message = CStr::from_ptr(exception).to_str().unwrap_or_default();
+    let copy = allocate_glitch_string_from_str(message).cast::<c_void>();
     release_glitch_string(exception);
-    allocate_glitch_string_from_str(message).cast::<c_void>()
+    copy
 }
 
 #[no_mangle]

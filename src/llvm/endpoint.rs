@@ -571,26 +571,43 @@ impl LlvmEmitter {
     }
 
     pub(super) fn endpoint_return_supported(&self, ty: &IrType) -> bool {
+        self.endpoint_return_supported_inner(ty, &mut HashSet::new())
+    }
+
+    fn endpoint_return_supported_inner(&self, ty: &IrType, visiting: &mut HashSet<String>) -> bool {
         match ty {
-            IrType::String => true,
+            IrType::String
+            | IrType::Bool
+            | IrType::Byte
+            | IrType::Short
+            | IrType::Int
+            | IrType::Long
+            | IrType::UInt
+            | IrType::Double
+            | IrType::Decimal => true,
+            IrType::List(element) | IrType::Array(element) => {
+                self.endpoint_return_supported_inner(element, visiting)
+            }
             IrType::Class(name) | IrType::Struct(name) => {
-                self.object_types.get(name).is_some_and(|object| {
+                // A type visited higher up its own field graph (a real
+                // reference cycle in the domain model, e.g. Article ->
+                // Comments -> Comment.Article) is treated as supported here:
+                // the cycle only breaks safely at serialization time if the
+                // back-reference is `[JsonIgnore]`d, which is enforced by
+                // `emit_json_serialize_object` skipping it, not by this
+                // static shape check re-descending into it forever.
+                if !visiting.insert(name.clone()) {
+                    return true;
+                }
+                let supported = self.object_types.get(name).is_some_and(|object| {
                     !matches!(object.kind, TypeKind::Interface)
-                        && object.fields.values().all(|field| {
-                            matches!(
-                                field.ty,
-                                IrType::Bool
-                                    | IrType::Byte
-                                    | IrType::Short
-                                    | IrType::Int
-                                    | IrType::Long
-                                    | IrType::UInt
-                                    | IrType::Double
-                                    | IrType::Decimal
-                                    | IrType::String
-                            )
+                        && object.fields.iter().all(|(field_name, field)| {
+                            object.json_ignore_fields.contains(field_name)
+                                || self.endpoint_return_supported_inner(&field.ty, visiting)
                         })
-                })
+                });
+                visiting.remove(name);
+                supported
             }
             _ => false,
         }
@@ -603,20 +620,32 @@ impl LlvmEmitter {
                 let null_label = self.next_label("endpoint_result_null");
                 let value_label = self.next_label("endpoint_result_value");
                 let end_label = self.next_label("endpoint_result_end");
+                let result_ptr = self.tmp();
                 let is_null = self.tmp();
+                // A stack slot, not a `phi`, carries the result across the
+                // branch: `emit_json_serialize_object` may itself branch
+                // (nested objects, lists), so the block active at its
+                // `ret`/end is not reliably the `value_label` block a `phi`
+                // would need to name as its predecessor.
                 self.body.push_str(&format!(
-                    "  {is_null} = icmp eq ptr {value}, null\n  br i1 {is_null}, label %{null_label}, label %{value_label}\n{value_label}:\n"
+                    "  {result_ptr} = alloca ptr\n  {is_null} = icmp eq ptr {value}, null\n  br i1 {is_null}, label %{null_label}, label %{value_label}\n{value_label}:\n"
                 ));
                 let json = self.emit_json_serialize_object(name, value)?;
+                let qualified_name = self
+                    .object_layout(name)
+                    .map(|object| object.name.clone())
+                    .unwrap_or_else(|| name.clone());
                 self.body.push_str(&format!(
-                    "  call void @{}(ptr {value})\n  br label %{end_label}\n{null_label}:\n  br label %{end_label}\n{end_label}:\n",
-                    drop_symbol(name)
+                    "  store ptr {json}, ptr {result_ptr}\n  call void @{}(ptr {value})\n  br label %{end_label}\n{null_label}:\n",
+                    drop_symbol(&qualified_name)
                 ));
-                let result = self.tmp();
                 let null_text = self.string_global("null");
                 self.body.push_str(&format!(
-                    "  {result} = phi ptr [{json}, %{value_label}], [{null_text}, %{null_label}]\n"
+                    "  store ptr {null_text}, ptr {result_ptr}\n  br label %{end_label}\n{end_label}:\n"
                 ));
+                let result = self.tmp();
+                self.body
+                    .push_str(&format!("  {result} = load ptr, ptr {result_ptr}\n"));
                 Ok(result)
             }
             _ => Err(format!(
@@ -638,13 +667,18 @@ impl LlvmEmitter {
         fields.sort_by_key(|(_, field)| field.index);
         let mut current = self.string_global("{");
         let mut current_is_managed = false;
-        for (position, (field_name, field)) in fields.into_iter().enumerate() {
+        let mut emitted_any = false;
+        for (field_name, field) in fields {
+            if object.json_ignore_fields.contains(field_name) {
+                continue;
+            }
             let key = self.string_global(&format!(
                 "{}\"{}\":",
-                if position == 0 { "" } else { "," },
+                if emitted_any { "," } else { "" },
                 field_name
             ));
-            let with_key = format!("%json_{}_{}_key", sanitize(type_name), field.index);
+            emitted_any = true;
+            let with_key = self.tmp();
             self.body.push_str(&format!(
                 "  {with_key} = call ptr @glitch_string_concat(ptr {current}, ptr {key})\n"
             ));
@@ -653,69 +687,20 @@ impl LlvmEmitter {
                     "  call void @glitch_string_release(ptr {current})\n"
                 ));
             }
-            let field_ptr = format!("%json_{}_{}_ptr", sanitize(type_name), field.index);
-            let field_value = format!("%json_{}_{}", sanitize(type_name), field.index);
+            let field_ptr = self.tmp();
+            let field_value = self.tmp();
             let field_type = llvm_ir_type(&field.ty);
             self.body.push_str(&format!(
                 "  {field_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 {}\n  {field_value} = load {}, ptr {field_ptr}\n",
                 field.index,
                 field_type.as_ir()
             ));
-            let (rendered, rendered_is_managed) = match &field.ty {
-                IrType::String => {
-                    let quote = self.string_global("\"");
-                    let quoted = format!("%json_{}_{}_quoted", sanitize(type_name), field.index);
-                    let complete =
-                        format!("%json_{}_{}_complete", sanitize(type_name), field.index);
-                    self.body.push_str(&format!(
-                        "  {quoted} = call ptr @glitch_string_concat(ptr {quote}, ptr {field_value})\n  {complete} = call ptr @glitch_string_concat(ptr {quoted}, ptr {quote})\n  call void @glitch_string_release(ptr {quoted})\n"
-                    ));
-                    (complete, true)
-                }
-                IrType::Bool => {
-                    let rendered = format!("%json_{}_{}_bool", sanitize(type_name), field.index);
-                    self.body.push_str(&format!(
-                        "  {rendered} = select i1 {field_value}, ptr getelementptr inbounds ([5 x i8], ptr @.json_true, i64 0, i64 0), ptr getelementptr inbounds ([6 x i8], ptr @.json_false, i64 0, i64 0)\n"
-                    ));
-                    (rendered, false)
-                }
-                IrType::Double | IrType::Decimal => {
-                    let rendered = format!("%json_{}_{}_double", sanitize(type_name), field.index);
-                    self.body.push_str(&format!(
-                        "  {rendered} = call ptr @glitch_double_to_string(double {field_value})\n"
-                    ));
-                    (rendered, true)
-                }
-                IrType::Byte | IrType::Short | IrType::Int | IrType::Long | IrType::UInt => {
-                    let wide = if field_type == LlType::I64 {
-                        field_value.clone()
-                    } else {
-                        let wide = format!("%json_{}_{}_wide", sanitize(type_name), field.index);
-                        let extension = if matches!(field.ty, IrType::Byte | IrType::UInt) {
-                            "zext"
-                        } else {
-                            "sext"
-                        };
-                        self.body.push_str(&format!(
-                            "  {wide} = {extension} {} {field_value} to i64\n",
-                            field_type.as_ir()
-                        ));
-                        wide
-                    };
-                    let rendered = format!("%json_{}_{}_integer", sanitize(type_name), field.index);
-                    self.body.push_str(&format!(
-                        "  {rendered} = call ptr @glitch_i64_to_string(i64 {wide})\n"
-                    ));
-                    (rendered, true)
-                }
-                _ => {
-                    return Err(format!(
-                        "LLVM TIR backend: JSON result field '{type_name}.{field_name}' has unsupported type {:?}",
-                        field.ty
-                    ));
-                }
-            };
-            let next = format!("%json_{}_{}_value", sanitize(type_name), field.index);
+            let (rendered, rendered_is_managed) = self
+                .emit_json_serialize_value(&field.ty, &field_value)
+                .map_err(|error| {
+                    format!("LLVM TIR backend: JSON result field '{type_name}.{field_name}': {error}")
+                })?;
+            let next = self.tmp();
             self.body.push_str(&format!(
                 "  {next} = call ptr @glitch_string_concat(ptr {with_key}, ptr {rendered})\n  call void @glitch_string_release(ptr {with_key})\n"
             ));
@@ -728,7 +713,7 @@ impl LlvmEmitter {
             current_is_managed = true;
         }
         let close = self.string_global("}");
-        let result = format!("%json_{}_result", sanitize(type_name));
+        let result = self.tmp();
         self.body.push_str(&format!(
             "  {result} = call ptr @glitch_string_concat(ptr {current}, ptr {close})\n"
         ));
@@ -738,6 +723,159 @@ impl LlvmEmitter {
             ));
         }
         Ok(result)
+    }
+
+    /// Renders a single value of `ty` (already loaded into `value`, a `ptr`
+    /// or scalar SSA register) as a JSON fragment. Returns the register
+    /// holding the resulting `ptr` and whether it is a freshly-managed
+    /// allocation the caller must release once it has been consumed.
+    fn emit_json_serialize_value(&mut self, ty: &IrType, value: &str) -> Result<(String, bool), String> {
+        match ty {
+            IrType::String => {
+                let quote = self.string_global("\"");
+                let quoted = self.tmp();
+                let complete = self.tmp();
+                self.body.push_str(&format!(
+                    "  {quoted} = call ptr @glitch_string_concat(ptr {quote}, ptr {value})\n  {complete} = call ptr @glitch_string_concat(ptr {quoted}, ptr {quote})\n  call void @glitch_string_release(ptr {quoted})\n"
+                ));
+                Ok((complete, true))
+            }
+            IrType::Bool => {
+                let rendered = self.tmp();
+                self.body.push_str(&format!(
+                    "  {rendered} = select i1 {value}, ptr getelementptr inbounds ([5 x i8], ptr @.json_true, i64 0, i64 0), ptr getelementptr inbounds ([6 x i8], ptr @.json_false, i64 0, i64 0)\n"
+                ));
+                Ok((rendered, false))
+            }
+            IrType::Double | IrType::Decimal => {
+                let rendered = self.tmp();
+                self.body.push_str(&format!(
+                    "  {rendered} = call ptr @glitch_double_to_string(double {value})\n"
+                ));
+                Ok((rendered, true))
+            }
+            IrType::Byte | IrType::Short | IrType::Int | IrType::Long | IrType::UInt => {
+                let field_type = llvm_ir_type(ty);
+                let wide = if field_type == LlType::I64 {
+                    value.to_string()
+                } else {
+                    let wide = self.tmp();
+                    let extension = if matches!(ty, IrType::Byte | IrType::UInt) {
+                        "zext"
+                    } else {
+                        "sext"
+                    };
+                    self.body.push_str(&format!(
+                        "  {wide} = {extension} {} {value} to i64\n",
+                        field_type.as_ir()
+                    ));
+                    wide
+                };
+                let rendered = self.tmp();
+                self.body.push_str(&format!(
+                    "  {rendered} = call ptr @glitch_i64_to_string(i64 {wide})\n"
+                ));
+                Ok((rendered, true))
+            }
+            IrType::Class(name) | IrType::Struct(name) => {
+                let null_label = self.next_label("json_nested_null");
+                let value_label = self.next_label("json_nested_value");
+                let end_label = self.next_label("json_nested_end");
+                let result_ptr = self.tmp();
+                let is_null = self.tmp();
+                // A stack slot, not a `phi`: the recursive call below may
+                // itself branch (nested objects, lists), so the block it
+                // returns control to is not reliably `value_label`.
+                self.body.push_str(&format!(
+                    "  {result_ptr} = alloca ptr\n  {is_null} = icmp eq ptr {value}, null\n  br i1 {is_null}, label %{null_label}, label %{value_label}\n{value_label}:\n"
+                ));
+                let nested = self.emit_json_serialize_object(name, value)?;
+                self.body.push_str(&format!(
+                    "  store ptr {nested}, ptr {result_ptr}\n  br label %{end_label}\n{null_label}:\n"
+                ));
+                let null_text = self.string_global("null");
+                self.body.push_str(&format!(
+                    "  store ptr {null_text}, ptr {result_ptr}\n  br label %{end_label}\n{end_label}:\n"
+                ));
+                let result = self.tmp();
+                self.body
+                    .push_str(&format!("  {result} = load ptr, ptr {result_ptr}\n"));
+                Ok((result, true))
+            }
+            IrType::List(element) | IrType::Array(element) => {
+                self.emit_json_serialize_list(element, value, matches!(ty, IrType::Array(_)))
+            }
+            _ => Err(format!("unsupported type {ty:?}")),
+        }
+    }
+
+    /// Renders a `List<T>` or array value as a JSON array by walking its
+    /// backing buffer and serializing each element with
+    /// `emit_json_serialize_value`.
+    fn emit_json_serialize_list(
+        &mut self,
+        element: &IrType,
+        list: &str,
+        is_array: bool,
+    ) -> Result<(String, bool), String> {
+        let element_type = llvm_ir_type(element);
+        let struct_name = if is_array { "%glitch.array" } else { "%glitch.list" };
+        let len_ptr = self.tmp();
+        let data_ptr = self.tmp();
+        let len = self.tmp();
+        let data = self.tmp();
+        self.body.push_str(&format!(
+            "  {len_ptr} = getelementptr inbounds {struct_name}, ptr {list}, i32 0, i32 0\n  {data_ptr} = getelementptr inbounds {struct_name}, ptr {list}, i32 0, i32 {}\n  {len} = load i64, ptr {len_ptr}\n  {data} = load ptr, ptr {data_ptr}\n",
+            if is_array { 1 } else { 2 }
+        ));
+        let acc_ptr = self.tmp();
+        let index_ptr = self.tmp();
+        let open = self.string_global("[");
+        self.body.push_str(&format!(
+            "  {acc_ptr} = alloca ptr\n  {index_ptr} = alloca i64\n  store ptr {open}, ptr {acc_ptr}\n  store i64 0, ptr {index_ptr}\n"
+        ));
+        let loop_label = self.next_label("json_list_loop");
+        let body_label = self.next_label("json_list_body");
+        let done_label = self.next_label("json_list_done");
+        self.body
+            .push_str(&format!("  br label %{loop_label}\n{loop_label}:\n"));
+        let index = self.tmp();
+        let in_range = self.tmp();
+        self.body.push_str(&format!(
+            "  {index} = load i64, ptr {index_ptr}\n  {in_range} = icmp ult i64 {index}, {len}\n  br i1 {in_range}, label %{body_label}, label %{done_label}\n{body_label}:\n"
+        ));
+        let slot = self.tmp();
+        let item = self.tmp();
+        self.body.push_str(&format!(
+            "  {slot} = getelementptr inbounds {}, ptr {data}, i64 {index}\n  {item} = load {}, ptr {slot}\n",
+            element_type.as_ir(),
+            element_type.as_ir()
+        ));
+        let (rendered, _) = self.emit_json_serialize_value(element, &item)?;
+        let is_first = self.tmp();
+        let comma = self.string_global(",");
+        let empty = self.string_global("");
+        let sep = self.tmp();
+        self.body.push_str(&format!(
+            "  {is_first} = icmp eq i64 {index}, 0\n  {sep} = select i1 {is_first}, ptr {empty}, ptr {comma}\n"
+        ));
+        let acc = self.tmp();
+        let with_sep = self.tmp();
+        let with_item = self.tmp();
+        self.body.push_str(&format!(
+            "  {acc} = load ptr, ptr {acc_ptr}\n  {with_sep} = call ptr @glitch_string_concat(ptr {acc}, ptr {sep})\n  call void @glitch_string_release(ptr {acc})\n  {with_item} = call ptr @glitch_string_concat(ptr {with_sep}, ptr {rendered})\n  call void @glitch_string_release(ptr {with_sep})\n  call void @glitch_string_release(ptr {rendered})\n  store ptr {with_item}, ptr {acc_ptr}\n"
+        ));
+        let next_index = self.tmp();
+        self.body.push_str(&format!(
+            "  {next_index} = add i64 {index}, 1\n  store i64 {next_index}, ptr {index_ptr}\n  br label %{loop_label}\n{done_label}:\n"
+        ));
+        let close = self.string_global("]");
+        let acc = self.tmp();
+        let result = self.tmp();
+        self.body.push_str(&format!(
+            "  {acc} = load ptr, ptr {acc_ptr}\n  {result} = call ptr @glitch_string_concat(ptr {acc}, ptr {close})\n  call void @glitch_string_release(ptr {acc})\n"
+        ));
+        Ok((result, true))
     }
 
     pub(super) fn emit_endpoint_body_object(
@@ -1598,6 +1736,7 @@ impl LlvmEmitter {
                 kind: TypeKind::Class,
                 bases: Vec::new(),
                 fields: HashMap::new(),
+                json_ignore_fields: HashSet::new(),
                 constructor: None,
                 constructor_params: Vec::new(),
             });
@@ -1689,15 +1828,16 @@ fn ir_type_loosely_matches(left: &IrType, right: &IrType) -> bool {
 }
 
 fn request_type_matches(object_name: &str, request_name: &str) -> bool {
-    if object_name == request_name {
-        return true;
-    }
-    let object_base = base_type_name(object_name);
-    let request_base = base_type_name(request_name);
-    object_name.ends_with(request_name)
-        || request_name.ends_with(object_name)
-        || object_base == request_base
-        || object_base.ends_with(request_base)
-        || request_base.ends_with(object_base)
+    // Only an exact match, or one full (still namespace/enclosing-type
+    // qualified) name being a dotted suffix of the other, counts. Matching
+    // on `base_type_name` alone — the bare last segment — used to be here
+    // too, but that collapses e.g. `Conduit.Features.Articles.Create.Command`
+    // and `Conduit.Features.Comments.Create.Command` to the same "Command"
+    // and matches both: MediatR's convention of nesting `Command`/`Query`
+    // inside a per-feature grouping class means many unrelated features
+    // legitimately share that bare leaf name.
+    object_name == request_name
+        || object_name.ends_with(&format!(".{request_name}"))
+        || request_name.ends_with(&format!(".{object_name}"))
 }
 

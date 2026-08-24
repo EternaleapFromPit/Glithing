@@ -37,7 +37,12 @@ pub fn run() -> Result<(), String> {
     let child = Command::new(&output_exe)
         .current_dir(&sample_dir)
         .env("GLITCH_HTTP_PORT", port.to_string())
-        .env("GLITCH_HTTP_MAX_REQUESTS", "2")
+        // The readiness probe below opens a bare connect-then-drop TCP
+        // connection with no HTTP data, which still counts as one accepted
+        // connection against the host's request budget (see `handled += 1`
+        // in `run_host`, src/runtime.rs). Budget for that probe plus the two
+        // real HTTP checks this smoke test performs.
+        .env("GLITCH_HTTP_MAX_REQUESTS", "3")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

@@ -128,9 +128,19 @@ pub(super) fn emit_lambda_function(
     emitter.loop_targets.clear();
     emitter.current_return = return_llvm_ty.clone();
 
+    // C# allows multiple discard parameters that share the literal name `_`
+    // (e.g. `(_, _) => true`); LLVM parameter lists require unique SSA names,
+    // so each parameter gets its own positional register name here while
+    // `emitter.vars` still keys lookups by the original source name.
+    let param_regs: Vec<String> = params
+        .iter()
+        .enumerate()
+        .map(|(index, p)| format!("{}_{index}", sanitize(p)))
+        .collect();
+
     let mut param_decls = vec!["ptr %env".to_string()];
-    for (p, param_ty) in params.iter().zip(param_types.iter()) {
-        param_decls.push(format!("{} %{}", llvm_ir_type(param_ty).as_ir(), sanitize(p)));
+    for ((_, param_ty), reg) in params.iter().zip(param_types.iter()).zip(param_regs.iter()) {
+        param_decls.push(format!("{} %{}", llvm_ir_type(param_ty).as_ir(), reg));
     }
     emitter.body.push_str(&format!(
         "define {} @{fn_name}({}) {{\nentry:\n",
@@ -138,14 +148,14 @@ pub(super) fn emit_lambda_function(
         param_decls.join(", ")
     ));
 
-    for (p, param_ty) in params.iter().zip(param_types.iter()) {
+    for ((p, param_ty), reg) in params.iter().zip(param_types.iter()).zip(param_regs.iter()) {
         let llvm_param_ty = llvm_ir_type(param_ty);
         let ptr = emitter.tmp();
         emitter.body.push_str(&format!(
             "  {ptr} = alloca {}\n  store {} %{}, ptr {ptr}\n",
             llvm_param_ty.as_ir(),
             llvm_param_ty.as_ir(),
-            sanitize(p),
+            reg,
         ));
         emitter.vars.insert(
             p.clone(),

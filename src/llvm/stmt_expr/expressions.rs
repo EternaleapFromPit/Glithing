@@ -360,13 +360,6 @@ impl LlvmEmitter {
                 if let TypedExprKind::Field { target, name } = &expr.kind {
                     if name == "Result" && matches!(target.ty, IrType::Task(_)) {
                         let task_val = self.emit_typed_expr(target)?;
-                        let needs_task_retain = should_drop_argument_after_call(target);
-                        if needs_task_retain {
-                            self.body.push_str(&format!(
-                                "  call void @GlitchTask_Retain(ptr {})\n",
-                                task_val.value
-                            ));
-                        }
                         let result_ty = expr.ty.clone();
                         let result_llvm_type = llvm_ir_type(&result_ty);
                         if matches!(result_ty, IrType::Void) {
@@ -381,14 +374,13 @@ impl LlvmEmitter {
                                 helper_name,
                                 task_val.value
                             ));
-                            if needs_task_retain {
-                                self.body.push_str(&format!(
-                                    "  call i1 @GlitchTask_Destroy(ptr {})\n",
-                                    task_val.value
-                                ));
-                            } else {
-                                self.emit_temporary_drop(target, &task_val);
-                            }
+                            // A temporary task (e.g. `SomeAsyncCall().Result`) owns its
+                            // single reference outright and just needs one drop, exactly
+                            // like the `await` path below; an existing Var/Field/Index
+                            // source is left untouched since its owner cleans it up at
+                            // its own scope exit. Retaining a temporary before dropping
+                            // it once would only ever bring it back to refs=1, never 0.
+                            self.emit_temporary_drop(target, &task_val);
                             self.emit_exception_check();
                             return Ok(LlValue {
                                 value: call_res,
@@ -398,26 +390,12 @@ impl LlvmEmitter {
                     }
                     if name == "Exception" && matches!(target.ty, IrType::Task(_)) {
                         let task_val = self.emit_typed_expr(target)?;
-                        let needs_task_retain = should_drop_argument_after_call(target);
-                        if needs_task_retain {
-                            self.body.push_str(&format!(
-                                "  call void @GlitchTask_Retain(ptr {})\n",
-                                task_val.value
-                            ));
-                        }
                         let exception = self.tmp();
                         self.body.push_str(&format!(
                             "  {} = call ptr @glitch_task_get_exception(ptr {})\n",
                             exception, task_val.value
                         ));
-                        if needs_task_retain {
-                            self.body.push_str(&format!(
-                                "  call i1 @GlitchTask_Destroy(ptr {})\n",
-                                task_val.value
-                            ));
-                        } else {
-                            self.emit_temporary_drop(target, &task_val);
-                        }
+                        self.emit_temporary_drop(target, &task_val);
                         return Ok(LlValue {
                             value: exception,
                             ty: LlType::Ptr,

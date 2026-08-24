@@ -643,13 +643,6 @@ public class ObjectResult {
     public ObjectResult(object value) {}
 }
 
-public class JwtBearerDefaults {
-    public string AuthenticationScheme;
-    public JwtBearerDefaults() {
-        this.AuthenticationScheme = "Bearer";
-    }
-}
-
 public interface IFormFile {
     string FileName { get; }
     long Length { get; }

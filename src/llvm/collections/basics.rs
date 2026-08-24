@@ -32,10 +32,10 @@ impl LlvmEmitter {
         for (index, source) in values.iter().enumerate() {
             let value = self.emit_typed_expr(source)?;
             let value = self.cast_value(value, &element_ll_type)?;
-            if matches!(element_type, IrType::Task(_))
+            let is_task_element = matches!(element_type, IrType::Task(_))
                 || matches!(source.ty, IrType::Task(_))
-                || is_task_surface_type(&source.ty)
-            {
+                || is_task_surface_type(&source.ty);
+            if is_task_element {
                 self.body
                     .push_str(&format!("  call void @GlitchTask_Retain(ptr {})\n", value.value));
             } else {
@@ -48,7 +48,11 @@ impl LlvmEmitter {
                 element_ll_type.as_ir(),
                 value.value
             ));
-            if should_drop_argument_after_call(source) {
+            // `retain_for_store` already skips retaining fresh owned temporaries
+            // (NewObject/Call/etc.) because they hand their existing refcount
+            // straight to the array; only the always-retains Task path still
+            // needs a matching drop here to net out to a single transferred ref.
+            if is_task_element && should_drop_argument_after_call(source) {
                 self.emit_temporary_drop(source, &value);
             }
         }

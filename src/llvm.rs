@@ -101,6 +101,9 @@ struct LlObjectType {
     kind: TypeKind,
     bases: Vec<String>,
     fields: HashMap<String, LlField>,
+    /// Field names declared with `[JsonIgnore]`; skipped by endpoint
+    /// response JSON serialization.
+    json_ignore_fields: HashSet<String>,
     constructor: Option<String>,
     constructor_params: Vec<IrType>,
 }
@@ -586,6 +589,7 @@ impl LlvmEmitter {
                 kind: ty.kind,
                 bases: ty.bases.clone(),
                 fields,
+                json_ignore_fields: ty.json_ignore_fields.clone(),
                 constructor: ty
                     .constructors
                     .first()
@@ -653,6 +657,7 @@ impl LlvmEmitter {
                 kind: TypeKind::Class,
                 bases: Vec::new(),
                 fields,
+                json_ignore_fields: HashSet::new(),
                 constructor: None,
                 constructor_params: vec![inner_ty],
             },
@@ -696,6 +701,7 @@ impl LlvmEmitter {
                     kind: TypeKind::Class,
                     bases: Vec::new(),
                     fields,
+                    json_ignore_fields: HashSet::new(),
                     constructor: None,
                     constructor_params: vec![inner.clone()],
                 },
@@ -751,6 +757,7 @@ impl LlvmEmitter {
                     kind: TypeKind::Class,
                     bases: Vec::new(),
                     fields,
+                    json_ignore_fields: HashSet::new(),
                     constructor: None,
                     constructor_params: Vec::new(),
                 },

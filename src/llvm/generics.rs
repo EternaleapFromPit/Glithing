@@ -1012,6 +1012,7 @@ pub(super) fn specialize_typed_type_owner(
             .cloned()
             .map(|binding| specialize_typed_binding(binding, &subst))
             .collect(),
+        json_ignore_fields: ty.json_ignore_fields.clone(),
         constructors: ty
             .constructors
             .iter()

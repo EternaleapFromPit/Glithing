@@ -9,6 +9,7 @@ mod xunit_support;
 mod items;
 mod declarations;
 mod core;
+mod qualify;
 
 use self::helpers::*;
 use self::regex_support::*;

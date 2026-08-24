@@ -14,6 +14,7 @@ impl Parser {
         self.parse_items(&mut program, Vec::new(), false, &mut delegates)?;
         program.delegates = delegates;
         program.types = merge_type_declarations(program.types);
+        qualify::qualify_colliding_types(&mut program);
         synthesize_generated_regex_methods(&mut program);
         synthesize_xunit_fact_tests(self, &program);
 
@@ -177,6 +178,7 @@ impl Parser {
                         .unwrap_or_else(|| default_visibility_for_package(current_package.as_ref())),
                     current_namespace.clone(),
                     attributes,
+                    &[],
                     &mut nested,
                     &mut program.native_c,
                     delegates,

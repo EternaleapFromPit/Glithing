@@ -11,6 +11,12 @@ pub(super) fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Resul
             ty: field.ty,
         })
         .collect::<Vec<_>>();
+    let json_ignore_fields = ty
+        .fields
+        .iter()
+        .filter(|field| endpoints::has_attribute(&field.attributes, "JsonIgnore"))
+        .map(|field| field.name.clone())
+        .collect::<std::collections::HashSet<_>>();
     let this_binding = TypedBinding {
         name: "this".to_string(),
         ty: this_type,
@@ -101,6 +107,7 @@ pub(super) fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Resul
         kind: ty.kind,
         bases: ty.bases.clone(),
         fields,
+        json_ignore_fields,
         constructors,
         methods,
     })
