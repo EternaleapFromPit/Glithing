@@ -28,6 +28,29 @@ mod call_resolution;
 #[path = "tir/typesystem.rs"]
 mod typesystem;
 
+// C# implicitly gives a type with no explicit constructor a parameterless
+// one, which is what applies instance field/auto-property initializers
+// (`public List<T> Items { get; init; } = new();`). Without this, such a
+// type has no registered constructor signature at all, so `new Container()`
+// call sites never invoke anything and the field is left null.
+fn effective_constructors(ty: &TypeDef) -> std::borrow::Cow<'_, [Constructor]> {
+    let has_instance_initializers = ty
+        .fields
+        .iter()
+        .any(|field| !field.is_static && field.initializer.is_some());
+    if ty.constructors.is_empty() && has_instance_initializers {
+        std::borrow::Cow::Owned(vec![Constructor {
+            visibility: ty.visibility,
+            namespace: ty.namespace.clone(),
+            attributes: Vec::new(),
+            params: Vec::new(),
+            body: Vec::new(),
+        }])
+    } else {
+        std::borrow::Cow::Borrowed(&ty.constructors)
+    }
+}
+
 use self::call_resolution::*;
 use self::lowering::*;
 use self::endpoints::*;

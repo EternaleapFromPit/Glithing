@@ -101,7 +101,13 @@ pub(super) fn qualified_name(
     generic_arity: usize,
     type_id: usize,
 ) -> String {
-    if namespace.is_empty() {
+    // A type whose simple name collided with another type elsewhere in the
+    // program was already renamed to its full `namespace.enclosing.name`
+    // form by the parser's collision qualifier (see
+    // `qualify_type_path`/`qualify_colliding_types`), so `name` here can
+    // already carry the namespace prefix. Prepending it again would double
+    // it up (`Conduit.Features.Articles.Conduit.Features.Articles.List...`).
+    if namespace.is_empty() || name.starts_with(&format!("{}.", namespace.join("."))) {
         format!("{}__g{}__t{}", name, generic_arity, type_id)
     } else {
         format!("{}.{}__g{}__t{}", namespace.join("."), name, generic_arity, type_id)

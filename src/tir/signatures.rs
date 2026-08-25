@@ -153,8 +153,9 @@ fn extension_receiver_type_key(method: &Function, owner: &TypeDef, env: &TypeEnv
 
 pub(super) fn populate_constructor_signatures(program: &Program, env: &mut TypeEnv) {
     for (type_index, ty) in program.types.iter().enumerate() {
-        let overloaded = ty.constructors.len() > 1;
-        for constructor in &ty.constructors {
+        let constructors = effective_constructors(ty);
+        let overloaded = constructors.len() > 1;
+        for constructor in constructors.iter() {
             let params = constructor
                 .params
                 .iter()
@@ -1306,7 +1307,12 @@ pub(super) fn qualified_type_symbol_name(
     generic_arity: usize,
     type_id: usize,
 ) -> String {
-    if namespace.is_empty() {
+    // `name` may already carry the namespace prefix if this type's simple
+    // name collided with another type elsewhere and the parser's collision
+    // qualifier renamed it to `namespace.enclosing.name` (see
+    // `qualified_type_path`/`qualify_colliding_types`); don't prepend the
+    // namespace a second time in that case.
+    if namespace.is_empty() || name.starts_with(&format!("{}.", namespace.join("."))) {
         format!("{}__g{}__t{}", sanitize_ir_symbol(name), generic_arity, type_id)
     } else {
         format!(

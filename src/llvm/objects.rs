@@ -491,7 +491,14 @@ impl LlvmEmitter {
             var.ptr, var.ptr
         ));
 
-        match &var.ir_ty {
+        self.emit_owned_value_drop(&var.ir_ty, &value);
+    }
+
+    /// Drops an already-loaded pointer value of the given owned type. Shared
+    /// by local-variable scope-exit drops and by field/element reassignment,
+    /// which must release the previous owned value before overwriting it.
+    pub(super) fn emit_owned_value_drop(&mut self, ty: &IrType, value: &str) {
+        match ty {
             IrType::String | IrType::Exception => {
                 self.body.push_str(&format!(
                     "  call void @glitch_string_release(ptr {value})\n"
@@ -503,13 +510,13 @@ impl LlvmEmitter {
                 ));
             }
             IrType::Array(element) => {
-                self.emit_array_drop_value(&value, element);
+                self.emit_array_drop_value(value, element);
             }
             IrType::List(_) | IrType::Dictionary(_, _) => {
-                self.emit_collection_drop_value(&var.ir_ty, &value);
+                self.emit_collection_drop_value(ty, value);
             }
             IrType::Task(inner) => {
-                self.emit_task_drop_value(&value, inner);
+                self.emit_task_drop_value(value, inner);
             }
             IrType::Unknown(name) if name == "object" => {
                 self.body.push_str(&format!(
@@ -519,18 +526,18 @@ impl LlvmEmitter {
             IrType::Nullable(inner) => {
                 let type_name = LlvmEmitter::nullable_type_name(inner);
                 if self.object_types.contains_key(&type_name) {
-                    self.emit_drop(&type_name, &value);
+                    self.emit_drop(&type_name, value);
                 }
             }
             _ => {
-                if let Some(type_name) = object_type_name(&var.ir_ty) {
+                if let Some(type_name) = object_type_name(ty) {
                     if self.object_types.contains_key(type_name) {
-                        self.emit_drop(type_name, &value);
-                    } else if matches!(var.ir_ty, IrType::Class(_) | IrType::Interface(_)) {
-                        self.emit_dynamic_object_drop(&value);
+                        self.emit_drop(type_name, value);
+                    } else if matches!(ty, IrType::Class(_) | IrType::Interface(_)) {
+                        self.emit_dynamic_object_drop(value);
                     }
-                } else if matches!(var.ir_ty, IrType::Class(_) | IrType::Interface(_)) {
-                    self.emit_dynamic_object_drop(&value);
+                } else if matches!(ty, IrType::Class(_) | IrType::Interface(_)) {
+                    self.emit_dynamic_object_drop(value);
                 }
             }
         }

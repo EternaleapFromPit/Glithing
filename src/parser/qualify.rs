@@ -101,8 +101,12 @@ impl Resolver<'_> {
     /// reachable from `scope`, preferring (in order): an exact match on the
     /// scope's own namespace + enclosing-type chain, then a match on
     /// namespace alone, then — only if just one candidate remains after
-    /// that — the sole survivor. An unresolved ambiguity is left as-is
-    /// rather than guessed at.
+    /// that — the sole survivor, then the candidate whose namespace shares
+    /// the longest trailing-segment run with the scope's namespace (this
+    /// covers callers in a sibling namespace that mirrors the target's tail,
+    /// such as an integration-test project under `X.IntegrationTests.Y`
+    /// referencing production code declared under `X.Y`). An unresolved
+    /// ambiguity is left as-is rather than guessed at.
     fn pick<'c>(&self, candidates: &'c [Candidate], scope: &Scope) -> Option<&'c Candidate> {
         if let Some(exact) = candidates
             .iter()
@@ -120,7 +124,25 @@ impl Resolver<'_> {
         if candidates.len() == 1 {
             return Some(&candidates[0]);
         }
-        None
+        let mut best: Option<&Candidate> = None;
+        let mut best_score = 0usize;
+        let mut tie = false;
+        for candidate in candidates {
+            let score = common_suffix_len(&candidate.namespace, &scope.namespace);
+            if score == 0 {
+                continue;
+            }
+            match score.cmp(&best_score) {
+                std::cmp::Ordering::Greater => {
+                    best_score = score;
+                    best = Some(candidate);
+                    tie = false;
+                }
+                std::cmp::Ordering::Equal => tie = true,
+                std::cmp::Ordering::Less => {}
+            }
+        }
+        if tie { None } else { best }
     }
 
     /// Resolves one raw type-name string (bare `"Query"`, one-level
@@ -371,6 +393,14 @@ impl Resolver<'_> {
             | Expr::IncDec { .. } => {}
         }
     }
+}
+
+/// Counts how many trailing segments two namespace paths share, e.g.
+/// `["Conduit","Features","Articles"]` and
+/// `["Conduit","IntegrationTests","Features","Articles"]` share 2
+/// (`Features`, `Articles`).
+fn common_suffix_len(a: &[String], b: &[String]) -> usize {
+    a.iter().rev().zip(b.iter().rev()).take_while(|(x, y)| x == y).count()
 }
 
 /// Splits a generic-argument list on top-level commas, respecting nested

@@ -22,8 +22,34 @@ pub(super) fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Resul
         ty: this_type,
         ownership: Ownership::Borrowed,
     };
-    let constructors = ty
-        .constructors
+    // C# applies instance field/auto-property initializers (`public List<T>
+    // Items { get; init; } = new();`) at the start of every constructor,
+    // before the constructor's own body. This compiler has no constructor
+    // chaining (`: this(...)`/`: base(...)` args are parsed and discarded),
+    // so every constructor gets its own copy of these synthetic assignments
+    // rather than only the "root" one.
+    let field_initializer_stmts = ty
+        .fields
+        .iter()
+        .filter(|field| !field.is_static)
+        .filter_map(|field| {
+            field.initializer.as_ref().map(|initializer| Stmt::AssignTarget {
+                target: Expr::Field {
+                    target: Box::new(Expr::Var("this".to_string())),
+                    name: field.name.clone(),
+                },
+                expr: initializer.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    // A class with no explicit constructor still needs field initializers
+    // applied (it gets an implicit parameterless constructor in C#); a class
+    // that already declares constructors gets the initializers prepended to
+    // each of those instead (see below). `effective_constructors` is the
+    // same helper `populate_constructor_signatures` uses to register the
+    // call-site-resolvable signature, so the two stay in sync.
+    let constructor_defs = effective_constructors(ty);
+    let constructors = constructor_defs
         .iter()
         .map(|constructor| {
             let owner_generic_params = ty
@@ -36,6 +62,8 @@ pub(super) fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Resul
                 .iter()
                 .map(|param| param.constraints.clone())
                 .collect::<Vec<_>>();
+            let mut body = field_initializer_stmts.clone();
+            body.extend(constructor.body.iter().cloned());
             let function = Function {
                 package_id: ty.package_id.clone(),
                 visibility: constructor.visibility,
@@ -49,7 +77,7 @@ pub(super) fn lower_type(ty: &TypeDef, symbol_id: usize, env: &TypeEnv) -> Resul
                 generic_params: Vec::new(),
                 params: constructor.params.clone(),
                 return_type: TypeSyntax::Void,
-                body: constructor.body.clone(),
+                body,
             };
             lower_function(
                 &function,
@@ -627,7 +655,7 @@ pub(super) fn lower_call_args(
                 };
                 inner
             }
-            _ => lower_typed_expr(arg, env, scopes)?,
+            _ => lower_typed_expr_with_expected(arg, env, scopes, expected)?,
         };
         lowered.push(typed_arg);
     }
@@ -1350,6 +1378,41 @@ pub(super) fn lower_typed_expr_with_expected(
             args,
             fields,
         } => {
+            // C#'s target-typed `new()` (`List<T> Items { get; init; } = new();`,
+            // or inline as a constructor/method argument) parses with this
+            // literal placeholder name; the real type has to be inferred from
+            // the surrounding context, which is exactly what `expected` carries.
+            let resolved_target;
+            let type_name: &String = if type_name == "__target" {
+                let Some(expected_ty) = expected else {
+                    return Err(
+                        "TIR lowering: target-typed 'new()' requires a known target type from context (field initializer, local variable, constructor/method argument, or return type)"
+                            .to_string(),
+                    );
+                };
+                if matches!(expected_ty, IrType::List(_) | IrType::Dictionary(_, _)) {
+                    let ty = expected_ty.clone();
+                    return Ok(typed_expr_with_ownership(
+                        TypedExprKind::NewCollection(ty.clone()),
+                        ty,
+                        Ownership::Owned,
+                    ));
+                }
+                let Some(name) = (match expected_ty {
+                    IrType::Class(name) | IrType::Struct(name) | IrType::Interface(name) => {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                }) else {
+                    return Err(format!(
+                        "TIR lowering: target-typed 'new()' does not support inferring {expected_ty:?} yet"
+                    ));
+                };
+                resolved_target = name;
+                &resolved_target
+            } else {
+                type_name
+            };
             let mut candidates = Vec::new();
             if let Some(sigs) = env.constructors.get(type_name) {
                 candidates = sigs.clone();

@@ -118,21 +118,13 @@ impl LlvmEmitter {
                     let value = self.cast_value(value, &field_ty)?;
                     self.retain_for_store(&target.ty, expr, &value.value);
                     self.move_raw_owned_source_after_store(&target.ty, expr);
-                    if let Some(type_name) = object_type_name(&target.ty) {
-                        if self.object_types.contains_key(type_name) {
-                            let old = self.tmp();
-                            self.body.push_str(&format!(
-                                "  {old} = load ptr, ptr {}\n",
-                                field_ptr.value
-                            ));
-                            self.emit_drop(type_name, &old);
-                        }
-                    } else if is_string_like_type(&target.ty) {
+                    if field_ty == LlType::Ptr {
                         let old = self.tmp();
                         self.body.push_str(&format!(
-                                "  {old} = load ptr, ptr {}\n  call void @glitch_string_release(ptr {old})\n",
-                                field_ptr.value
-                            ));
+                            "  {old} = load ptr, ptr {}\n",
+                            field_ptr.value
+                        ));
+                        self.emit_owned_value_drop(&target.ty, &old);
                     }
                     self.body.push_str(&format!(
                         "  store {} {}, ptr {}\n",
