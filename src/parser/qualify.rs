@@ -29,6 +29,12 @@ pub(crate) fn qualify_colliding_types(program: &mut Program) {
     for ty in &program.types {
         *counts.entry(ty.name.clone()).or_default() += 1;
     }
+    // Every non-colliding type keeps its bare simple name forever (only
+    // colliding ones get renamed below), so this is the final, canonical
+    // set of valid bare names `resolve_name` can normalize an over-qualified
+    // reference down to.
+    let all_names: std::collections::HashSet<String> =
+        program.types.iter().map(|ty| ty.name.clone()).collect();
 
     let mut candidates_by_old_name: HashMap<String, Vec<Candidate>> = HashMap::new();
     for ty in program.types.iter_mut() {
@@ -53,6 +59,7 @@ pub(crate) fn qualify_colliding_types(program: &mut Program) {
 
     let resolver = Resolver {
         candidates: &candidates_by_old_name,
+        all_names: &all_names,
     };
     for ty in program.types.iter_mut() {
         let scope = Scope {
@@ -94,6 +101,7 @@ struct Scope {
 
 struct Resolver<'a> {
     candidates: &'a HashMap<String, Vec<Candidate>>,
+    all_names: &'a std::collections::HashSet<String>,
 }
 
 impl Resolver<'_> {
@@ -146,12 +154,21 @@ impl Resolver<'_> {
     }
 
     /// Resolves one raw type-name string (bare `"Query"`, one-level
-    /// qualified `"List.Query"`, or an unrelated non-colliding name) against
-    /// `scope`, returning the canonical qualified name if it refers to a
-    /// renamed (colliding) type.
+    /// qualified `"List.Query"`, a fully qualified `"Ns.Enclosing.Query"`,
+    /// or an unrelated non-colliding name) against `scope`, returning the
+    /// canonical name it should be rewritten to, if any.
     fn resolve_name(&self, raw: &str, scope: &Scope) -> Option<String> {
         let leaf = raw.rsplit('.').next().unwrap_or(raw);
-        let candidates = self.candidates.get(leaf)?;
+        let Some(candidates) = self.candidates.get(leaf) else {
+            // `leaf` doesn't collide with anything, so its bare name is (and
+            // always will be) its own canonical registered identity. A
+            // reference like `Conduit.Features.Comments.Create.CommentData`
+            // written fully qualified for clarity still needs stripping
+            // down to bare `CommentData` — that's the only key it was ever
+            // registered under.
+            return (raw.contains('.') && raw != leaf && self.all_names.contains(leaf))
+                .then(|| leaf.to_string());
+        };
         if raw.contains('.') {
             let prefix = &raw[..raw.len() - leaf.len() - 1];
             let matching = candidates

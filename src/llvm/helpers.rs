@@ -1,6 +1,18 @@
 ﻿use super::*;
 use super::support::*;
 
+/// Formats an `f64` as an LLVM IR `double` constant. LLVM's decimal float
+/// syntax requires a decimal point (or exponent), but Rust's `f64::to_string`
+/// omits it for whole numbers (`86400000.0` -> `"86400000"`), which LLVM
+/// then parses as an *integer* literal — invalid wherever a `double` operand
+/// is expected. The hex-float form (the value's raw bits as `0x` + 16 hex
+/// digits, exactly what LLVM's own hex-float syntax expects for `double`)
+/// sidesteps decimal formatting entirely and round-trips exactly for any
+/// finite value.
+pub(super) fn format_double_literal(value: f64) -> String {
+    format!("0x{:016X}", value.to_bits())
+}
+
 pub(super) fn llvm_type(ty: &TypeSyntax) -> LlType {
     match ty {
         TypeSyntax::Scalar(ScalarType::Bool) => LlType::I1,

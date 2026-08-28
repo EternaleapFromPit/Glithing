@@ -266,7 +266,7 @@ impl LlvmEmitter {
                 ty: LlType::I64,
             }),
             TypedExprKind::Float(value) => Ok(LlValue {
-                value: value.to_string(),
+                value: format_double_literal(*value),
                 ty: LlType::Double,
             }),
             TypedExprKind::Bool(value) => Ok(LlValue {
@@ -743,11 +743,7 @@ impl LlvmEmitter {
                 let right_expr = right;
                 let left = self.emit_typed_expr(left_expr)?;
                 if matches!(op, BinaryOp::And | BinaryOp::Or) {
-                    let right = self.emit_typed_expr(right_expr)?;
-                    let value = self.emit_logical_value(left.clone(), *op, right.clone());
-                    self.emit_temporary_drop(left_expr, &left);
-                    self.emit_temporary_drop(right_expr, &right);
-                    return value;
+                    return self.emit_short_circuit_logical(left_expr, left, *op, right_expr);
                 }
                 if *op == BinaryOp::Add && is_string_like_type(&expr.ty) {
                     let left = self.cast_value(left, &LlType::Ptr)?;
@@ -1442,6 +1438,51 @@ impl LlvmEmitter {
                 "LLVM TIR backend: unsupported expression in current slice: {expr:?}"
             )),
         }
+    }
+
+    /// `&&`/`||` must short-circuit: the right operand is only evaluated
+    /// when it can actually affect the result. This isn't just a C#
+    /// semantics nicety — eagerly evaluating it regardless (as a plain
+    /// `and`/`or` of two independently-computed values) crashes on exactly
+    /// the guard patterns this operator exists for, e.g.
+    /// `value == null || value.Length == 0` dereferencing a null `value`
+    /// inside `.Length` even though the `||` should have skipped it.
+    fn emit_short_circuit_logical(
+        &mut self,
+        left_expr: &TypedExpr,
+        left: LlValue,
+        op: BinaryOp,
+        right_expr: &TypedExpr,
+    ) -> Result<LlValue, String> {
+        let left_i1 = self.to_i1(left.clone())?;
+        self.emit_temporary_drop(left_expr, &left);
+        let result_ptr = self.tmp();
+        let rhs_label = self.next_label("logical_rhs");
+        let short_circuit_label = self.next_label("logical_short_circuit");
+        let end_label = self.next_label("logical_end");
+        let (true_label, false_label) = if op == BinaryOp::And {
+            (rhs_label.clone(), short_circuit_label.clone())
+        } else {
+            (short_circuit_label.clone(), rhs_label.clone())
+        };
+        self.body.push_str(&format!(
+            "  {result_ptr} = alloca i1\n  br i1 {}, label %{true_label}, label %{false_label}\n{short_circuit_label}:\n  store i1 {}, ptr {result_ptr}\n  br label %{end_label}\n{rhs_label}:\n",
+            left_i1.value, left_i1.value
+        ));
+        let right = self.emit_typed_expr(right_expr)?;
+        let right_i1 = self.to_i1(right.clone())?;
+        self.emit_temporary_drop(right_expr, &right);
+        self.body.push_str(&format!(
+            "  store i1 {}, ptr {result_ptr}\n  br label %{end_label}\n{end_label}:\n",
+            right_i1.value
+        ));
+        let result = self.tmp();
+        self.body
+            .push_str(&format!("  {result} = load i1, ptr {result_ptr}\n"));
+        Ok(LlValue {
+            value: result,
+            ty: LlType::I1,
+        })
     }
 
     pub(in crate::llvm) fn emit_typed_function_call(

@@ -4,7 +4,7 @@ use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicI64, AtomicPtr, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[allow(dead_code)]
 unsafe extern "C" {
@@ -1232,6 +1232,145 @@ pub unsafe extern "C" fn System_String_Substring_Native(
     let start = start.max(0) as usize;
     let start = start.min(bytes.len());
     allocate_glitch_string_from_bytes(&bytes[start..])
+}
+
+/// Days since 1970-01-01 for a proleptic-Gregorian civil (year, month, day).
+/// Howard Hinnant's `days_from_civil` algorithm (public domain); relies on
+/// Rust's truncating `/` for integer division, matching the reference C++.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146097 + doe - 719468
+}
+
+/// Inverse of `days_from_civil`: (year, month, day) from days since 1970-01-01.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// Splits milliseconds-since-Unix-epoch into (year, month, day, hour,
+/// minute, second, millisecond), UTC, proleptic Gregorian.
+fn datetime_parts(unix_millis: i64) -> (i64, i64, i64, i64, i64, i64, i64) {
+    const MILLIS_PER_DAY: i64 = 86_400_000;
+    let days = unix_millis.div_euclid(MILLIS_PER_DAY);
+    let mut millis_of_day = unix_millis.rem_euclid(MILLIS_PER_DAY);
+    let (y, m, d) = civil_from_days(days);
+    let hour = millis_of_day / 3_600_000;
+    millis_of_day -= hour * 3_600_000;
+    let minute = millis_of_day / 60_000;
+    millis_of_day -= minute * 60_000;
+    let second = millis_of_day / 1000;
+    let millis = millis_of_day - second * 1000;
+    (y, m, d, hour, minute, second, millis)
+}
+
+/// Parses a reasonably permissive ISO-8601-ish timestamp:
+/// `YYYY-MM-DD[THH:MM[:SS[.fff]]][Z]`. Not a full ISO-8601 parser (no
+/// timezone offsets other than `Z`/none, both treated as UTC), but covers
+/// what `ToIsoString`/`DateTime.Parse` round-tripping and typical API
+/// payloads need.
+fn parse_iso_datetime(text: &str) -> Option<i64> {
+    let text = text.trim().trim_end_matches('Z');
+    let (date_part, time_part) = match text.split_once('T') {
+        Some((d, t)) => (d, Some(t)),
+        None => (text, None),
+    };
+    let mut date_fields = date_part.split('-');
+    let year: i64 = date_fields.next()?.parse().ok()?;
+    let month: i64 = date_fields.next()?.parse().ok()?;
+    let day: i64 = date_fields.next()?.parse().ok()?;
+    let mut hour = 0i64;
+    let mut minute = 0i64;
+    let mut second = 0i64;
+    let mut millis = 0i64;
+    if let Some(time_part) = time_part {
+        let mut time_fields = time_part.splitn(3, ':');
+        hour = time_fields.next().unwrap_or("0").parse().unwrap_or(0);
+        minute = time_fields.next().unwrap_or("0").parse().unwrap_or(0);
+        if let Some(sec_field) = time_fields.next() {
+            let mut sec_parts = sec_field.splitn(2, '.');
+            second = sec_parts.next().unwrap_or("0").parse().unwrap_or(0);
+            if let Some(frac) = sec_parts.next() {
+                let frac_digits: String = frac.chars().take(3).collect();
+                let frac_digits = format!("{frac_digits:0<3}");
+                millis = frac_digits.parse().unwrap_or(0);
+            }
+        }
+    }
+    let days = days_from_civil(year, month, day);
+    Some(days * 86_400_000 + hour * 3_600_000 + minute * 60_000 + second * 1000 + millis)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_DateTime_UtcNowMillis_Native() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_DateTime_Year_Native(unix_millis: i64) -> i32 {
+    datetime_parts(unix_millis).0 as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_DateTime_Month_Native(unix_millis: i64) -> i32 {
+    datetime_parts(unix_millis).1 as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_DateTime_Day_Native(unix_millis: i64) -> i32 {
+    datetime_parts(unix_millis).2 as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_DateTime_Hour_Native(unix_millis: i64) -> i32 {
+    datetime_parts(unix_millis).3 as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_DateTime_Minute_Native(unix_millis: i64) -> i32 {
+    datetime_parts(unix_millis).4 as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_DateTime_Second_Native(unix_millis: i64) -> i32 {
+    datetime_parts(unix_millis).5 as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_DateTime_Millisecond_Native(unix_millis: i64) -> i32 {
+    datetime_parts(unix_millis).6 as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_DateTime_ToIsoString_Native(unix_millis: i64) -> *mut c_char {
+    let (y, mo, d, h, mi, s, ms) = datetime_parts(unix_millis);
+    let text = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{ms:03}Z");
+    allocate_glitch_string_from_bytes(text.as_bytes())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn System_DateTime_Parse_Native(value: *const c_char) -> i64 {
+    if value.is_null() {
+        return 0;
+    }
+    let text = CStr::from_ptr(value).to_string_lossy();
+    parse_iso_datetime(&text).unwrap_or(0)
 }
 
 #[no_mangle]

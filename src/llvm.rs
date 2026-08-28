@@ -322,6 +322,16 @@ impl LlvmEmitter {
             terminated: false,
             startup: program.startup.clone(),
         };
+        // DI-service registrations (`services.AddScoped<TInterface, TImpl>()`
+        // etc.) are normally recorded as a side effect of emitting the
+        // statement that calls them, but a mediator/endpoint dependency
+        // lookup elsewhere in the program can be emitted earlier in program
+        // order than the DI-setup method that registers it (e.g. a
+        // controller action's body vs. a `ConfigureServices`-style
+        // extension method, compiled in whatever order their enclosing
+        // types happen to appear). Scanning every body up front makes
+        // registration lookups order-independent.
+        emitter.collect_service_registrations(program);
         for ty in &program.types {
             if ty.generic_params.is_empty() {
                 emitter.register_object_type(ty);
@@ -2135,6 +2145,20 @@ impl LlvmEmitter {
             return Ok(LlValue {
                 value: tmp,
                 ty: LlType::Double,
+            });
+        }
+        if value.ty == LlType::Double && target.is_integer() {
+            // Truncating conversion, matching C#'s explicit `(int)someDouble`
+            // / `(long)someDouble` cast semantics (round toward zero).
+            let tmp = self.tmp();
+            self.body.push_str(&format!(
+                "  {tmp} = fptosi double {} to {}\n",
+                value.value,
+                target.as_ir()
+            ));
+            return Ok(LlValue {
+                value: tmp,
+                ty: target.clone(),
             });
         }
         if value.ty == LlType::Ptr && target.is_integer() {

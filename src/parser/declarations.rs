@@ -1,5 +1,17 @@
 use super::*;
 
+/// What a single property accessor (`get`/`set`/`init`) actually contains,
+/// as parsed by `parse_property_accessors`.
+pub(super) enum PropertyAccessorBody {
+    /// `get;` / `set;` / `init;` — no explicit logic, just an auto-property
+    /// accessor.
+    Auto,
+    /// `get { ... }` / `set { ... }` — a real statement block.
+    Block(Vec<Stmt>),
+    /// `get => expr;` / `set => expr;` — a real expression body.
+    Arrow(Expr),
+}
+
 impl Parser {
     pub(super) fn parse_enum_def(
         &mut self,
@@ -382,7 +394,50 @@ impl Parser {
                     body: vec![Stmt::Return(Some(expr))],
                 });
             } else if self.at(&TokenKind::LBrace) {
-                self.parse_auto_property_body()?;
+                let (getter, setter) = self.parse_property_accessors()?;
+                let getter_body = match getter {
+                    Some(PropertyAccessorBody::Block(stmts)) => Some(stmts),
+                    Some(PropertyAccessorBody::Arrow(expr)) => Some(vec![Stmt::Return(Some(expr))]),
+                    Some(PropertyAccessorBody::Auto) | None => None,
+                };
+                if let (Some(body), None) = (getter_body, &setter) {
+                    // Getter-only property with a real body (`{ get { ... } }`
+                    // or `{ get => expr; }`): synthesize a real getter
+                    // method rather than silently discarding the body and
+                    // creating a meaningless backing field. Property reads
+                    // already dispatch to a `get_{name}` method when one
+                    // exists (the same mechanism the `Prop => expr;`
+                    // expression-bodied form below already relies on), so
+                    // this alone makes the property actually compute its
+                    // value. A property with any setter/mixed accessor
+                    // combination still falls through to the pre-existing
+                    // (auto-property) behavior below, unchanged.
+                    methods.push(Function {
+                        package_id: package_id.clone(),
+                        visibility: member_modifiers.visibility.unwrap_or_else(|| {
+                            default_visibility_for_package(package_id.as_ref())
+                        }),
+                        namespace: namespace.clone(),
+                        attributes: member_attributes,
+                        is_async: false,
+                        is_extern: false,
+                        // Matches the pre-existing expression-bodied
+                        // (`Prop => expr;`) property synthesis just above,
+                        // which hardcodes this the same way: the static
+                        // property-read dispatch path calls this getter
+                        // without a receiver regardless of `is_static`, and
+                        // marking it `true` here made call-site argument
+                        // counting expect a receiver that's never passed.
+                        is_static: false,
+                        is_extension: false,
+                        name: property_getter_name(&name),
+                        generic_params: Vec::new(),
+                        params: Vec::new(),
+                        return_type: ty,
+                        body,
+                    });
+                    continue;
+                }
                 let mut initializer = None;
                 if self.match_kind(&TokenKind::Eq) {
                     initializer = Some(self.parse_expr()?);
@@ -520,28 +575,44 @@ impl Parser {
         })
     }
 
-    pub(super) fn parse_auto_property_body(&mut self) -> Result<(), String> {
+    /// Parses the `{ get ...; set ...; }` accessor block of a property
+    /// declaration, returning what each accessor (if present) actually
+    /// contains rather than discarding it. `None` means the accessor is
+    /// absent entirely (e.g. a getter-only property has no setter).
+    pub(super) fn parse_property_accessors(
+        &mut self,
+    ) -> Result<(Option<PropertyAccessorBody>, Option<PropertyAccessorBody>), String> {
         self.expect(TokenKind::LBrace)?;
+        let mut getter = None;
+        let mut setter = None;
         while !self.at(&TokenKind::RBrace) {
             self.parse_modifiers();
-            self.expect_ident()?;
-            if self.match_kind(&TokenKind::Semi) {
+            let accessor_name = self.expect_ident()?;
+            let is_setter = accessor_name == "set" || accessor_name == "init";
+            let body = if self.match_kind(&TokenKind::Semi) {
                 // simple get; or set;
+                PropertyAccessorBody::Auto
             } else if self.match_kind(&TokenKind::LBrace) {
                 // getter/setter body: get { ... }
-                self.parse_block_after_lbrace()?;
+                PropertyAccessorBody::Block(self.parse_block_after_lbrace()?)
             } else if self.match_kind(&TokenKind::Arrow) {
                 // arrow body: get => expr;
-                self.parse_expr()?;
+                let expr = self.parse_expr()?;
                 self.expect(TokenKind::Semi)?;
+                PropertyAccessorBody::Arrow(expr)
             } else {
                 return Err(
                     self.error_here("expected semicolon, arrow, or body for property accessor")
                 );
+            };
+            if is_setter {
+                setter = Some(body);
+            } else {
+                getter = Some(body);
             }
         }
         self.expect(TokenKind::RBrace)?;
-        Ok(())
+        Ok((getter, setter))
     }
 
     pub(super) fn parse_function(

@@ -67,6 +67,19 @@ public struct DbSet<T> {
         return new DbQuery<T> { Rows = items, Predicate = predicate };
     }
 
+    // `DbSet<T>` itself has no navigation-tracking state to apply an
+    // `Include` to (that only exists once a query is materialized into a
+    // `DbQuery<T>`), so these just promote to `AsQueryable()` first, the
+    // same way real EF Core's `DbSet<T>` implements `IQueryable<T>` and
+    // `Include`/`ThenInclude` are extension methods on that interface.
+    public DbQuery<T> Include(object navigation) {
+        return this.AsQueryable().Include(navigation);
+    }
+
+    public DbQuery<T> ThenInclude(object navigation) {
+        return this.AsQueryable().ThenInclude(navigation);
+    }
+
     public int Count {
         get {
             return this.AsQueryable().Count;
@@ -200,10 +213,101 @@ public struct DbQuery<T> {
     }
 
     public DbQuery<T> Where(Func<T, bool> predicate) {
-        return new DbQuery<T> {
-            Rows = this.Rows,
-            Predicate = predicate,
-        };
+        // Composes with AND rather than replacing: real LINQ chains
+        // multiple `.Where(...)` calls (e.g. filtering by tag, then by
+        // author) and expects every predicate to apply, not just the last
+        // one written.
+        if (this.Predicate == null) {
+            return new DbQuery<T> { Rows = this.Rows, Predicate = predicate };
+        }
+        Func<T, bool> previous = this.Predicate;
+        Func<T, bool> combined = (item) => previous(item) && predicate(item);
+        return new DbQuery<T> { Rows = this.Rows, Predicate = combined };
+    }
+
+    // Applies `this.Predicate` eagerly and returns the surviving rows as a
+    // fresh list. `OrderBy`/`OrderByDescending`/`Skip`/`Take` all need this:
+    // sorting and pagination are position-based operations on the *filtered*
+    // sequence, not something that composes into a single lazy predicate the
+    // way `Where` does.
+    List<T> FilteredRows() {
+        var result = new List<T>();
+        var items = this.RowsSnapshot();
+        if (items == null) {
+            return result;
+        }
+        int i = 0;
+        while (i < items.Count) {
+            var item = items[i];
+            if (this.Matches(item)) {
+                result.Add(item);
+            }
+            i = i + 1;
+        }
+        return result;
+    }
+
+    public DbQuery<T> Skip(int count) {
+        var filtered = this.FilteredRows();
+        var result = new List<T>();
+        int i = count;
+        if (i < 0) {
+            i = 0;
+        }
+        while (i < filtered.Count) {
+            result.Add(filtered[i]);
+            i = i + 1;
+        }
+        return new DbQuery<T> { Rows = result };
+    }
+
+    public DbQuery<T> Take(int count) {
+        var filtered = this.FilteredRows();
+        var result = new List<T>();
+        int i = 0;
+        while (i < filtered.Count && i < count) {
+            result.Add(filtered[i]);
+            i = i + 1;
+        }
+        return new DbQuery<T> { Rows = result };
+    }
+
+    // Stable insertion sort over the filtered rows, keyed by a `DateTime`
+    // selector (the shape every real usage in this codebase needs —
+    // `OrderBy(x => x.CreatedAt)` and similar). Comparing `.UnixMillis`
+    // directly avoids needing operator overloading on `DateTime` itself.
+    public DbQuery<T> OrderBy(Func<T, DateTime> keySelector) {
+        var filtered = this.FilteredRows();
+        int i = 1;
+        while (i < filtered.Count) {
+            T item = filtered[i];
+            long key = keySelector(item).UnixMillis;
+            int j = i - 1;
+            while (j >= 0 && keySelector(filtered[j]).UnixMillis > key) {
+                filtered[j + 1] = filtered[j];
+                j = j - 1;
+            }
+            filtered[j + 1] = item;
+            i = i + 1;
+        }
+        return new DbQuery<T> { Rows = filtered };
+    }
+
+    public DbQuery<T> OrderByDescending(Func<T, DateTime> keySelector) {
+        var filtered = this.FilteredRows();
+        int i = 1;
+        while (i < filtered.Count) {
+            T item = filtered[i];
+            long key = keySelector(item).UnixMillis;
+            int j = i - 1;
+            while (j >= 0 && keySelector(filtered[j]).UnixMillis < key) {
+                filtered[j + 1] = filtered[j];
+                j = j - 1;
+            }
+            filtered[j + 1] = item;
+            i = i + 1;
+        }
+        return new DbQuery<T> { Rows = filtered };
     }
 
     public int Count {

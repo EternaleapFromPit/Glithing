@@ -777,6 +777,9 @@ impl LlvmEmitter {
                 ));
                 Ok((rendered, true))
             }
+            IrType::Class(name) | IrType::Struct(name) if base_type_name(name) == "DateTime" => {
+                self.emit_json_serialize_datetime(name, value)
+            }
             IrType::Class(name) | IrType::Struct(name) => {
                 let null_label = self.next_label("json_nested_null");
                 let value_label = self.next_label("json_nested_value");
@@ -818,6 +821,18 @@ impl LlvmEmitter {
         list: &str,
         is_array: bool,
     ) -> Result<(String, bool), String> {
+        // A `List<T>`/array-typed field can legitimately be null (never
+        // initialized, e.g. an object materialized outside the normal
+        // constructor path) — guard the same way the `Class`/`Struct` case
+        // above does, rather than unconditionally dereferencing it below.
+        let null_label = self.next_label("json_list_null");
+        let value_label = self.next_label("json_list_value");
+        let outer_end_label = self.next_label("json_list_outer_end");
+        let outer_result_ptr = self.tmp();
+        let list_is_null = self.tmp();
+        self.body.push_str(&format!(
+            "  {outer_result_ptr} = alloca ptr\n  {list_is_null} = icmp eq ptr {list}, null\n  br i1 {list_is_null}, label %{null_label}, label %{value_label}\n{value_label}:\n"
+        ));
         let element_type = llvm_ir_type(element);
         let struct_name = if is_array { "%glitch.array" } else { "%glitch.list" };
         let len_ptr = self.tmp();
@@ -875,6 +890,69 @@ impl LlvmEmitter {
         self.body.push_str(&format!(
             "  {acc} = load ptr, ptr {acc_ptr}\n  {result} = call ptr @glitch_string_concat(ptr {acc}, ptr {close})\n  call void @glitch_string_release(ptr {acc})\n"
         ));
+        self.body.push_str(&format!(
+            "  store ptr {result}, ptr {outer_result_ptr}\n  br label %{outer_end_label}\n{null_label}:\n"
+        ));
+        let null_text = self.string_global("null");
+        self.body.push_str(&format!(
+            "  store ptr {null_text}, ptr {outer_result_ptr}\n  br label %{outer_end_label}\n{outer_end_label}:\n"
+        ));
+        let final_result = self.tmp();
+        self.body.push_str(&format!(
+            "  {final_result} = load ptr, ptr {outer_result_ptr}\n"
+        ));
+        Ok((final_result, true))
+    }
+
+    /// `DateTime` serializes as its ISO-8601 string (matching real
+    /// `System.Text.Json`), not as a nested object exposing its internal
+    /// `UnixMillis` representation the way an ordinary class/struct field
+    /// would.
+    fn emit_json_serialize_datetime(
+        &mut self,
+        type_name: &str,
+        value: &str,
+    ) -> Result<(String, bool), String> {
+        let object = self.object_layout(type_name).cloned().ok_or_else(|| {
+            format!("LLVM TIR backend: result type '{type_name}' has no object layout")
+        })?;
+        let field = object.fields.get("UnixMillis").cloned().ok_or_else(|| {
+            format!(
+                "LLVM TIR backend: '{type_name}' has no 'UnixMillis' field to serialize as a DateTime"
+            )
+        })?;
+        let llvm_name = llvm_object_name(&object.name);
+        let null_label = self.next_label("json_datetime_null");
+        let value_label = self.next_label("json_datetime_value");
+        let end_label = self.next_label("json_datetime_end");
+        let result_ptr = self.tmp();
+        let is_null = self.tmp();
+        self.body.push_str(&format!(
+            "  {result_ptr} = alloca ptr\n  {is_null} = icmp eq ptr {value}, null\n  br i1 {is_null}, label %{null_label}, label %{value_label}\n{value_label}:\n"
+        ));
+        let field_ptr = self.tmp();
+        let millis = self.tmp();
+        self.body.push_str(&format!(
+            "  {field_ptr} = getelementptr inbounds %{llvm_name}, ptr {value}, i32 0, i32 {}\n  {millis} = load i64, ptr {field_ptr}\n",
+            field.index
+        ));
+        let iso = self.tmp();
+        let quote = self.string_global("\"");
+        let quoted = self.tmp();
+        let complete = self.tmp();
+        self.body.push_str(&format!(
+            "  {iso} = call ptr @System_DateTime_ToIsoString_Native(i64 {millis})\n  {quoted} = call ptr @glitch_string_concat(ptr {quote}, ptr {iso})\n  {complete} = call ptr @glitch_string_concat(ptr {quoted}, ptr {quote})\n  call void @glitch_string_release(ptr {quoted})\n  call void @glitch_string_release(ptr {iso})\n"
+        ));
+        self.body.push_str(&format!(
+            "  store ptr {complete}, ptr {result_ptr}\n  br label %{end_label}\n{null_label}:\n"
+        ));
+        let null_text = self.string_global("null");
+        self.body.push_str(&format!(
+            "  store ptr {null_text}, ptr {result_ptr}\n  br label %{end_label}\n{end_label}:\n"
+        ));
+        let result = self.tmp();
+        self.body
+            .push_str(&format!("  {result} = load ptr, ptr {result_ptr}\n"));
         Ok((result, true))
     }
 
@@ -981,7 +1059,9 @@ impl LlvmEmitter {
             IrType::Class(name) | IrType::Struct(name) => {
                 self.object_layout(name).map(|object| object.name.clone())
             }
-            IrType::Interface(name) => self.resolve_interface_implementation(name),
+            IrType::Interface(name) => self
+                .resolve_registered_service_implementation(name)
+                .or_else(|| self.resolve_interface_implementation(name)),
             _ => None,
         }
     }
@@ -1135,7 +1215,18 @@ impl LlvmEmitter {
                 &format!("{prefix}_dependency_{index}"),
                 visiting,
             )?;
-            dependencies.push((dependency_name, dependency_value));
+            // `dependency_name` may be an unresolved/bare name (e.g. from an
+            // explicit DI registration, which records just the raw type
+            // name) rather than the object's actual registered name; the
+            // drop call below must use the real name `destroy_symbol`/
+            // `drop_symbol` were defined under, the same lookup
+            // `emit_endpoint_object_allocation_inner` already did internally
+            // to allocate it.
+            let resolved_dependency_name = self
+                .object_layout(&dependency_name)
+                .map(|object| object.name.clone())
+                .unwrap_or(dependency_name);
+            dependencies.push((resolved_dependency_name, dependency_value));
         }
         if let Some(constructor) = &object.constructor {
             let mut args = vec![format!("ptr {value}")];
@@ -1423,7 +1514,7 @@ impl LlvmEmitter {
         let end_label = self.next_label("mediator_dispatch_end");
         let no_match_label = self.next_label("mediator_dispatch_nomatch");
 
-        for (index, (_request_name, request_object_name, _handler_response_ty, _base, handler)) in candidates.iter().enumerate() {
+        for (index, (_request_name, request_object_name, handler_response_ty, _base, handler)) in candidates.iter().enumerate() {
             let drop_name = drop_symbol(request_object_name);
             let compare = self.tmp();
             let match_label = self.next_label(&format!("mediator_dispatch_match_{index}"));
@@ -1435,11 +1526,23 @@ impl LlvmEmitter {
             self.body.push_str(&format!(
                 "  {compare} = icmp eq ptr {request_drop}, @{drop_name}\n  br i1 {compare}, label %{match_label}, label %{next_label}\n{match_label}:\n"
             ));
+            // Each candidate is dispatched with its *own* handler's response
+            // type, not the type inferred for the first (sorted) candidate:
+            // a wildcard/polymorphic `Send` can legitimately reach handlers
+            // whose responses differ from each other (e.g. a generic
+            // pipeline behavior wrapping every request), and forcing them
+            // all to share one type breaks every candidate after the first
+            // whose response type doesn't happen to match it.
+            let per_candidate_response_ty = if response_is_wildcard {
+                handler_response_ty
+            } else {
+                &result_response_ty
+            };
             let dispatched = self.emit_mediator_handler_invocation(
                 handler,
                 provider,
                 request_value,
-                &result_response_ty,
+                per_candidate_response_ty,
             )?;
             self.body.push_str(&format!(
                 "  store ptr {}, ptr {result_slot}\n  br label %{end_label}\n",

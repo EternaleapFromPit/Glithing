@@ -154,6 +154,203 @@ impl LlvmEmitter {
         );
     }
 
+    /// Scans every function/method/constructor body in the program for
+    /// `services.AddScoped<TInterface, TImpl>()` / `AddTransient<...>()`
+    /// calls and records them via `record_service_registration`, without
+    /// emitting any LLVM IR. Called once up front (see `emit_typed_program`)
+    /// so registration lookups (`resolve_registered_service_implementation`)
+    /// don't depend on whether the DI-setup method happens to be compiled
+    /// before or after the code that looks a registration up.
+    pub(in crate::llvm) fn collect_service_registrations(&mut self, program: &TypedProgram) {
+        for ty in &program.types {
+            for constructor in &ty.constructors {
+                self.collect_service_registrations_stmts(&constructor.body);
+            }
+            for method in &ty.methods {
+                self.collect_service_registrations_stmts(&method.body);
+            }
+        }
+        for function in &program.functions {
+            self.collect_service_registrations_stmts(&function.body);
+        }
+    }
+
+    fn collect_service_registrations_stmts(&mut self, stmts: &[TypedStmt]) {
+        for stmt in stmts {
+            self.collect_service_registrations_stmt(stmt);
+        }
+    }
+
+    fn collect_service_registrations_stmt(&mut self, stmt: &TypedStmt) {
+        match &stmt.kind {
+            TypedStmtKind::Let { expr, .. }
+            | TypedStmtKind::Assign { expr, .. }
+            | TypedStmtKind::Print(expr)
+            | TypedStmtKind::Expr(expr)
+            | TypedStmtKind::Throw(expr) => self.collect_service_registrations_expr(expr),
+            TypedStmtKind::AssignTarget { target, expr } => {
+                self.collect_service_registrations_expr(target);
+                self.collect_service_registrations_expr(expr);
+            }
+            TypedStmtKind::Block(body) => self.collect_service_registrations_stmts(body),
+            TypedStmtKind::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                self.collect_service_registrations_expr(condition);
+                self.collect_service_registrations_stmts(then_body);
+                self.collect_service_registrations_stmts(else_body);
+            }
+            TypedStmtKind::Try {
+                try_body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
+                self.collect_service_registrations_stmts(try_body);
+                self.collect_service_registrations_stmts(catch_body);
+                self.collect_service_registrations_stmts(finally_body);
+            }
+            TypedStmtKind::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                self.collect_service_registrations_expr(expr);
+                for case in cases {
+                    self.collect_service_registrations_expr(&case.value);
+                    self.collect_service_registrations_stmts(&case.body);
+                }
+                self.collect_service_registrations_stmts(default);
+            }
+            TypedStmtKind::While { condition, body } => {
+                self.collect_service_registrations_expr(condition);
+                self.collect_service_registrations_stmts(body);
+            }
+            TypedStmtKind::For {
+                init,
+                condition,
+                increment,
+                body,
+            } => {
+                if let Some(init) = init {
+                    self.collect_service_registrations_stmt(init);
+                }
+                if let Some(condition) = condition {
+                    self.collect_service_registrations_expr(condition);
+                }
+                if let Some(increment) = increment {
+                    self.collect_service_registrations_stmt(increment);
+                }
+                self.collect_service_registrations_stmts(body);
+            }
+            TypedStmtKind::ForEach {
+                collection, body, ..
+            } => {
+                self.collect_service_registrations_expr(collection);
+                self.collect_service_registrations_stmts(body);
+            }
+            TypedStmtKind::Return(Some(expr)) => self.collect_service_registrations_expr(expr),
+            TypedStmtKind::Return(None) | TypedStmtKind::Break | TypedStmtKind::Continue => {}
+        }
+    }
+
+    fn collect_service_registrations_expr(&mut self, expr: &TypedExpr) {
+        match &expr.kind {
+            TypedExprKind::Call(call) => {
+                for arg in &call.args {
+                    self.collect_service_registrations_expr(arg);
+                }
+                if let TypedCallKind::Method {
+                    target,
+                    name,
+                    resolution: CallResolution::InstanceMethod,
+                    ..
+                } = &call.kind
+                {
+                    self.collect_service_registrations_expr(target);
+                    if is_service_collection_type(&target.ty)
+                        && matches!(name.as_str(), "AddTransient" | "AddScoped")
+                        && call.generic_args.len() >= 2
+                    {
+                        self.record_service_registration(&call.generic_args[0], &call.generic_args[1]);
+                    }
+                } else if let TypedCallKind::Method { target, .. } = &call.kind {
+                    self.collect_service_registrations_expr(target);
+                }
+            }
+            TypedExprKind::NullableSome(inner)
+            | TypedExprKind::Throw(inner)
+            | TypedExprKind::Await(inner)
+            | TypedExprKind::Unary { expr: inner, .. }
+            | TypedExprKind::IncDec { target: inner, .. } => {
+                self.collect_service_registrations_expr(inner);
+            }
+            TypedExprKind::ArrayLiteral(values) => {
+                for value in values {
+                    self.collect_service_registrations_expr(value);
+                }
+            }
+            TypedExprKind::NewArray {
+                length, values, ..
+            } => {
+                if let Some(length) = length {
+                    self.collect_service_registrations_expr(length);
+                }
+                for value in values {
+                    self.collect_service_registrations_expr(value);
+                }
+            }
+            TypedExprKind::Index { target, index } => {
+                self.collect_service_registrations_expr(target);
+                self.collect_service_registrations_expr(index);
+            }
+            TypedExprKind::Field { target, .. } => self.collect_service_registrations_expr(target),
+            TypedExprKind::IsPattern { expr, .. } => self.collect_service_registrations_expr(expr),
+            TypedExprKind::Assign { target, value } => {
+                self.collect_service_registrations_expr(target);
+                self.collect_service_registrations_expr(value);
+            }
+            TypedExprKind::NewObject { args, fields, .. } => {
+                for arg in args {
+                    self.collect_service_registrations_expr(arg);
+                }
+                for field in fields {
+                    self.collect_service_registrations_expr(&field.expr);
+                }
+            }
+            TypedExprKind::Lambda { body, .. } => match body {
+                TypedLambdaBody::Expr(inner) => self.collect_service_registrations_expr(inner),
+                TypedLambdaBody::Block(stmts) => self.collect_service_registrations_stmts(stmts),
+            },
+            TypedExprKind::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => {
+                self.collect_service_registrations_expr(condition);
+                self.collect_service_registrations_expr(when_true);
+                self.collect_service_registrations_expr(when_false);
+            }
+            TypedExprKind::Binary { left, right, .. } => {
+                self.collect_service_registrations_expr(left);
+                self.collect_service_registrations_expr(right);
+            }
+            TypedExprKind::Int(_)
+            | TypedExprKind::Float(_)
+            | TypedExprKind::Bool(_)
+            | TypedExprKind::Null
+            | TypedExprKind::String(_)
+            | TypedExprKind::Var(_)
+            | TypedExprKind::FunctionSymbol(_)
+            | TypedExprKind::Move(_)
+            | TypedExprKind::NewCollection(_)
+            | TypedExprKind::NewThread(_)
+            | TypedExprKind::Borrow { .. } => {}
+        }
+    }
+
     pub(in crate::llvm) fn expr_tracking_key(&self, expr: &TypedExpr) -> Option<String> {
         match &expr.kind {
             TypedExprKind::Var(name) => Some(name.clone()),

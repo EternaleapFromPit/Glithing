@@ -981,9 +981,6 @@ impl Parser {
         if is_type_path(&parts, &["string"]) || is_type_path(&parts, &["String"]) {
             return Ok(Some(TypeSyntax::String));
         }
-        if is_type_path(&parts, &["DateTime"]) || is_type_path(&parts, &["System", "DateTime"]) {
-            return Ok(Some(TypeSyntax::String));
-        }
         if is_type_path(&parts, &["Guid"]) || is_type_path(&parts, &["System", "Guid"]) {
             return Ok(Some(TypeSyntax::String));
         }

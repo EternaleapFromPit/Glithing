@@ -96,6 +96,16 @@ extern string[] System_String_Split_Native(string value, string separator);
 extern bool System_String_Contains_Native(string value, string needle);
 extern string System_String_TrimStart_Native(string value, string chars);
 extern T[] System_Array_Empty_Native<T>();
+extern long System_DateTime_UtcNowMillis_Native();
+extern int System_DateTime_Year_Native(long unixMillis);
+extern int System_DateTime_Month_Native(long unixMillis);
+extern int System_DateTime_Day_Native(long unixMillis);
+extern int System_DateTime_Hour_Native(long unixMillis);
+extern int System_DateTime_Minute_Native(long unixMillis);
+extern int System_DateTime_Second_Native(long unixMillis);
+extern int System_DateTime_Millisecond_Native(long unixMillis);
+extern string System_DateTime_ToIsoString_Native(long unixMillis);
+extern long System_DateTime_Parse_Native(string value);
 
 public class object {
     static bool Equals(object left, object right) {
@@ -147,34 +157,235 @@ public class FormatException : Exception {
 }
 
 public class DateTime {
-    public double TotalMinutes;
+    // Milliseconds since the Unix epoch (1970-01-01T00:00:00Z), UTC. This is
+    // the entire real state; every other member is derived from it via the
+    // native calendar-math helpers declared above.
+    public long UnixMillis;
+
+    public DateTime() {
+        this.UnixMillis = 0;
+    }
+
+    public DateTime(long unixMillis) {
+        this.UnixMillis = unixMillis;
+    }
+
     static DateTime UtcNow {
         get {
-            return new DateTime();
+            return new DateTime(System_DateTime_UtcNowMillis_Native());
         }
     }
-    
+
+    static DateTime Now {
+        get {
+            return DateTime.UtcNow;
+        }
+    }
+
+    static DateTime MinValue {
+        get {
+            // 0001-01-01T00:00:00Z.
+            return new DateTime(-62135596800000);
+        }
+    }
+
+    static DateTime MaxValue {
+        get {
+            // 9999-12-31T23:59:59.999Z.
+            return new DateTime(253402300799999);
+        }
+    }
+
+    static DateTime UnixEpoch {
+        get {
+            return new DateTime(0);
+        }
+    }
+
     static DateTime Parse(string s) {
-        return new DateTime();
+        return new DateTime(System_DateTime_Parse_Native(s));
+    }
+
+    static bool TryParse(string s, out DateTime result) {
+        if (string.IsNullOrWhiteSpace(s)) {
+            result = new DateTime();
+            return false;
+        }
+        result = new DateTime(System_DateTime_Parse_Native(s));
+        return true;
+    }
+
+    public int Year {
+        get { return System_DateTime_Year_Native(this.UnixMillis); }
+    }
+
+    public int Month {
+        get { return System_DateTime_Month_Native(this.UnixMillis); }
+    }
+
+    public int Day {
+        get { return System_DateTime_Day_Native(this.UnixMillis); }
+    }
+
+    public int Hour {
+        get { return System_DateTime_Hour_Native(this.UnixMillis); }
+    }
+
+    public int Minute {
+        get { return System_DateTime_Minute_Native(this.UnixMillis); }
+    }
+
+    public int Second {
+        get { return System_DateTime_Second_Native(this.UnixMillis); }
+    }
+
+    public int Millisecond {
+        get { return System_DateTime_Millisecond_Native(this.UnixMillis); }
+    }
+
+    public DateTime Date {
+        get {
+            long dayMillis = this.UnixMillis - (this.UnixMillis % 86400000);
+            if (this.UnixMillis < 0 && this.UnixMillis % 86400000 != 0) {
+                dayMillis = dayMillis - 86400000;
+            }
+            return new DateTime(dayMillis);
+        }
+    }
+
+    public DateTime Add(TimeSpan value) {
+        return new DateTime(this.UnixMillis + value.TotalMillisecondsLong());
+    }
+
+    public DateTime AddDays(double days) {
+        return new DateTime(this.UnixMillis + (long)(days * 86400000.0));
+    }
+
+    public DateTime AddHours(double hours) {
+        return new DateTime(this.UnixMillis + (long)(hours * 3600000.0));
+    }
+
+    public DateTime AddMinutes(double minutes) {
+        return new DateTime(this.UnixMillis + (long)(minutes * 60000.0));
+    }
+
+    public DateTime AddSeconds(double seconds) {
+        return new DateTime(this.UnixMillis + (long)(seconds * 1000.0));
+    }
+
+    public DateTime AddMilliseconds(double milliseconds) {
+        return new DateTime(this.UnixMillis + (long)milliseconds);
+    }
+
+    public TimeSpan Subtract(DateTime other) {
+        return TimeSpan.FromMilliseconds((double)(this.UnixMillis - other.UnixMillis));
+    }
+
+    public int CompareTo(DateTime other) {
+        if (this.UnixMillis < other.UnixMillis) {
+            return -1;
+        }
+        if (this.UnixMillis > other.UnixMillis) {
+            return 1;
+        }
+        return 0;
+    }
+
+    public bool Equals(DateTime other) {
+        return this.UnixMillis == other.UnixMillis;
+    }
+
+    public string ToString() {
+        return System_DateTime_ToIsoString_Native(this.UnixMillis);
     }
 }
 
 public class DateTimeOffset {
-    public DateTimeOffset(DateTime value) {}
-    long ToUnixTimeSeconds() { return 0; }
+    public DateTime Value;
+
+    public DateTimeOffset(DateTime value) {
+        this.Value = value;
+    }
+
+    long ToUnixTimeSeconds() {
+        return this.Value.UnixMillis / 1000;
+    }
+
+    long ToUnixTimeMilliseconds() {
+        return this.Value.UnixMillis;
+    }
 }
 
 public class TimeSpan {
+    // The entire real state, matching the pre-existing field name (kept for
+    // source compatibility with any code that already reads it directly);
+    // everything else is derived from it.
     public double TotalMinutes;
+
+    public TimeSpan() {
+        this.TotalMinutes = 0;
+    }
+
+    public TimeSpan(int h, int m, int s, int ms) {
+        this.TotalMinutes =
+            (double)h * 60.0 + (double)m + (double)s / 60.0 + (double)ms / 60000.0;
+    }
+
+    long TotalMillisecondsLong() {
+        return (long)(this.TotalMinutes * 60000.0);
+    }
+
     static TimeSpan Zero {
         get {
-            return new TimeSpan(0, 0, 0, 0);
+            return new TimeSpan();
         }
     }
-    static TimeSpan FromMinutes(double minutes) {
-        return new TimeSpan(0, 0, 0, 0);
+
+    static TimeSpan FromDays(double days) {
+        var span = new TimeSpan();
+        span.TotalMinutes = days * 1440.0;
+        return span;
     }
-    public TimeSpan(int h, int m, int s, int ms) {}
+
+    static TimeSpan FromHours(double hours) {
+        var span = new TimeSpan();
+        span.TotalMinutes = hours * 60.0;
+        return span;
+    }
+
+    static TimeSpan FromMinutes(double minutes) {
+        var span = new TimeSpan();
+        span.TotalMinutes = minutes;
+        return span;
+    }
+
+    static TimeSpan FromSeconds(double seconds) {
+        var span = new TimeSpan();
+        span.TotalMinutes = seconds / 60.0;
+        return span;
+    }
+
+    static TimeSpan FromMilliseconds(double milliseconds) {
+        var span = new TimeSpan();
+        span.TotalMinutes = milliseconds / 60000.0;
+        return span;
+    }
+
+    public double TotalDays {
+        get { return this.TotalMinutes / 1440.0; }
+    }
+
+    public double TotalHours {
+        get { return this.TotalMinutes / 60.0; }
+    }
+
+    public double TotalSeconds {
+        get { return this.TotalMinutes * 60.0; }
+    }
+
+    public double TotalMilliseconds {
+        get { return this.TotalMinutes * 60000.0; }
+    }
 }
 
 public class Enum {
