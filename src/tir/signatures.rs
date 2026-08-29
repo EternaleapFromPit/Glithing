@@ -15,6 +15,128 @@ pub(super) fn populate_function_signatures(program: &Program, env: &mut TypeEnv)
     }
 }
 
+/// Whether a declared return-type syntax is `IQueryable<T>` (or its fully
+/// qualified form) — the one case this compiler's type system has no way to
+/// resolve to anything concrete (no interface has ever been declared for
+/// it anywhere in the package tree), so a function/method declaring it
+/// always gets `Unknown` in its signature no matter what its body actually
+/// computes.
+fn is_iqueryable_return_syntax(ty: &TypeSyntax) -> bool {
+    matches!(
+        ty,
+        TypeSyntax::GenericNamed { name, args }
+            if (name == "IQueryable" || name == "System.Linq.IQueryable") && args.len() == 1
+    )
+}
+
+/// `IQueryable<T>` can never resolve to a real `IrType` (see
+/// `is_iqueryable_return_syntax`), so a function/method that returns one
+/// always gets `Unknown` in its signature, permanently erasing whatever
+/// concrete type its body actually returns (e.g. a real `DbQuery<T>` LINQ
+/// query object) for every caller — regardless of whether the underlying
+/// methods it calls resolve correctly. This scans for the narrow, safe
+/// case — a single `return expr;` body — and infers the real return type
+/// from `expr` instead, leaving anything else (multiple returns, other
+/// `Unknown` return types, etc.) untouched.
+pub(super) fn infer_iqueryable_return_types(program: &Program, env: &mut TypeEnv) {
+    struct Inference {
+        owner_key: Option<String>,
+        name: String,
+        params: Vec<IrType>,
+        return_type: IrType,
+        return_ownership: Ownership,
+    }
+    let mut inferred = Vec::new();
+
+    let mut try_infer = |return_type_syntax: &TypeSyntax,
+                          params_syntax: &[Param],
+                          body: &[Stmt],
+                          owner_key: Option<String>,
+                          name: &str| {
+        if !is_iqueryable_return_syntax(return_type_syntax) {
+            return;
+        }
+        let [Stmt::Return(Some(expr))] = body else {
+            return;
+        };
+        let mut scope = HashMap::new();
+        for param in params_syntax {
+            let ty = type_syntax_to_ir(&param.ty, env);
+            scope.insert(
+                param.name.clone(),
+                TypedBinding {
+                    name: param.name.clone(),
+                    ownership: ownership_for_declared_type_syntax(&param.ty, env),
+                    ty,
+                },
+            );
+        }
+        let scopes = [scope];
+        let Ok(typed_expr) = lower_typed_expr(expr, env, &scopes) else {
+            return;
+        };
+        if matches!(typed_expr.ty, IrType::Unknown(_)) {
+            return;
+        }
+        let params = params_syntax
+            .iter()
+            .map(|param| type_syntax_to_ir(&param.ty, env))
+            .collect::<Vec<_>>();
+        inferred.push(Inference {
+            owner_key,
+            name: name.to_string(),
+            params,
+            return_type: typed_expr.ty,
+            return_ownership: typed_expr.ownership,
+        });
+    };
+
+    for function in &program.functions {
+        try_infer(
+            &function.return_type,
+            &function.params,
+            &function.body,
+            None,
+            &function.name,
+        );
+    }
+    for ty in &program.types {
+        for method in &ty.methods {
+            let owner_key = if method.is_extension || ty.is_extension {
+                extension_receiver_type_key(method, ty, env)
+            } else {
+                ty.name.clone()
+            };
+            try_infer(
+                &method.return_type,
+                &method.params,
+                &method.body,
+                Some(owner_key),
+                &method.name,
+            );
+        }
+    }
+
+    for entry in inferred {
+        let signatures = match &entry.owner_key {
+            None => env.functions.get_mut(&entry.name),
+            Some(owner) => env
+                .methods
+                .get_mut(&(owner.clone(), entry.name.clone()))
+                .or_else(|| env.extension_methods.get_mut(&(owner.clone(), entry.name.clone()))),
+        };
+        let Some(signatures) = signatures else {
+            continue;
+        };
+        for signature in signatures.iter_mut() {
+            if signature.params == entry.params {
+                signature.return_type = entry.return_type.clone();
+                signature.return_ownership = entry.return_ownership.clone();
+            }
+        }
+    }
+}
+
 pub(super) fn populate_delegate_signatures(program: &Program, env: &mut TypeEnv) {
     for delegate in &program.delegates {
         let signature = DelegateSignature {

@@ -1223,14 +1223,27 @@ pub(super) fn lower_typed_expr_with_expected(
             } else {
                 explicit_generic_args.clone()
             };
+            // Use `ty` (from `resolve_method_call` above) as the substitution
+            // base, not `signature.return_type`: `resolved_signature` here is
+            // looked up by symbol match against `candidates`, which are the
+            // *raw*, unspecialized signatures (see the `env.methods.get(...)`
+            // lookups above) — their `return_type` still carries the owning
+            // class's own bare generic-parameter placeholder (e.g. `DbQuery<T>`
+            // for `DbQuery<T>.Include()`), because `substitute_function_signature`
+            // preserves `symbol` unchanged across specialization, so matching by
+            // symbol always lands on some unspecialized candidate regardless of
+            // which one actually produced this call. `ty`, by contrast, is
+            // already correctly specialized via `generic_owner_subst` inside
+            // `resolve_method_call`. `generic_params`/`generic_args` here are
+            // for the *method's own* generics (e.g. `Foo<U>()`), which are
+            // orthogonal to the owning class's generics — substituting them
+            // into the already-class-specialized `ty` is a no-op when the
+            // method has no generics of its own, and layers correctly on top
+            // of it when it does.
             let ty = resolved_signature
                 .as_ref()
                 .map(|signature| {
-                    substitute_generic_args_in_ir_type(
-                        &signature.return_type,
-                        &signature.generic_params,
-                        &generic_args,
-                    )
+                    substitute_generic_args_in_ir_type(&ty, &signature.generic_params, &generic_args)
                 })
                 .unwrap_or(ty);
             let ownership = ownership_for_type(&ty);

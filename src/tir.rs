@@ -529,6 +529,7 @@ impl TypedProgram {
                     .push((field.name.clone(), field_signature));
             }
         }
+        infer_iqueryable_return_types(program, &mut env);
 
         let types = program
             .types
